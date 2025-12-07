@@ -7,7 +7,7 @@ import torch.optim as optim
 from torch import nn
 
 from dualwcfm.models.cfm import ConditionalFlowMatching
-from dualwcfm.models.trainer import Trainer
+from dualwcfm.trainers.trainer import Trainer
 from dualwcfm.distributions.coupling import CouplingDistribution
 from dualwcfm.distributions.distribution import Distribution
 

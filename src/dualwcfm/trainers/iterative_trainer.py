@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from dualwcfm.distributions import CouplingDistribution, Distribution, LinearInterpolationDistribution, MarginalDistribution
-from dualwcfm.models import DualTrainer, WeightedConditionalFlowMatchingTrainer
+from dualwcfm.trainers import DualTrainer, WeightedConditionalFlowMatchingTrainer
 from dualwcfm.models.cfm import ConditionalFlowMatching
 from dualwcfm.utils import safe_clone
 
@@ -39,7 +39,8 @@ class IterativeTrainer:
         torch_wrapper = None,
         return_cfm: bool = False,
         reinitialize_duals: bool = False,
-        plot_progress: bool = False
+        plot_progress: bool = False,
+        plot_func = None
     ) -> Union[tuple[dict, dict], dict]:
         """Trains dual and weighted CFM models iteratively between the source and target distributions.
 
@@ -114,13 +115,16 @@ class IterativeTrainer:
                 cfms[alpha] = cfm_net
 
             if plot_progress:
-                from dualwcfm.visualization import plot_2d_flow_trajectories
-                plot_2d_flow_trajectories(
-                    trajectories=cfm_new.get_trajectory(n_samples=500, n_timesteps=25),
-                    t=torch.linspace(0, 1, 25),
-                    n_trajectories=500,
-                    title=f"CFM Trajectories at alpha={alpha:.2f}"
-                )
+                if plot_func is None:
+                    from dualwcfm.visualization import plot_2d_flow_trajectories
+                    plot_2d_flow_trajectories(
+                        trajectories=cfm_new.get_trajectory(n_samples=500, n_timesteps=25),
+                        t=torch.linspace(0, 1, 25),
+                        n_trajectories=500,
+                        title=f"CFM Trajectories at alpha={alpha:.2f}"
+                    )
+                else:
+                    plot_func(cfm_new, alpha, self.coupling_dist, self.new_source_dist, self.new_target_dist, device)
 
             print(f"Completed training weighted CFM for alpha={alpha:.2f}")
 

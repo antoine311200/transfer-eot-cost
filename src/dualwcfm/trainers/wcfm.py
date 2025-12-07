@@ -7,7 +7,8 @@ import torch.optim as optim
 from torch import nn
 
 from dualwcfm.models.cfm import ConditionalFlowMatching
-from dualwcfm.models.trainer import Trainer
+from dualwcfm.trainers.trainer import Trainer
+from dualwcfm.utils import pad_t_like_x
 
 class WeightedConditionalFlowMatchingTrainer(Trainer):
     """Conditional flow matching with learned vector field
@@ -36,13 +37,16 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
         self.flow_matching.network.to(self.device)
 
     def step(self, batch_size: int, training: bool) -> float:
-        x0_batch = self.flow_matching.source_dist.sample(batch_size)
-        x1_batch = self.flow_matching.target_dist.sample(batch_size)
+        x0_batch = self.flow_matching.source_dist.sample(batch_size).to(self.device)
+        x1_batch = self.flow_matching.target_dist.sample(batch_size).to(self.device)
 
         t = torch.rand(batch_size, 1, device=self.device)
+        t = pad_t_like_x(t, x0_batch).to(self.device)
         x_t = self.flow_matching.compute_conditional_xt(x0_batch, x1_batch, t)
         true_flow = self.flow_matching.compute_conditional_flow(x0_batch, x1_batch, t)
-        predicted_flow = self.flow_matching.network(torch.cat([x_t, t], dim=1))
+        # predicted_flow = self.flow_matching.network(torch.cat([x_t, t], dim=1))
+        predicted_flow = self.flow_matching.network(t, x_t)
+
 
         if self.mode == "weighted" and self.f_net and self.g_net:
             self.f_net.eval()
@@ -57,7 +61,7 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
 
                 weights = torch.exp(log_w)
                 weights = weights / (weights.mean() + 1e-8)
-                weights = weights.unsqueeze(1)
+                weights = weights.unsqueeze(1).unsqueeze(2)
 
             loss = torch.mean(weights * (predicted_flow - true_flow) ** 2)
         else:
