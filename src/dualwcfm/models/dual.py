@@ -131,3 +131,150 @@ class ImageDualPotential(nn.Module):
         flattened = features.view(features.size(0), -1)
         f = self.regressor(flattened)
         return f, features
+
+
+class ResNetDualPotential(nn.Module):
+    """ResNet-based architecture for higher resolution images"""
+
+    def __init__(self, in_channels=3, base_dim=64, num_blocks=4):
+        super().__init__()
+
+        # Initial convolution
+        self.conv1 = nn.Conv2d(in_channels, base_dim, kernel_size=7, stride=2, padding=3)
+        self.bn1 = nn.BatchNorm2d(base_dim)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        # Residual blocks
+        self.blocks = nn.ModuleList()
+        current_dim = base_dim
+
+        for i in range(num_blocks):
+            block = nn.Sequential(
+                nn.Conv2d(current_dim, current_dim * 2, kernel_size=3, stride=2, padding=1),
+                nn.BatchNorm2d(current_dim * 2),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(current_dim * 2, current_dim * 2, kernel_size=3, stride=1, padding=1),
+                nn.BatchNorm2d(current_dim * 2),
+            )
+            self.blocks.append(block)
+            current_dim *= 2
+
+        # Global average pooling and final linear layer
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(nn.Linear(current_dim, 128), nn.ReLU(inplace=True), nn.Dropout(0.2), nn.Linear(128, 1))
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        for block in self.blocks:
+            identity = x
+            if x.shape[1] != block[-2].weight.shape[0]:  # type: ignore
+                # Projection shortcut if dimensions change
+                identity = nn.functional.avg_pool2d(identity, 2)
+                identity = torch.cat([identity, identity], dim=1)
+            x = block(x) + identity
+            x = self.relu(x)
+
+        x = self.global_pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+
+        return x
+
+
+class EfficientDualPotential(nn.Module):
+    """Optimized architecture for 32x32 images"""
+
+    def __init__(self, in_channels=3, base_channels=16):
+        super().__init__()
+
+        # Feature extractor with residual connections
+        self.conv1 = nn.Conv2d(in_channels, base_channels, 3, padding=1)
+        self.bn1 = nn.BatchNorm2d(base_channels)
+
+        # Downsample blocks with skip connections
+        self.block1 = self._make_block(base_channels, base_channels * 2)
+        self.block2 = self._make_block(base_channels * 2, base_channels * 4)
+        self.block3 = self._make_block(base_channels * 4, base_channels * 8)
+
+        # Global context
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+
+        # Regression head
+        self.fc = nn.Sequential(
+            nn.Linear(base_channels * 8, 64),
+            nn.LayerNorm(64),
+            nn.ELU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(64, 32),
+            nn.LayerNorm(32),
+            nn.ELU(inplace=True),
+            nn.Linear(32, 1),
+        )
+
+        self.elu = nn.ELU(inplace=True)
+
+        # Initialize
+        self._initialize_weights()
+
+    def _make_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, stride=2, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ELU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1),
+            nn.BatchNorm2d(out_channels),
+        )
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        # Initial conv
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.elu(x)
+
+        # Residual blocks
+        identity = x
+        x = self.block1(x)
+        if identity.size(1) != x.size(1):
+            # Projection shortcut
+            identity = nn.functional.avg_pool2d(identity, 2)
+            identity = torch.cat([identity] * (x.size(1) // identity.size(1)), dim=1)
+        x = x + identity
+        x = self.elu(x)
+
+        identity = x
+        x = self.block2(x)
+        if identity.size(1) != x.size(1):
+            identity = nn.functional.avg_pool2d(identity, 2)
+            identity = torch.cat([identity] * (x.size(1) // identity.size(1)), dim=1)
+        x = x + identity
+        x = self.elu(x)
+
+        identity = x
+        x = self.block3(x)
+        if identity.size(1) != x.size(1):
+            identity = nn.functional.avg_pool2d(identity, 2)
+            identity = torch.cat([identity] * (x.size(1) // identity.size(1)), dim=1)
+        x = x + identity
+        x = self.elu(x)
+
+        # Pool and regress
+        x = self.global_pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+
+        return x

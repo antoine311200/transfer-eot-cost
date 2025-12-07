@@ -80,20 +80,16 @@ class DualTrainer(Trainer):
         self.eval_losses = []
 
         self.optimizer = optim.Adam(list(self.f_net.parameters()) + list(self.g_net.parameters()), lr=learning_rate)
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=1000, eta_min=learning_rate * 1e-3)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs, eta_min=learning_rate * 1e-3)
 
         pbar = tqdm(range(epochs), desc="Training")
 
         for epoch in pbar:
-            epoch_losses = []
 
             loss = self.step(batch_size=batch_size, training=True)
 
-            epoch_losses.append(loss)
             self.train_losses.append(loss)
-
-            avg_epoch_loss = sum(epoch_losses) / len(epoch_losses)
-            self.epoch_train_losses.append(avg_epoch_loss)
+            self.epoch_train_losses.append(loss)
 
             if (epoch + 1) % eval_every == 0 or epoch == 0:
                 eval_loss = self.evaluate(batch_size=batch_size)
@@ -102,7 +98,7 @@ class DualTrainer(Trainer):
             if (epoch + 1) % print_every == 0 or epoch == 0:
                 current_lr = self.scheduler.get_last_lr()[0]
                 postfix = {
-                    'train_loss': f"{avg_epoch_loss:.4f}",
+                    'train_loss': f"{loss:.4f}",
                     'lr': f"{current_lr:.2e}"
                 }
 

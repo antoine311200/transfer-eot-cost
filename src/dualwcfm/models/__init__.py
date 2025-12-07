@@ -1,1 +1,1 @@
-from .dual import ImageDualPotential
+from .dual import ImageDualPotential, ResNetDualPotential, EfficientDualPotential

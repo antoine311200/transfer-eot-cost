@@ -1,5 +1,5 @@
 import copy
-from typing import Union
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -18,10 +18,11 @@ class IterativeTrainer:
         target_dist (Distribution): The initial target distribution.
     """
 
-    def __init__(self, source_dist: Distribution, target_dist: Distribution, coupling_dist: CouplingDistribution):
+    def __init__(self, source_dist: Distribution, target_dist: Distribution, coupling_dist: CouplingDistribution, eval_coupling_dist: Optional[CouplingDistribution] = None):
         self.coupling_dist = coupling_dist
         self.source_dist = MarginalDistribution(self.coupling_dist.sample_init)
         self.target_dist = MarginalDistribution(self.coupling_dist.sample_target)
+        self.eval_coupling_dist = eval_coupling_dist if eval_coupling_dist is not None else coupling_dist
         self.new_source_dist = source_dist
         self.new_target_dist = target_dist
 
@@ -36,10 +37,13 @@ class IterativeTrainer:
         epochs: int,
         learning_rate: float,
         sigma: float,
+        lambda_reg: float = 0.1,
         torch_wrapper = None,
         return_cfm: bool = False,
         reinitialize_duals: bool = False,
         plot_progress: bool = False,
+        print_every: int = 100,
+        eval_every: int = 10,
         plot_func = None
     ) -> Union[tuple[dict, dict], dict]:
         """Trains dual and weighted CFM models iteratively between the source and target distributions.
@@ -66,6 +70,8 @@ class IterativeTrainer:
         cfms = {}
 
         for step in range(1, n_iterations):
+            print(f"Starting iteration {step}/{n_iterations - 1} with alpha={step / (n_iterations - 1):.2f}")
+
             alpha = step / (n_iterations - 1)
             mixed_source_dist = LinearInterpolationDistribution(self.source_dist, self.new_source_dist, alpha)
             mixed_target_dist = LinearInterpolationDistribution(self.target_dist, self.new_target_dist, alpha)
@@ -82,9 +88,9 @@ class IterativeTrainer:
                 epochs=epochs,
                 batch_size=batch_size,
                 learning_rate=learning_rate,
-                lambda_reg=0.5,
-                print_every=100,
-                eval_every=50
+                lambda_reg=lambda_reg,
+                print_every=print_every,
+                eval_every=eval_every
             )
 
             print(f"Completed training duals for alpha={alpha:.2f}")
@@ -106,8 +112,8 @@ class IterativeTrainer:
                 epochs=epochs,
                 batch_size=batch_size,
                 learning_rate=learning_rate,
-                print_every=100,
-                eval_every=50
+                print_every=print_every,
+                eval_every=eval_every
             )
 
             if return_cfm:
@@ -124,7 +130,7 @@ class IterativeTrainer:
                         title=f"CFM Trajectories at alpha={alpha:.2f}"
                     )
                 else:
-                    plot_func(cfm_new, alpha, self.coupling_dist, self.new_source_dist, self.new_target_dist, device)
+                    plot_func(cfm_new, alpha, self.coupling_dist, self.eval_coupling_dist, self.new_source_dist, self.new_target_dist, device)
 
             print(f"Completed training weighted CFM for alpha={alpha:.2f}")
 
