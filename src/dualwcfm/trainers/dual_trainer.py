@@ -8,8 +8,8 @@ from torch import nn
 
 from dualwcfm.models.cfm import ConditionalFlowMatching
 from dualwcfm.trainers.trainer import Trainer
-from dualwcfm.distributions.coupling import CouplingDistribution
-from dualwcfm.distributions.distribution import Distribution
+from dualwcfm.distributions.coupling import CouplingDistribution, MarginalDistribution
+from dualwcfm.distributions.distribution import Distribution, DynamicLinearInterpolationDistribution
 
 class DualTrainer(Trainer):
     def __init__(
@@ -19,18 +19,34 @@ class DualTrainer(Trainer):
         target_dist: Distribution,
         f_net: nn.Module,
         g_net: nn.Module,
-        device: torch.device
+        device: torch.device,
+        dynamic: bool = False,
     ):
+        self.dynamic = dynamic
+
         self.coupling_dist = coupling_dist
-        self.source_dist = source_dist
-        self.target_dist = target_dist
+
+        if not dynamic:
+            self.source_dist = source_dist
+            self.target_dist = target_dist
+        else:
+            self.source_dist = DynamicLinearInterpolationDistribution(
+                MarginalDistribution(coupling_dist.sample_init),
+                source_dist,
+                get_alpha_fn=lambda: torch.rand(1).item()
+            )
+            self.target_dist = DynamicLinearInterpolationDistribution(
+                MarginalDistribution(coupling_dist.sample_target),
+                target_dist,
+                get_alpha_fn=lambda: torch.rand(1).item()
+            )
 
         self.device = device
 
         self.f_net = f_net.to(device)
         self.g_net = g_net.to(device)
 
-    def step(self, batch_size: int, training: bool) -> float:
+    def step(self, batch_size: int, training: bool):
         x0_new = self.source_dist.sample(batch_size).to(self.device)
         x1_new = self.target_dist.sample(batch_size).to(self.device)
 
@@ -38,11 +54,35 @@ class DualTrainer(Trainer):
         x0_ref = x0_ref.to(self.device)
         x1_ref = x1_ref.to(self.device)
 
-        f_new = self.f_net(x0_new)
-        g_new = self.g_net(x1_new)
+        if not self.dynamic:
+            f_new = self.f_net(x0_new)
+            g_new = self.g_net(x1_new)
 
-        f_ref = self.f_net(x0_ref)
-        g_ref = self.g_net(x1_ref)
+            f_ref = self.f_net(x0_ref)
+            g_ref = self.g_net(x1_ref)
+        else:
+            # Typing linter workaround (but unnecessary at runtime)
+            if isinstance(self.source_dist, DynamicLinearInterpolationDistribution) and isinstance(self.target_dist, DynamicLinearInterpolationDistribution):
+                f_alpha = torch.tensor(self.source_dist.current_alpha, device=self.device)
+                g_alpha = torch.tensor(self.target_dist.current_alpha, device=self.device)
+                ones = torch.ones(batch_size, 1, device=self.device)
+
+                # Repeat alphas to match batch size
+                f_alpha = f_alpha.repeat(batch_size, 1)
+                g_alpha = g_alpha.repeat(batch_size, 1)
+            else:
+                raise ValueError("For dynamic training, source and target distributions must be DynamicLinearInterpolationDistribution.")
+
+            # f_new = self.f_net(torch.cat([f_alpha, x0_new], dim=1))
+            # g_new = self.g_net(torch.cat([g_alpha, x1_new], dim=1))
+
+            # f_ref = self.f_net(torch.cat([ones, x0_ref], dim=1))
+            # g_ref = self.g_net(torch.cat([ones, x1_ref], dim=1))
+
+            f_new = self.f_net(f_alpha, x0_new)
+            g_new = self.g_net(g_alpha, x1_new)
+            f_ref = self.f_net(ones, x0_ref)
+            g_ref = self.g_net(ones, x1_ref)
 
         loss_marginals = torch.mean(f_new) + torch.mean(g_new)
         loss_coupling = torch.mean(torch.exp(f_ref + g_ref))
@@ -68,7 +108,20 @@ class DualTrainer(Trainer):
         self.g_net.train()
         return loss
 
-    def train(self, epochs: int, batch_size: int, learning_rate: float, print_every: int = 100, eval_every: int = 10, lambda_reg: float = 0.0):
+    def _init_train_tools(self, learning_rate: float, epochs: int):
+        self.optimizer = optim.Adam(list(self.f_net.parameters()) + list(self.g_net.parameters()), lr=learning_rate)
+        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs, eta_min=learning_rate * 1e-3)
+
+
+    def train( # type: ignore
+        self,
+        epochs: int,
+        batch_size: int,
+        learning_rate: float,
+        print_every: int = 100,
+        eval_every: int = 10,
+        lambda_reg: float = 0.0
+    ):
         print(f"Starting training for {epochs} epochs")
         print(f"Batch size: {batch_size}, Print every: {print_every}, Eval every: {eval_every}")
         print("-" * 80)
@@ -79,8 +132,7 @@ class DualTrainer(Trainer):
         self.epoch_train_losses = []
         self.eval_losses = []
 
-        self.optimizer = optim.Adam(list(self.f_net.parameters()) + list(self.g_net.parameters()), lr=learning_rate)
-        self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs, eta_min=learning_rate * 1e-3)
+        self._init_train_tools(learning_rate, epochs)
 
         pbar = tqdm(range(epochs), desc="Training")
 

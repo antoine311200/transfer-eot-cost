@@ -1,2 +1,2 @@
-from .distribution import Distribution, LinearInterpolationDistribution, Simple2DGaussianDistribution
+from .distribution import Distribution, LinearInterpolationDistribution, Simple2DGaussianDistribution, MoonDistribution, RotatedDistribution
 from .coupling import CouplingDistribution, MarginalDistribution, RotatedShapeCoupling

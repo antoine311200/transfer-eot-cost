@@ -12,7 +12,9 @@ class torch_wrapper(torch.nn.Module):
         self.model = model
     def forward(self, t, x, *args, **kwargs):
         t = t.to(x.device)
-        return self.model(torch.cat([x, t.repeat(x.shape[0])[:, None]], 1))
+        if t.dim() < 2:
+            t = t.repeat(x.shape[0])[:, None]
+        return self.model(torch.cat([x, t], dim=1))
 
 class GenerativeModel(ABC):
     @abstractmethod
@@ -39,8 +41,8 @@ class ConditionalFlowMatching(GenerativeModel):
         if wrapper is None:
             wrapper = torch_wrapper
 
-        self.network = network.to(self.device)
-        self.node = NeuralODE(wrapper(self.network), solver="dopri5", sensitivity="adjoint", atol=1e-4, rtol=1e-4)
+        self.network = wrapper(network).to(self.device)
+        self.node = NeuralODE(self.network, solver="dopri5", sensitivity="adjoint", atol=1e-4, rtol=1e-4)
 
     def compute_conditional_flow(self, x0: torch.Tensor, x1: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Compute conditional flow vector field

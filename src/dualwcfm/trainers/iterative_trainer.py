@@ -1,5 +1,6 @@
 import copy
 from typing import Optional, Union
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -18,13 +19,21 @@ class IterativeTrainer:
         target_dist (Distribution): The initial target distribution.
     """
 
-    def __init__(self, source_dist: Distribution, target_dist: Distribution, coupling_dist: CouplingDistribution, eval_coupling_dist: Optional[CouplingDistribution] = None):
+    def __init__(
+        self,
+        source_dist: Distribution,
+        target_dist: Distribution,
+        coupling_dist: CouplingDistribution,
+        eval_coupling_dist: Optional[CouplingDistribution] = None,
+        dynamic: bool = False
+    ):
         self.coupling_dist = coupling_dist
         self.source_dist = MarginalDistribution(self.coupling_dist.sample_init)
         self.target_dist = MarginalDistribution(self.coupling_dist.sample_target)
-        self.eval_coupling_dist = eval_coupling_dist if eval_coupling_dist is not None else coupling_dist
+        self.eval_coupling_dist = eval_coupling_dist if eval_coupling_dist else None
         self.new_source_dist = source_dist
         self.new_target_dist = target_dist
+        self.dynamic = dynamic
 
     def train(
         self,
@@ -34,14 +43,16 @@ class IterativeTrainer:
         flow_network: nn.Module,
         device: torch.device,
         batch_size: int,
+        epochs_dual: int,
         epochs: int,
+        dual_learning_rate: float,
         learning_rate: float,
         sigma: float,
         lambda_reg: float = 0.1,
         torch_wrapper = None,
         return_cfm: bool = False,
         reinitialize_duals: bool = False,
-        plot_progress: bool = False,
+        plot_every: int = 100,
         print_every: int = 100,
         eval_every: int = 10,
         plot_func = None
@@ -63,18 +74,28 @@ class IterativeTrainer:
         Returns:
             dict: A dictionary containing training information for each interpolation step.
         """
-        f_net_clone = safe_clone(f_net)
-        g_net_clone = safe_clone(g_net)
+        if torch_wrapper is None:
+            torch_wrapper = lambda net: net
+
+        f_net_clone = torch_wrapper(safe_clone(f_net))
+        g_net_clone = torch_wrapper(safe_clone(g_net))
+
+        self.flow_network = flow_network
 
         info_dict = {}
         cfms = {}
 
-        for step in range(1, n_iterations):
-            print(f"Starting iteration {step}/{n_iterations - 1} with alpha={step / (n_iterations - 1):.2f}")
+        for step in range(n_iterations):
+            print(f"Starting iteration {step}/{n_iterations}")
 
-            alpha = step / (n_iterations - 1)
-            mixed_source_dist = LinearInterpolationDistribution(self.source_dist, self.new_source_dist, alpha)
-            mixed_target_dist = LinearInterpolationDistribution(self.target_dist, self.new_target_dist, alpha)
+            if not self.dynamic:
+                print(f" with alpha={step / (n_iterations):.2f}")
+                alpha = step / (n_iterations - 1)
+                mixed_source_dist = LinearInterpolationDistribution(self.source_dist, self.new_source_dist, alpha)
+                mixed_target_dist = LinearInterpolationDistribution(self.target_dist, self.new_target_dist, alpha)
+            else:
+                mixed_source_dist = self.new_source_dist
+                mixed_target_dist = self.new_target_dist
 
             dual_trainer = DualTrainer(
                 coupling_dist=self.coupling_dist,
@@ -82,23 +103,27 @@ class IterativeTrainer:
                 target_dist=mixed_target_dist,
                 f_net=f_net_clone if not reinitialize_duals else safe_clone(f_net),
                 g_net=g_net_clone if not reinitialize_duals else safe_clone(g_net),
+                dynamic=self.dynamic,
                 device=device
             )
             dual_info = dual_trainer.train(
-                epochs=epochs,
+                epochs=epochs_dual,
                 batch_size=batch_size,
-                learning_rate=learning_rate,
+                learning_rate=dual_learning_rate,
                 lambda_reg=lambda_reg,
                 print_every=print_every,
                 eval_every=eval_every
             )
 
-            print(f"Completed training duals for alpha={alpha:.2f}")
+            print(
+                f"Completed training duals"
+                f" for alpha={step / (n_iterations - 1):.2f}" if not self.dynamic else ""
+            )
 
             cfm_new = ConditionalFlowMatching(
                 source_dist=mixed_source_dist,
                 target_dist=mixed_target_dist,
-                network=flow_network,
+                network=self.flow_network,
                 wrapper=torch_wrapper,
                 sigma=sigma
             )
@@ -106,38 +131,40 @@ class IterativeTrainer:
                 flow_matching=cfm_new,
                 mode="weighted",
                 f_net=dual_trainer.f_net,
-                g_net=dual_trainer.g_net
+                g_net=dual_trainer.g_net,
+                dynamic=self.dynamic
             )
             weighted_info = weighted_trainer.train(
                 epochs=epochs,
                 batch_size=batch_size,
                 learning_rate=learning_rate,
+                plot_func=partial(plot_func, coupling_dist=self.coupling_dist, eval_coupling_dist=self.eval_coupling_dist, new_source_dist=self.new_source_dist, new_target_dist=self.new_target_dist, device=device) if plot_func is not None else None,
+                plot_every=plot_every,
                 print_every=print_every,
                 eval_every=eval_every
             )
 
-            if return_cfm:
-                cfm_net = safe_clone(cfm_new.network)
-                cfms[alpha] = cfm_net
+            if return_cfm and not self.dynamic:
+                cfm_net = safe_clone(self.flow_network)
+                cfms[step] = cfm_net
 
-            if plot_progress:
-                if plot_func is None:
-                    from dualwcfm.visualization import plot_2d_flow_trajectories
-                    plot_2d_flow_trajectories(
-                        trajectories=cfm_new.get_trajectory(n_samples=500, n_timesteps=25),
-                        t=torch.linspace(0, 1, 25),
-                        n_trajectories=500,
-                        title=f"CFM Trajectories at alpha={alpha:.2f}"
-                    )
-                else:
-                    plot_func(cfm_new, alpha, self.coupling_dist, self.eval_coupling_dist, self.new_source_dist, self.new_target_dist, device)
+            if plot_func is None:
+                from dualwcfm.visualization import plot_2d_flow_trajectories
+                plot_2d_flow_trajectories(
+                    trajectories=cfm_new.get_trajectory(n_samples=500, n_timesteps=25),
+                    t=torch.linspace(0, 1, 25),
+                    n_trajectories=500,
+                    title=f"CFM Trajectories"
+                )
+            else:
+                plot_func(cfm_new, step, self.coupling_dist, self.eval_coupling_dist, self.new_source_dist, self.new_target_dist, device)
 
-            print(f"Completed training weighted CFM for alpha={alpha:.2f}")
+            print(f"Completed training weighted CFM")
 
             f_net_clone.load_state_dict(dual_trainer.f_net.state_dict())
             g_net_clone.load_state_dict(dual_trainer.g_net.state_dict())
 
-            info_dict[alpha] = {
+            info_dict[step] = {
                 "dual_info": dual_info,
                 "weighted_info": weighted_info
             }

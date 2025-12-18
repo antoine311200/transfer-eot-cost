@@ -1,13 +1,23 @@
 import math
 from abc import ABC, abstractmethod
+from typing import Optional, Callable
 
 import torch
-from torch.distributions import MultivariateNormal, Categorical, MixtureSameFamily, Independent, Normal
+from torch.distributions import Categorical, MixtureSameFamily, Independent, Normal
 from torchcfm.utils import sample_8gaussians, sample_moons, sample_single_moon
 
 class Distribution(ABC):
     @abstractmethod
     def sample(self, n: int) -> torch.Tensor:pass
+
+    @property
+    def dim(self) -> int:
+        """Return the dimensionality of the distribution."""
+        if hasattr(self, '_dim'):
+            return self._dim
+        sample = self.sample(1)
+        self._dim = sample.shape[-1]
+        return self._dim
 
 class MoonDistribution(Distribution):
     def sample(self, n: int) -> torch.Tensor:
@@ -56,15 +66,16 @@ def get_square_dist(rotation=0.0, shift=(5,5), scale=0.1):
     return GMMShapeDistribution(centers, scale=scale, rotation_degrees=rotation, shift=shift)
 
 
-
-class LinearInterpolationDistribution(Distribution):
-    def __init__(self, dist1: Distribution, dist2: Distribution, alpha: float):
+class DynamicLinearInterpolationDistribution(Distribution):
+    def __init__(self, dist1: Distribution, dist2: Distribution, get_alpha_fn: Optional[Callable]):
         self.dist1 = dist1
         self.dist2 = dist2
-        self.alpha = alpha
+        self.get_alpha_fn = get_alpha_fn if get_alpha_fn is not None else (lambda: torch.rand(1).item())
 
     def sample(self, n: int) -> torch.Tensor:
-        n2 = int(self.alpha * n)
+        self.current_alpha = self.get_alpha_fn()
+
+        n2 = int(self.current_alpha * n)
         n1 = n - n2
 
         if n1 == 0: return self.dist2.sample(n2)
@@ -75,3 +86,58 @@ class LinearInterpolationDistribution(Distribution):
         samples = torch.cat([samples1, samples2], dim=0)
         indices = torch.randperm(samples.shape[0])
         return samples[indices]
+
+class LinearInterpolationDistribution(DynamicLinearInterpolationDistribution):
+    def __init__(self, dist1: Distribution, dist2: Distribution, alpha: float):
+        super().__init__(dist1, dist2, get_alpha_fn=lambda: alpha)
+        self.alpha = alpha
+
+class RotatedDistribution(Distribution):
+    def __init__(self, base_dist: Distribution, angle: float):
+        """
+        Rotates samples from base_dist by given angle (in radians).
+
+        Args:
+            base_dist: Base distribution to rotate
+            angle: Rotation angle in radians
+        """
+        self.base_dist = base_dist
+        self.angle = angle
+
+        self._rotation_matrix = self._create_rotation_matrix(angle)
+
+    def _create_rotation_matrix(self, angle: float) -> torch.Tensor:
+        """Create 2D rotation matrix for given angle."""
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        return torch.tensor([[cos_a, -sin_a], [sin_a, cos_a]], dtype=torch.float32)
+
+    def sample(self, n: int) -> torch.Tensor:
+        """
+        Sample n points from base distribution and rotate them.
+
+        Args:
+            n: Number of samples
+
+        Returns:
+            Rotated samples of shape (n, 2)
+        """
+        samples = self.base_dist.sample(n)
+
+        if samples.shape[-1] != 2:
+            raise ValueError(
+                f"RotatedDistribution requires 2D samples, "
+                f"but base distribution has dimension {samples.shape[-1]}"
+            )
+
+        self._rotation_matrix = self._rotation_matrix.to(samples.device)
+        rotated_samples = torch.matmul(samples, self._rotation_matrix.T)
+        return rotated_samples
+
+    @property
+    def dim(self) -> int:
+        return self.base_dist.dim
+
+    def rotate(self, new_angle: float) -> 'RotatedDistribution':
+        """Create a new RotatedDistribution with different angle."""
+        return RotatedDistribution(self.base_dist, new_angle)

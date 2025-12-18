@@ -278,3 +278,103 @@ class EfficientDualPotential(nn.Module):
         x = self.fc(x)
 
         return x
+
+# from torch.nn.utils import spectral_norm
+# from torchcfm.models.unet.unet import ResBlock, timestep_embedding
+
+# class DualPotentialNet(nn.Module):
+#     def __init__(
+#         self, 
+#         image_channels=3, 
+#         model_channels=64, 
+#         channel_mult=(1, 2, 4, 8), 
+#         time_conditioned=True
+#     ):
+#         """
+#         Args:
+#             image_channels: Number of input channels (e.g., 3 for RGB).
+#             model_channels: Base channel count (width of network).
+#             channel_mult: Multipliers for channels at each downsampling step.
+#             time_conditioned: Boolean to enable/disable time input.
+#         """
+#         super().__init__()
+#         self.model_channels = model_channels
+#         self.time_conditioned = time_conditioned
+        
+#         # Time Embedding Sequence (User Provided Logic)
+#         if time_conditioned:
+#             time_embed_dim = model_channels * 4
+#             self.time_embed = nn.Sequential(
+#                 spectral_norm(nn.Linear(model_channels, time_embed_dim)),
+#                 nn.SiLU(),
+#                 spectral_norm(nn.Linear(time_embed_dim, time_embed_dim)),
+#             )
+#         else:
+#             time_embed_dim = None
+
+#         # Initial Convolution
+#         self.input_conv = spectral_norm(nn.Conv2d(image_channels, model_channels, 3, padding=1))
+
+#         # Backbone (Downsampling Blocks)
+#         self.blocks = nn.ModuleList()
+#         cur_channels = model_channels
+        
+#         for mult in channel_mult:
+#             out_channels = model_channels * mult
+#             # We downsample at every block except perhaps the first, 
+#             # depending on how aggressive you want the reduction.
+#             # Here we downsample at every stage to get a global scalar quickly.
+#             self.blocks.append(ResBlock(
+#                 ch,
+#                 time_embed_dim,
+#                 dropout,
+#                 out_channels=int(mult * model_channels),
+#                 dims=dims,
+#             ))
+#             # self.blocks.append(
+#             #     ResBlock(
+#             #         cur_channels, 
+#             #         out_channels, 
+#             #         time_emb_dim=time_embed_dim, 
+#             #         downsample=True
+#             #     )
+#             # )
+#             cur_channels = out_channels
+
+#         # Final scalar mapping
+#         self.final_conv = spectral_norm(nn.Conv2d(cur_channels, cur_channels, 3, padding=1))
+#         self.act = nn.LeakyReLU(0.2)
+#         # We project to 1 scalar output
+#         self.output_linear = spectral_norm(nn.Linear(cur_channels, 1))
+
+#     def forward(self, x, timesteps=None):
+#         """
+#         x: [Batch, C, H, W]
+#         timesteps: [Batch] (LongTensor or FloatTensor)
+#         """
+        
+#         # 1. Handle Time Embeddings
+#         emb = None
+#         if self.time_conditioned:
+#             if timesteps is None:
+#                  raise ValueError("Model is time-conditioned but no timesteps provided.")
+#             emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+
+#         # 2. Feature Extraction
+#         h = self.input_conv(x)
+        
+#         for block in self.blocks:
+#             h = block(h, emb)
+            
+#         h = self.final_conv(h)
+#         h = self.act(h)
+
+#         # 3. Global Sum Pooling (Standard for Energy/Potential models)
+#         # Sum pooling is often preferred over Avg for potentials to allow 
+#         # the "energy" to scale with complexity, but Avg is also valid.
+#         h = torch.sum(h, dim=(2, 3)) 
+        
+#         # 4. Final Projection to Scalar
+#         out = self.output_linear(h) # [Batch, 1]
+        
+#         return out.squeeze(-1)

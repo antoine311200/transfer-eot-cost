@@ -8,6 +8,7 @@ def plot_2d_flow_trajectories(
     trajectories: torch.Tensor,
     t: torch.Tensor,
     n_trajectories: int = 50,
+    target_points: Optional[torch.Tensor] = None,
     xlim: Optional[Tuple[float, float]] = None,
     ylim: Optional[Tuple[float, float]] = None,
     title: str = "Flow Trajectories"
@@ -16,11 +17,8 @@ def plot_2d_flow_trajectories(
     fig, ax = plt.subplots(figsize=(6, 6))
     trajectories_np = trajectories.cpu().numpy()
 
-    # for i in range(min(n_trajectories, trajectories.shape[1])):
-    #     traj = trajectories_np[:, i, :]
-    #     plt.plot(traj[:, 0], traj[:, 1], "b-", alpha=0.3, linewidth=0.5)
-    #     plt.scatter(traj[0, 0], traj[0, 1], c="red", s=10, alpha=0.7, label="Start" if i == 0 else "")
-    #     plt.scatter(traj[-1, 0], traj[-1, 1], c="green", s=10, alpha=0.7, label="End" if i == 0 else "")
+    n_trajectories = min(n_trajectories, trajectories.shape[1])
+
     from matplotlib.collections import LineCollection
 
     segments = []
@@ -35,6 +33,8 @@ def plot_2d_flow_trajectories(
     start_points = trajectories_np[0, :, :]
     end_points = trajectories_np[-1, :, :]
 
+    if target_points is not None:
+        ax.scatter(target_points[:, 0], target_points[:, 1], c='orange', s=5, alpha=0.5, zorder=4, label="Target")
     ax.scatter(start_points[:, 0], start_points[:, 1], c='red', s=5, alpha=0.5, zorder=4, label="Start")
     ax.scatter(end_points[:, 0], end_points[:, 1], c='green', s=5, alpha=0.5, zorder=4, label="End")
     ax.grid(True, alpha=0.2)
@@ -50,16 +50,3 @@ def plot_2d_flow_trajectories(
     ax.legend()
 
     plt.show()
-
-    # if xlim is not None:
-    #     plt.xlim(xlim)
-    # if ylim is not None:
-    #     plt.ylim(ylim)
-
-    # # plt.xlabel("X")
-    # # plt.ylabel("Y")
-    # # plt.title(title)
-    # # plt.legend()
-    # # plt.show()
-    # plt.suptitle(title)
-    # plt.show()

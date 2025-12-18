@@ -25,13 +25,15 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
         flow_matching: ConditionalFlowMatching,
         f_net: Optional[nn.Module] = None,
         g_net: Optional[nn.Module] = None,
-        mode: str = "classic"
+        mode: str = "classic",
+        dynamic: bool = False, # Can be removed by wrapping nn.Modules inside a DualModule class that embeds if the model is dynamic or not
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.f_net = f_net.to(self.device) if f_net is not None else None
         self.g_net = g_net.to(self.device) if g_net is not None else None
         self.mode = mode
+        self.dynamic = dynamic
 
         self.flow_matching = flow_matching
         self.flow_matching.network.to(self.device)
@@ -41,10 +43,9 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
         x1_batch = self.flow_matching.target_dist.sample(batch_size).to(self.device)
 
         t = torch.rand(batch_size, 1, device=self.device)
-        t = pad_t_like_x(t, x0_batch).to(self.device)
-        x_t = self.flow_matching.compute_conditional_xt(x0_batch, x1_batch, t)
-        true_flow = self.flow_matching.compute_conditional_flow(x0_batch, x1_batch, t)
-        # predicted_flow = self.flow_matching.network(torch.cat([x_t, t], dim=1))
+        t_pad = pad_t_like_x(t, x0_batch).to(self.device)
+        x_t = self.flow_matching.compute_conditional_xt(x0_batch, x1_batch, t_pad)
+        true_flow = self.flow_matching.compute_conditional_flow(x0_batch, x1_batch, t_pad)
         predicted_flow = self.flow_matching.network(t, x_t)
 
 
@@ -53,8 +54,13 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
             self.g_net.eval()
 
             with torch.no_grad():
-                f_x0 = self.f_net(x0_batch)
-                g_x1 = self.g_net(x1_batch)
+                if not self.dynamic:
+                    f_x0 = self.f_net(x0_batch)
+                    g_x1 = self.g_net(x1_batch)
+                else:
+                    ones = torch.ones(batch_size, 1, device=self.device)
+                    f_x0 = self.f_net(ones, x0_batch)
+                    g_x1 = self.g_net(ones, x1_batch)
 
                 if f_x0.shape[1] > 1: log_w = f_x0.sum(dim=1) + g_x1.sum(dim=1)
                 else: log_w = f_x0.squeeze(1) + g_x1.squeeze(1)
@@ -84,7 +90,16 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
         self.flow_matching.network.train()
         return loss
 
-    def train(self, epochs: int, batch_size: int, learning_rate: float, print_every: int = 100, eval_every: int = 10):
+    def train(
+        self,
+        epochs: int,
+        batch_size: int,
+        learning_rate: float,
+        plot_func = None,
+        plot_every: int = 0,
+        print_every: int = 100,
+        eval_every: int = 10
+    ):
         self.train_losses = []
         self.epoch_train_losses = []
         self.eval_losses = []
@@ -127,6 +142,19 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
                     postfix['eval_loss'] = f"{eval_loss:.4f}"
 
                 pbar.set_postfix(postfix)
+
+            if plot_func and ((plot_every > 0 and (epoch + 1) % plot_every == 0) or epoch == epochs -1):
+                if plot_func is None:
+                    from dualwcfm.visualization import plot_2d_flow_trajectories
+                    plot_2d_flow_trajectories(
+                        trajectories=self.flow_matching.get_trajectory(n_samples=500, n_timesteps=25),
+                        t=torch.linspace(0, 1, 25),
+                        n_trajectories=500,
+                        title=f"CFM Trajectories"
+                    )
+                else:
+                    plot_func(self.flow_matching, epoch)
+
 
         print("-" * 80)
         print("Training completed!")

@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
+from typing import Union
 
 class Trainer(ABC):
     @abstractmethod
-    def step(self, batch_size: int, training: bool) -> float:
+    def step(self, batch_size: int, training: bool) -> Union[float, tuple]:
         """Perform a single training/evaluation step
 
         Args:
@@ -27,7 +28,7 @@ class Trainer(ABC):
         pass
 
     @abstractmethod
-    def train(self, epochs: int, batch_size: int, learning_rate: float, print_every: int = 100, eval_every: int = 10) -> dict:
+    def train(self, epochs: int, batch_size: int, learning_rate: float, plot_func = None, plot_every: int = 0, print_every: int = 100, eval_every: int = 10) -> dict:
         """Train the model for a specified number of epochs
 
         Args:
