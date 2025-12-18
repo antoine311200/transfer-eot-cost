@@ -22,7 +22,7 @@ class DynamicTrainer(IterativeTrainer):
     """
 
     def __init__(self, source_dist: Distribution, target_dist: Distribution, coupling_dist: CouplingDistribution, eval_coupling_dist: Optional[CouplingDistribution] = None):
-        super().__init__(source_dist, target_dist, coupling_dist, eval_coupling_dist, dynamic=True)
+        super().__init__(source_dist, target_dist, coupling_dist, eval_coupling_dist)
 
     def train( # type: ignore
         self,

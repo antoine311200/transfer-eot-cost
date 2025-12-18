@@ -1,12 +1,17 @@
 import copy
 from typing import Optional, Union
 from functools import partial
+from dualwcfm.trainers.alternating_trainer import AlternatingTrainer
+from typing_extensions import Literal
 
+from dualwcfm.trainers.wcfm import CFMTrainerConfig
 import torch
 import torch.nn as nn
 
 from dualwcfm.distributions import CouplingDistribution, Distribution, LinearInterpolationDistribution, MarginalDistribution
 from dualwcfm.trainers import DualTrainer, WeightedConditionalFlowMatchingTrainer
+from dualwcfm.trainers.trainer import Trainer, TrainerConfig
+from dualwcfm.trainers.dual_trainer import DualTrainerConfig
 from dualwcfm.models.cfm import ConditionalFlowMatching
 from dualwcfm.utils import safe_clone
 
@@ -25,7 +30,7 @@ class IterativeTrainer:
         target_dist: Distribution,
         coupling_dist: CouplingDistribution,
         eval_coupling_dist: Optional[CouplingDistribution] = None,
-        dynamic: bool = False
+        mode: str = "static"
     ):
         self.coupling_dist = coupling_dist
         self.source_dist = MarginalDistribution(self.coupling_dist.sample_init)
@@ -33,7 +38,8 @@ class IterativeTrainer:
         self.eval_coupling_dist = eval_coupling_dist if eval_coupling_dist else None
         self.new_source_dist = source_dist
         self.new_target_dist = target_dist
-        self.dynamic = dynamic
+        self.dynamic = True if mode == "dynamic" else False
+        self.mode = mode
 
     def train(
         self,
@@ -42,20 +48,19 @@ class IterativeTrainer:
         g_net: nn.Module,
         flow_network: nn.Module,
         device: torch.device,
-        batch_size: int,
-        epochs_dual: int,
-        epochs: int,
-        dual_learning_rate: float,
-        learning_rate: float,
-        sigma: float,
-        lambda_reg: float = 0.1,
+
+        dual_config: DualTrainerConfig,
+        cfm_config: CFMTrainerConfig,
+        weight_mode: Literal['classic', 'exp_weighted', 'exact_weighted'] = "exact_weighted",
+
         torch_wrapper = None,
         return_cfm: bool = False,
         reinitialize_duals: bool = False,
         plot_every: int = 100,
         print_every: int = 100,
         eval_every: int = 10,
-        plot_func = None
+        plot_func = None,
+        **kwargs
     ) -> Union[tuple[dict, dict], dict]:
         """Trains dual and weighted CFM models iteratively between the source and target distributions.
 
@@ -82,13 +87,15 @@ class IterativeTrainer:
 
         self.flow_network = flow_network
 
+        self.weight_mode = weight_mode
+
         info_dict = {}
         cfms = {}
 
         for step in range(n_iterations):
             print(f"Starting iteration {step}/{n_iterations}")
 
-            if not self.dynamic:
+            if self.mode == "static":
                 print(f" with alpha={step / (n_iterations):.2f}")
                 alpha = step / (n_iterations - 1)
                 mixed_source_dist = LinearInterpolationDistribution(self.source_dist, self.new_source_dist, alpha)
@@ -97,20 +104,29 @@ class IterativeTrainer:
                 mixed_source_dist = self.new_source_dist
                 mixed_target_dist = self.new_target_dist
 
-            dual_trainer = DualTrainer(
-                coupling_dist=self.coupling_dist,
-                source_dist=mixed_source_dist,
-                target_dist=mixed_target_dist,
-                f_net=f_net_clone if not reinitialize_duals else safe_clone(f_net),
-                g_net=g_net_clone if not reinitialize_duals else safe_clone(g_net),
-                dynamic=self.dynamic,
-                device=device
-            )
+            if self.weight_mode == "classic" or self.weight_mode == "exp_weighted":
+                dual_trainer = DualTrainer(
+                    coupling_dist=self.coupling_dist,
+                    source_dist=mixed_source_dist,
+                    target_dist=mixed_target_dist,
+                    f_net=f_net_clone if not reinitialize_duals else safe_clone(f_net),
+                    g_net=g_net_clone if not reinitialize_duals else safe_clone(g_net),
+                    dynamic=self.dynamic,
+                    device=device
+                )
+            else:  # exact_weighted
+                print("Using Alternating Trainer for exact weighted mode")
+                dual_trainer = AlternatingTrainer(
+                    coupling_dist=self.coupling_dist,
+                    source_dist=mixed_source_dist,
+                    target_dist=mixed_target_dist,
+                    f_net=f_net_clone if not reinitialize_duals else safe_clone(f_net),
+                    g_net=g_net_clone if not reinitialize_duals else safe_clone(g_net),
+                    dynamic=self.dynamic,
+                    device=device
+                )
             dual_info = dual_trainer.train(
-                epochs=epochs_dual,
-                batch_size=batch_size,
-                learning_rate=dual_learning_rate,
-                lambda_reg=lambda_reg,
+                config=dual_config,
                 print_every=print_every,
                 eval_every=eval_every
             )
@@ -125,19 +141,20 @@ class IterativeTrainer:
                 target_dist=mixed_target_dist,
                 network=self.flow_network,
                 wrapper=torch_wrapper,
-                sigma=sigma
+                sigma=cfm_config.sigma
             )
             weighted_trainer = WeightedConditionalFlowMatchingTrainer(
                 flow_matching=cfm_new,
-                mode="weighted",
+                mode=weight_mode,
                 f_net=dual_trainer.f_net,
                 g_net=dual_trainer.g_net,
                 dynamic=self.dynamic
             )
+            print("Delta", (step + 1) / (n_iterations - 1))
             weighted_info = weighted_trainer.train(
-                epochs=epochs,
-                batch_size=batch_size,
-                learning_rate=learning_rate,
+                config=cfm_config,
+                delta=(step + 1) / n_iterations,
+                device=device,
                 plot_func=partial(plot_func, coupling_dist=self.coupling_dist, eval_coupling_dist=self.eval_coupling_dist, new_source_dist=self.new_source_dist, new_target_dist=self.new_target_dist, device=device) if plot_func is not None else None,
                 plot_every=plot_every,
                 print_every=print_every,

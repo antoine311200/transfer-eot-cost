@@ -19,6 +19,27 @@ class Distribution(ABC):
         self._dim = sample.shape[-1]
         return self._dim
 
+class FixedSizeDistribution(Distribution):
+    def __init__(self, distribution: Distribution, size: int = 1000):
+        self.distribution = distribution
+        self.size = size
+        self.dataset = self.distribution.sample(self.size)
+
+    def sample(self, n: int):
+        idx = torch.randint(0, self.size, (n,))
+        return self.dataset[idx]
+
+class WeightedDistribution(Distribution):
+    def __init__(self, base_fixed_distribution: FixedSizeDistribution):
+        self.base_fixed_distribution = base_fixed_distribution
+        self.log_weights = torch.zeros(self.base_fixed_distribution.size)
+
+    def sample(self, n: int): # type: ignore
+        idx = torch.randint(0, self.base_fixed_distribution.size, (n,))
+        samples = self.base_fixed_distribution.dataset[idx]
+        log_w = self.log_weights[idx]
+        return samples, log_w
+
 class MoonDistribution(Distribution):
     def sample(self, n: int) -> torch.Tensor:
         return sample_moons(n).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))

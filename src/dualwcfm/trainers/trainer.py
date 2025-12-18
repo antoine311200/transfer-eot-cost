@@ -1,13 +1,20 @@
 from abc import ABC, abstractmethod
-from typing import Union
+from typing import Any, Union
+from dataclasses import dataclass
+
+@dataclass
+class TrainerConfig:
+    learning_rate: float = 1e-3
+    epochs: int = 1000
+    batch_size: int = 64
+    eval_batch_size: int = 32
 
 class Trainer(ABC):
     @abstractmethod
-    def step(self, batch_size: int, training: bool) -> Union[float, tuple]:
+    def step(self, training: bool, **kwargs) -> Union[float, tuple]:
         """Perform a single training/evaluation step
 
         Args:
-            batch_size: Size of the batch to process
             training: Whether to perform a training step (with backpropagation) or just evaluation
 
         Returns:
@@ -16,11 +23,8 @@ class Trainer(ABC):
         pass
 
     @abstractmethod
-    def evaluate(self, batch_size: int = 1000) -> float:
+    def evaluate(self, **kwargs) -> Any:
         """Evaluate the model on a validation set
-
-        Args:
-            batch_size: Size of the batch to process during evaluation
 
         Returns:
             Loss value as a float
@@ -28,7 +32,7 @@ class Trainer(ABC):
         pass
 
     @abstractmethod
-    def train(self, epochs: int, batch_size: int, learning_rate: float, plot_func = None, plot_every: int = 0, print_every: int = 100, eval_every: int = 10) -> dict:
+    def train(self, config: TrainerConfig, plot_func = None, plot_every: int = 0, print_every: int = 100, eval_every: int = 10) -> dict:
         """Train the model for a specified number of epochs
 
         Args:

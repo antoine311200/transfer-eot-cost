@@ -1,14 +1,43 @@
-from typing import Optional
-
+from typing import Literal, Optional, Sequence, Union
 from tqdm import tqdm
+from dataclasses import dataclass
 
 import torch
 import torch.optim as optim
 from torch import nn
 
 from dualwcfm.models.cfm import ConditionalFlowMatching
-from dualwcfm.trainers.trainer import Trainer
+from dualwcfm.trainers.trainer import Trainer, TrainerConfig
 from dualwcfm.utils import pad_t_like_x
+
+@dataclass
+class CFMTrainerConfig(TrainerConfig):
+    learning_rate: float = 1e-3
+    epochs: int = 1000
+    batch_size: int = 64
+    eval_batch_size: int = 32
+    sigma: float = 0.0
+
+class ExpDualWeight(nn.Module):
+    def forward(self, f_x0: torch.Tensor, g_x1: torch.Tensor, **kwargs) -> torch.Tensor:
+        if f_x0.shape[1] > 1:
+            log_w = f_x0.sum(dim=1) + g_x1.sum(dim=1)
+        else:
+            log_w = f_x0.squeeze(1) + g_x1.squeeze(1)
+
+        weights = torch.exp(log_w)
+        weights = weights / (weights.mean() + 1e-8)
+
+        return weights
+
+class ExactDualWeight(nn.Module):
+    def forward(self, f_x0: torch.Tensor, g_x1: torch.Tensor, **kwargs) -> torch.Tensor:
+        delta = kwargs.get("delta", 1.0)
+        if f_x0.shape[1] > 1:
+            weights = 1+ delta * (f_x0.sum(dim=1) + g_x1.sum(dim=1))
+        else:
+            weights = 1+ delta * (f_x0.squeeze(1) + g_x1.squeeze(1))
+        return weights
 
 class WeightedConditionalFlowMatchingTrainer(Trainer):
     """Conditional flow matching with learned vector field
@@ -25,7 +54,7 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
         flow_matching: ConditionalFlowMatching,
         f_net: Optional[nn.Module] = None,
         g_net: Optional[nn.Module] = None,
-        mode: str = "classic",
+        mode: Literal["classic", "exp_weighted", "exact_weighted"] = "classic",
         dynamic: bool = False, # Can be removed by wrapping nn.Modules inside a DualModule class that embeds if the model is dynamic or not
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -34,11 +63,17 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
         self.g_net = g_net.to(self.device) if g_net is not None else None
         self.mode = mode
         self.dynamic = dynamic
+        self.weight_fn = None
+        if mode == "exp_weighted":
+            self.weight_fn = ExpDualWeight().to(self.device)
+        elif mode == "exact_weighted":
+            self.weight_fn = ExactDualWeight().to(self.device)
 
         self.flow_matching = flow_matching
         self.flow_matching.network.to(self.device)
 
-    def step(self, batch_size: int, training: bool) -> float:
+    def step(self, training: bool, **kwargs) -> float:
+        batch_size = self.config.batch_size if training else self.config.eval_batch_size
         x0_batch = self.flow_matching.source_dist.sample(batch_size).to(self.device)
         x1_batch = self.flow_matching.target_dist.sample(batch_size).to(self.device)
 
@@ -48,8 +83,7 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
         true_flow = self.flow_matching.compute_conditional_flow(x0_batch, x1_batch, t_pad)
         predicted_flow = self.flow_matching.network(t, x_t)
 
-
-        if self.mode == "weighted" and self.f_net and self.g_net:
+        if "weight" in self.mode and self.f_net and self.g_net:
             self.f_net.eval()
             self.g_net.eval()
 
@@ -62,12 +96,17 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
                     f_x0 = self.f_net(ones, x0_batch)
                     g_x1 = self.g_net(ones, x1_batch)
 
-                if f_x0.shape[1] > 1: log_w = f_x0.sum(dim=1) + g_x1.sum(dim=1)
-                else: log_w = f_x0.squeeze(1) + g_x1.squeeze(1)
+                # if f_x0.shape[1] > 1: log_w = f_x0.sum(dim=1) + g_x1.sum(dim=1)
+                # else: log_w = f_x0.squeeze(1) + g_x1.squeeze(1)
 
-                weights = torch.exp(log_w)
-                weights = weights / (weights.mean() + 1e-8)
-                weights = weights.unsqueeze(1).unsqueeze(2)
+                # weights = torch.exp(log_w)
+                # weights = weights / (weights.mean() + 1e-8)
+                # weights = weights.unsqueeze(1).unsqueeze(2)
+
+            if self.weight_fn is None:
+                raise ValueError("Weight function is not defined for weighted mode.")
+
+            weights = self.weight_fn(f_x0, g_x1, **kwargs).unsqueeze(1).unsqueeze(2)
 
             loss = torch.mean(weights * (predicted_flow - true_flow) ** 2)
         else:
@@ -81,44 +120,45 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
 
         return loss.item()
 
-    def evaluate(self, batch_size: int = 1000) -> float:
+    def evaluate(self, **kwargs) -> float:
         self.flow_matching.network.eval()
 
         with torch.no_grad():
-            loss = self.step(batch_size=batch_size, training=False)
+            loss = self.step(training=False, **kwargs)
 
         self.flow_matching.network.train()
         return loss
 
     def train(
         self,
-        epochs: int,
-        batch_size: int,
-        learning_rate: float,
+        config: TrainerConfig,
         plot_func = None,
         plot_every: int = 0,
         print_every: int = 100,
-        eval_every: int = 10
+        eval_every: int = 10,
+        **kwargs
     ):
         self.train_losses = []
         self.epoch_train_losses = []
         self.eval_losses = []
 
-        self.optimizer = optim.Adam(self.flow_matching.network.parameters(), lr=learning_rate)
+        self.config = config
+
+        self.optimizer = optim.Adam(self.flow_matching.network.parameters(), lr=self.config.learning_rate)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=1000, eta_min=1e-6)
 
         self.flow_matching.network.train()
 
-        print(f"Starting training for {epochs} epochs")
-        print(f"Batch size: {batch_size}, Print every: {print_every}, Eval every: {eval_every}")
+        print(f"Starting training for {self.config.epochs} epochs")
+        print(f"Batch size: {self.config.batch_size}, Print every: {print_every}, Eval every: {eval_every}")
         print("-" * 80)
 
-        pbar = tqdm(range(epochs), desc="Training")
+        pbar = tqdm(range(self.config.epochs), desc="Training")
 
         for epoch in pbar:
             epoch_losses = []
 
-            loss = self.step(batch_size=batch_size, training=True)
+            loss = self.step(training=True, **kwargs)
 
             epoch_losses.append(loss)
             self.train_losses.append(loss)
@@ -127,7 +167,7 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
             self.epoch_train_losses.append(avg_epoch_loss)
 
             if (epoch + 1) % eval_every == 0 or epoch == 0:
-                eval_loss = self.evaluate(batch_size=batch_size)
+                eval_loss = self.evaluate(**kwargs)
                 self.eval_losses.append((epoch, eval_loss))
 
             if (epoch + 1) % print_every == 0 or epoch == 0:
@@ -143,7 +183,7 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
 
                 pbar.set_postfix(postfix)
 
-            if plot_func and ((plot_every > 0 and (epoch + 1) % plot_every == 0) or epoch == epochs -1):
+            if plot_func and ((plot_every > 0 and (epoch + 1) % plot_every == 0) or epoch == self.config.epochs -1):
                 if plot_func is None:
                     from dualwcfm.visualization import plot_2d_flow_trajectories
                     plot_2d_flow_trajectories(

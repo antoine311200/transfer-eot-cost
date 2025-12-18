@@ -67,3 +67,40 @@ class RotatedShapeCoupling(CouplingDistribution):
         y = y_centered + self.target_shift
 
         return x, y
+
+class FixedSizeCouplingDistribution(CouplingDistribution):
+    def __init__(self, coupling_distribution: CouplingDistribution, size: int = 1000):
+        self.coupling_distribution = coupling_distribution
+        self.size = size
+        self.dataset = self.coupling_distribution.coupling_sample(self.size)
+
+    def coupling_sample(self, n: int):
+        idx = torch.randint(0, self.size, (n,))
+        return (self.dataset[0][idx], self.dataset[1][idx])
+
+    def sample_init(self, n: int):
+        idx = torch.randint(0, self.size, (n,))
+        return self.dataset[0][idx]
+    def sample_target(self, n: int):
+        idx = torch.randint(0, self.size, (n,))
+        return self.dataset[1][idx]
+
+class WeightedCouplingDistribution(CouplingDistribution):
+    def __init__(self, base_fixed_coupling: CouplingDistribution, size: int = 1000):
+        self.base_fixed_coupling = base_fixed_coupling
+        self.size = size
+        self.dataset = self.base_fixed_coupling.coupling_sample(self.size)
+        self.log_weights = torch.zeros(self.size)
+
+    def coupling_sample(self, n: int): # type: ignore
+        idx = torch.randint(0, self.size, (n,))
+        samples = (self.dataset[0][idx], self.dataset[1][idx])
+        log_w = self.log_weights[idx]
+        return samples, log_w
+    def sample_init(self, n: int):
+        idx = torch.randint(0, self.size, (n,))
+        return self.dataset[0][idx]
+    def sample_target(self, n: int):
+        idx = torch.randint(0, self.size, (n,))
+        return self.dataset[1][idx]
+    def sample(self, n: int):pass # type: ignore
