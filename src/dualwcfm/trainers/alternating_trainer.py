@@ -22,6 +22,7 @@ class AlternatingConfig(DualTrainerConfig):
     epochs: int = 1000
     batch_size: int = 64
     eval_batch_size: int = 32
+    mode: str = "integrator"  # "integrator" or "simple"
 
 
 class AlternatingTrainer(DualTrainer):
@@ -65,7 +66,7 @@ class AlternatingTrainer(DualTrainer):
         return loss.item()
 
     def _loss(self, t, x0_new, x1_new, x0_ref, x1_ref, log_weights):
-        time = torch.ones(x0_new.shape[0], 1, device=self.device) * t
+        time = torch.ones(x0_new.shape[0], 1, device=self.device) * t if self.config.mode == "simple" else torch.rand(x0_new.shape[0], 1, device=self.device)
 
         a_new = self.f_net(time, x0_new)
         b_new = self.g_net(time, x1_new)
@@ -73,10 +74,29 @@ class AlternatingTrainer(DualTrainer):
         a_ref = self.f_net(time, x0_ref)
         b_ref = self.g_net(time, x1_ref)
 
-        term_coupling = 2 * torch.mean((a_ref**2 + b_ref**2 + 2 * a_ref * b_ref) * torch.exp(log_weights).unsqueeze(1))
-        term_marginal = 2 * (torch.mean(a_new) + torch.mean(b_new) - torch.mean(a_ref) - torch.mean(b_ref))
+        if self.config.mode == "simple":
+            term_coupling = torch.mean((a_ref + b_ref) ** 2 * torch.exp(log_weights).unsqueeze(1))
+            term_marginal = 2 * (torch.mean(a_new) + torch.mean(b_new) - torch.mean(a_ref) - torch.mean(b_ref))
 
-        return term_coupling - term_marginal
+            return term_coupling - term_marginal
+        elif self.config.mode == "integrator":
+
+            da_t_new = torch.autograd.grad(a_new.sum(), x0_new, create_graph=True, retain_graph=True)[0]
+            db_t_new = torch.autograd.grad(b_new.sum(), x1_new, create_graph=True, retain_graph=True)[0]
+            da_t_ref = torch.autograd.grad(a_ref.sum(), x0_ref, create_graph=True, retain_graph=True)[0]
+            db_t_ref = torch.autograd.grad(b_ref.sum(), x1_ref, create_graph=True, retain_graph=True)[0]
+
+            term_coupling = torch.mean((da_t_ref**2 + db_t_ref**2) + 2 * (da_t_ref + db_t_ref)) * torch.exp(a_ref + b_ref).unsqueeze(1)
+            term_marginal = 2 * (torch.mean(da_t_new + db_t_new) - torch.mean(da_t_ref + db_t_ref))
+
+            return term_coupling - term_marginal
+        else:
+            raise ValueError(f"Unknown mode {self.config.mode} for Alternating Trainer.")
+
+        # term_coupling = 2 * torch.mean((a_ref**2 + b_ref**2 + 2 * a_ref * b_ref) * torch.exp(log_weights).unsqueeze(1))
+        # term_marginal = 2 * (torch.mean(a_new) + torch.mean(b_new) - torch.mean(a_ref) - torch.mean(b_ref))
+
+        # return term_coupling - term_marginal
 
     def _loss_a(self, t, x0_new, x0_ref, x1_ref, log_weights, delta):
         time = torch.ones(x0_new.shape[0], 1, device=self.device) * t
@@ -135,6 +155,7 @@ class AlternatingTrainer(DualTrainer):
         pbar = tqdm(range(self.config.epochs))
         for epoch in pbar:
             loss = self.step(t, training=True)
+
             self.train_losses.append(loss)
 
             if (epoch + 1) % print_every == 0:
