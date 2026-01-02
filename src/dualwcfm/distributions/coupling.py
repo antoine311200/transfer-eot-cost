@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import math
 
+from typing import Union
 import torch
 
 from dualwcfm.distributions.distribution import Distribution
@@ -14,7 +15,7 @@ class MarginalDistribution(Distribution):
 
 class CouplingDistribution(Distribution, ABC):
     @abstractmethod
-    def coupling_sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:pass
+    def coupling_sample(self, n: int) -> Union[tuple[torch.Tensor, torch.Tensor], list[torch.Tensor], torch.Tensor]:pass
 
     @abstractmethod
     def sample_init(self, n: int) -> torch.Tensor:pass
@@ -24,6 +25,9 @@ class CouplingDistribution(Distribution, ABC):
 
     def get_marginals(self) -> tuple[Distribution, Distribution]:
         return MarginalDistribution(self.sample_init), MarginalDistribution(self.sample_target)
+
+    def sample(self, n: int) -> torch.Tensor:
+        return super().coupling_sample(n) # type: ignore
 
 class RotatedShapeCoupling(CouplingDistribution):
     def __init__(self, centers, source_scale=0.1, target_scale=0.1, rotation_degrees=45.0, source_shift=(0,0), target_shift=(0,0), device=None):
@@ -72,7 +76,14 @@ class FixedSizeCouplingDistribution(CouplingDistribution):
     def __init__(self, coupling_distribution: CouplingDistribution, size: int = 1000):
         self.coupling_distribution = coupling_distribution
         self.size = size
-        self.dataset = self.coupling_distribution.coupling_sample(self.size)
+        self.dataset = torch.stack(list(self.coupling_distribution.coupling_sample(self.size)), dim=0)
+
+    @staticmethod
+    def from_dataset(dataset: Union[tuple[torch.Tensor, torch.Tensor], torch.Tensor]):
+        obj = FixedSizeCouplingDistribution.__new__(FixedSizeCouplingDistribution)
+        obj.size = dataset[0].shape[0]
+        obj.dataset = dataset
+        return obj
 
     def coupling_sample(self, n: int):
         idx = torch.randint(0, self.size, (n,))

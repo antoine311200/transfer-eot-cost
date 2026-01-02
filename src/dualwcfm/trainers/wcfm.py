@@ -1,4 +1,5 @@
 from typing import Literal, Optional, Sequence, Union
+from dualwcfm.distributions.coupling import CouplingDistribution
 from tqdm import tqdm
 from dataclasses import dataclass
 
@@ -52,6 +53,7 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
     def __init__(
         self,
         flow_matching: ConditionalFlowMatching,
+        coupling_dist: CouplingDistribution,
         f_net: Optional[nn.Module] = None,
         g_net: Optional[nn.Module] = None,
         mode: Literal["classic", "exp_weighted", "exact_weighted"] = "classic",
@@ -72,10 +74,13 @@ class WeightedConditionalFlowMatchingTrainer(Trainer):
         self.flow_matching = flow_matching
         self.flow_matching.network.to(self.device)
 
+        self.coupling_dist = coupling_dist
+
     def step(self, training: bool, **kwargs) -> float:
         batch_size = self.config.batch_size if training else self.config.eval_batch_size
-        x0_batch = self.flow_matching.source_dist.sample(batch_size).to(self.device)
-        x1_batch = self.flow_matching.target_dist.sample(batch_size).to(self.device)
+        # x0_batch = self.flow_matching.source_dist.sample(batch_size).to(self.device)
+        # x1_batch = self.flow_matching.target_dist.sample(batch_size).to(self.device)
+        x0_batch, x1_batch = self.coupling_dist.coupling_sample(batch_size)
 
         t = torch.rand(batch_size, 1, device=self.device)
         t_pad = pad_t_like_x(t, x0_batch).to(self.device)

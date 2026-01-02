@@ -95,7 +95,7 @@ class DualTrainer(Trainer):
             g_ref = self.g_net(ones, x1_ref)
 
         loss_marginals = torch.mean(f_new) + torch.mean(g_new)
-        loss_coupling = torch.mean(torch.exp(f_ref + g_ref))
+        loss_coupling = torch.log(torch.mean(torch.exp(f_ref + g_ref)))
         loss_reg = torch.mean(f_new**2) + torch.mean(g_new**2)
         loss = loss_coupling - loss_marginals + self.config.lambda_reg * loss_reg
 

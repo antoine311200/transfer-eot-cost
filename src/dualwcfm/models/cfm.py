@@ -70,7 +70,14 @@ class ConditionalFlowMatching(GenerativeModel):
         """
         return (1 - t) * x0 + t * x1 + torch.sqrt(2 * t * (1 - t)) * torch.randn_like(x0) * self.sigma
 
-    def get_trajectory(self, n_samples: int = 0, x0: Optional[torch.Tensor] = None, n_timesteps: int = 100, device: Optional[torch.device] = None) -> torch.Tensor:
+    def get_trajectory(
+        self,
+        n_samples: int = 0,
+        x0: Optional[torch.Tensor] = None,
+        n_timesteps: int = 100,
+        device: Optional[torch.device] = None,
+        reverse: bool = False
+    ) -> torch.Tensor:
         """Sample entire flow trajectories
 
         Args:
@@ -85,13 +92,21 @@ class ConditionalFlowMatching(GenerativeModel):
         if n_samples <= 0 and x0 is None:
             raise ValueError("Either n_samples must be positive or x0 must be provided.")
 
+        target_device = device if device is not None else self.device
+
         self.network.eval()
-        self.network.to(device if device is not None else self.device)
+        self.network.to(target_device)
 
         with torch.no_grad():
             if x0 is None:
-                x0 = self.source_dist.sample(n_samples).to(device if device is not None else self.device)
-            trajectories = self.node.trajectory(x0, t_span=torch.linspace(0, 1, n_timesteps).to(x0.device))
+                x0 = self.source_dist.sample(n_samples).to(target_device)
+
+            if reverse:
+                t_span = torch.linspace(1, 0, n_timesteps).to(x0.device)
+            else:
+                t_span = torch.linspace(0, 1, n_timesteps).to(x0.device)
+
+            trajectories = self.node.trajectory(x0, t_span=t_span)
 
         self.network.to(self.device)
         return trajectories

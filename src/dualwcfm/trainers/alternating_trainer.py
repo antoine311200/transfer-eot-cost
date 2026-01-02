@@ -49,13 +49,15 @@ class AlternatingTrainer(DualTrainer):
     def step(self, t: float, training: bool, **kwargs) -> float:  # type: ignore
         x0_new = self.source_dist.sample(self.config.batch_size).to(self.device)
         x1_new = self.target_dist.sample(self.config.batch_size).to(self.device)
+        x0_init = self.coupling_dist.sample_init(self.config.batch_size).to(self.device)
+        x1_init = self.coupling_dist.sample_target(self.config.batch_size).to(self.device)
 
         (x0_ref, x1_ref), log_weights = self.coupling_dist.coupling_sample(self.config.batch_size)
         x0_ref = x0_ref.to(self.device)
         x1_ref = x1_ref.to(self.device)
         log_weights = log_weights.to(self.device)
 
-        loss = self._loss(t, x0_new, x1_new, x0_ref, x1_ref, log_weights)
+        loss = self.loss(t, x0_new, x1_new, x0_init, x1_init, x0_ref, x1_ref, log_weights, training=training)
 
         if training:
             self.optimizer.zero_grad()
@@ -65,12 +67,30 @@ class AlternatingTrainer(DualTrainer):
 
         return loss.item()
 
-    def _loss(self, t, x0_new, x1_new, x0_ref, x1_ref, log_weights):
+    def loss(self, t, x0_new, x1_new, x0_init, x1_init, x0_ref, x1_ref, log_weights, training: bool = True):
         time = torch.ones(x0_new.shape[0], 1, device=self.device) * t if self.config.mode == "simple" else torch.rand(x0_new.shape[0], 1, device=self.device)
 
+        if training:
+            if self.config.mode == "integrator":
+                time.requires_grad_(True)
+
+            with torch.enable_grad():
+                return self._compute_loss(time, x0_new, x1_new, x0_init, x1_init, x0_ref, x1_ref, log_weights, training)
+        else:
+            with torch.no_grad():
+                if self.config.mode == "integrator":
+                    time.requires_grad_(True)
+                    with torch.enable_grad():
+                        return self._compute_loss(time, x0_new, x1_new, x0_init, x1_init, x0_ref, x1_ref, log_weights, training)
+                else:
+                    return self._compute_loss(time, x0_new, x1_new, x0_init, x1_init, x0_ref, x1_ref, log_weights, training)
+
+
+    def _compute_loss(self, time, x0_new, x1_new, x0_init, x1_init, x0_ref, x1_ref, log_weights, training):
         a_new = self.f_net(time, x0_new)
         b_new = self.g_net(time, x1_new)
-
+        a_init = self.f_net(time, x0_init)
+        b_init = self.g_net(time, x1_init)
         a_ref = self.f_net(time, x0_ref)
         b_ref = self.g_net(time, x1_ref)
 
@@ -80,57 +100,23 @@ class AlternatingTrainer(DualTrainer):
 
             return term_coupling - term_marginal
         elif self.config.mode == "integrator":
+            create_graph = training
 
-            da_t_new = torch.autograd.grad(a_new.sum(), x0_new, create_graph=True, retain_graph=True)[0]
-            db_t_new = torch.autograd.grad(b_new.sum(), x1_new, create_graph=True, retain_graph=True)[0]
-            da_t_ref = torch.autograd.grad(a_ref.sum(), x0_ref, create_graph=True, retain_graph=True)[0]
-            db_t_ref = torch.autograd.grad(b_ref.sum(), x1_ref, create_graph=True, retain_graph=True)[0]
+            da_t_new = torch.autograd.grad(a_new, time, grad_outputs=torch.ones_like(a_new), create_graph=create_graph, retain_graph=create_graph)[0]
+            db_t_new = torch.autograd.grad(b_new, time, grad_outputs=torch.ones_like(b_new), create_graph=create_graph, retain_graph=create_graph)[0]
+            da_t_init = torch.autograd.grad(a_init, time, grad_outputs=torch.ones_like(a_init), create_graph=create_graph, retain_graph=create_graph)[0]
+            db_t_init = torch.autograd.grad(b_init, time, grad_outputs=torch.ones_like(b_init), create_graph=create_graph, retain_graph=create_graph)[0]
+            da_t_ref = torch.autograd.grad(a_ref, time, grad_outputs=torch.ones_like(a_ref), create_graph=create_graph, retain_graph=create_graph)[0]
+            db_t_ref = torch.autograd.grad(b_ref, time, grad_outputs=torch.ones_like(b_ref), create_graph=create_graph, retain_graph=create_graph)[0]
 
-            term_coupling = torch.mean((da_t_ref**2 + db_t_ref**2) + 2 * (da_t_ref + db_t_ref)) * torch.exp(a_ref + b_ref).unsqueeze(1)
-            term_marginal = 2 * (torch.mean(da_t_new + db_t_new) - torch.mean(da_t_ref + db_t_ref))
+            term_coupling = torch.mean((da_t_ref**2 + db_t_ref**2 + 4 * da_t_ref * db_t_ref) * torch.exp(a_ref + b_ref))
+            term_marginal = 2 * (torch.mean(da_t_new + db_t_new) - torch.mean(da_t_init + db_t_init))
 
             return term_coupling - term_marginal
         else:
-            raise ValueError(f"Unknown mode {self.config.mode} for Alternating Trainer.")
-
-        # term_coupling = 2 * torch.mean((a_ref**2 + b_ref**2 + 2 * a_ref * b_ref) * torch.exp(log_weights).unsqueeze(1))
-        # term_marginal = 2 * (torch.mean(a_new) + torch.mean(b_new) - torch.mean(a_ref) - torch.mean(b_ref))
-
-        # return term_coupling - term_marginal
-
-    def _loss_a(self, t, x0_new, x0_ref, x1_ref, log_weights, delta):
-        time = torch.ones(x0_new.shape[0], 1, device=self.device) * t
-
-        a_new = self.f_net(time, x0_new)
-        a_ref = self.f_net(time, x0_ref)
-        b_ref = self.g_net(time, x1_ref).detach()  # Not optimized here
-
-        term_coupling = torch.mean((a_ref**2 + 2 * a_ref * b_ref) * torch.exp(log_weights).unsqueeze(1))
-        term_marginal = 2 * (torch.mean(a_new) - torch.mean(a_ref))
-
-        return term_coupling - term_marginal
-
-    def _loss_b(self, t, x1_new, x0_ref, x1_ref, log_weights, delta):
-        time = torch.ones(x1_new.shape[0], 1, device=self.device) * t
-
-        b_new = self.g_net(time, x1_new)
-        a_ref = self.f_net(time, x0_ref).detach()  # Not optimized here
-        b_ref = self.g_net(time, x1_ref)
-
-        term_coupling = torch.mean((b_ref**2 + 2 * a_ref * b_ref) * torch.exp(log_weights).unsqueeze(1))
-        term_marginal = 2 * (torch.mean(b_new) - torch.mean(b_ref))
-
-        return term_coupling - term_marginal
+            raise ValueError(f"Unknown mode {self.config.mode}")
 
     def _init_train_tools(self):
-        # self.optimizer_f = optim.Adam(self.f_net.parameters(), lr=self.config.learning_rate_f)
-        # self.optimizer_g = optim.Adam(self.g_net.parameters(), lr=self.config.learning_rate_g)
-        # self.scheduler_f = optim.lr_scheduler.CosineAnnealingLR(
-        #     self.optimizer_f, T_max=self.config.epochs, eta_min=self.config.learning_rate_f * 1e-3
-        # )
-        # self.scheduler_g = optim.lr_scheduler.CosineAnnealingLR(
-        #     self.optimizer_g, T_max=self.config.epochs, eta_min=self.config.learning_rate_g * 1e-3
-        # )
         self.optimizer = optim.Adam(list(self.f_net.parameters()) + list(self.g_net.parameters()), lr=self.config.learning_rate)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.config.epochs, eta_min=self.config.learning_rate * 1e-3)
 
@@ -169,3 +155,6 @@ class AlternatingTrainer(DualTrainer):
 
             if plot_func is not None and plot_every > 0 and (epoch + 1) % plot_every == 0:
                 plot_func(f_net=self.f_net, g_net=self.g_net, epoch=epoch + 1)
+
+        print("Training completed.")
+        return self.train_losses, self.eval_losses

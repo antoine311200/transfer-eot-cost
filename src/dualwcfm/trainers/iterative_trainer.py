@@ -92,12 +92,14 @@ class IterativeTrainer:
         info_dict = {}
         cfms = {}
 
+        delta = 1.0 / n_iterations
+
         for step in range(n_iterations):
             print(f"Starting iteration {step}/{n_iterations}")
 
             if self.mode == "static":
-                print(f" with alpha={step / (n_iterations):.2f}")
-                alpha = step / (n_iterations - 1)
+                print(f" with alpha={step * delta:.2f}")
+                alpha = step * delta
                 mixed_source_dist = LinearInterpolationDistribution(self.source_dist, self.new_source_dist, alpha)
                 mixed_target_dist = LinearInterpolationDistribution(self.target_dist, self.new_target_dist, alpha)
             else:
@@ -133,7 +135,7 @@ class IterativeTrainer:
 
             print(
                 f"Completed training duals"
-                f" for alpha={step / (n_iterations - 1):.2f}" if not self.dynamic else ""
+                f" for alpha={step * delta:.2f}" if not self.dynamic else ""
             )
 
             cfm_new = ConditionalFlowMatching(
@@ -145,15 +147,15 @@ class IterativeTrainer:
             )
             weighted_trainer = WeightedConditionalFlowMatchingTrainer(
                 flow_matching=cfm_new,
+                coupling_dist=self.coupling_dist,
                 mode=weight_mode,
                 f_net=dual_trainer.f_net,
                 g_net=dual_trainer.g_net,
                 dynamic=self.dynamic
             )
-            print("Delta", (step + 1) / (n_iterations - 1))
             weighted_info = weighted_trainer.train(
                 config=cfm_config,
-                delta=(step + 1) / n_iterations,
+                delta=delta,
                 device=device,
                 plot_func=partial(plot_func, coupling_dist=self.coupling_dist, eval_coupling_dist=self.eval_coupling_dist, new_source_dist=self.new_source_dist, new_target_dist=self.new_target_dist, device=device) if plot_func is not None else None,
                 plot_every=plot_every,

@@ -1,6 +1,8 @@
 import copy
 from typing import Optional, Union
 
+from dualwcfm.trainers.dual_trainer import DualTrainerConfig
+from dualwcfm.trainers.wcfm import CFMTrainerConfig
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -22,7 +24,7 @@ class DynamicTrainer(IterativeTrainer):
     """
 
     def __init__(self, source_dist: Distribution, target_dist: Distribution, coupling_dist: CouplingDistribution, eval_coupling_dist: Optional[CouplingDistribution] = None):
-        super().__init__(source_dist, target_dist, coupling_dist, eval_coupling_dist)
+        super().__init__(source_dist, target_dist, coupling_dist, eval_coupling_dist, mode="dynamic")
 
     def train( # type: ignore
         self,
@@ -30,13 +32,8 @@ class DynamicTrainer(IterativeTrainer):
         g_net: nn.Module,
         flow_network: nn.Module,
         device: torch.device,
-        batch_size: int,
-        epochs_dual: int,
-        epochs: int,
-        dual_learning_rate: float,
-        learning_rate: float,
-        sigma: float,
-        lambda_reg: float = 0.1,
+        dual_config: DualTrainerConfig,
+        cfm_config: CFMTrainerConfig,
         torch_wrapper = None,
         return_cfm: bool = False,
         plot_every: int = 0,
@@ -50,13 +47,9 @@ class DynamicTrainer(IterativeTrainer):
             g_net=g_net,
             flow_network=flow_network,
             device=device,
-            batch_size=batch_size,
-            epochs_dual=epochs_dual,
-            epochs=epochs,
-            dual_learning_rate=dual_learning_rate,
-            learning_rate=learning_rate,
-            sigma=sigma,
-            lambda_reg=lambda_reg,
+            dual_config=dual_config,
+            cfm_config=cfm_config,
+            weight_mode="exp_weighted",
             torch_wrapper=torch_wrapper,
             return_cfm=return_cfm,
             plot_every=plot_every,
