@@ -53,8 +53,8 @@ class SingleMoonDistribution(Distribution):
         return sample_single_moon(n).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
 class Simple2DGaussianDistribution(Distribution):
-    def __init__(self, mean: torch.Tensor, std: torch.Tensor):
-            self.mean, self.std, self.device = mean, std, torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self, mean: torch.Tensor, std: torch.Tensor, device="cpu"):
+            self.mean, self.std, self.device = mean, std, device
     def sample(self, n: int) -> torch.Tensor:
         return torch.randn(n, 2, device=self.device) * self.std + self.mean
 

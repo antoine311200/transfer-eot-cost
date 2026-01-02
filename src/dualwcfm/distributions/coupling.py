@@ -29,6 +29,25 @@ class CouplingDistribution(Distribution, ABC):
     def sample(self, n: int) -> torch.Tensor:
         return super().coupling_sample(n) # type: ignore
 
+class FunctionalCouplingDistribution(CouplingDistribution):
+    def __init__(self, coupling_func):
+        self.coupling_func = coupling_func
+
+    def sample(self, n: int) -> torch.Tensor:
+        x0, x1 = self.coupling_func(n)
+        return torch.stack([x0, x1], dim=0)
+
+    def sample_init(self, n: int) -> torch.Tensor:
+        x0, _ = self.coupling_func(n)
+        return x0
+
+    def sample_target(self, n: int) -> torch.Tensor:
+        _, x1 = self.coupling_func(n)
+        return x1
+
+    def coupling_sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.coupling_func(n)
+
 class RotatedShapeCoupling(CouplingDistribution):
     def __init__(self, centers, source_scale=0.1, target_scale=0.1, rotation_degrees=45.0, source_shift=(0,0), target_shift=(0,0), device=None):
         super().__init__()
