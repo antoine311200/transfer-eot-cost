@@ -63,7 +63,7 @@ scripts/experiment
 notebooks/
 data/
 *.pth
-*.ipynb
+# *.ipynb
 !heston_flow.ipynb
 *.png
 *.pdf

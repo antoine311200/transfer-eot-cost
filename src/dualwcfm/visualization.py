@@ -23,15 +23,15 @@ def plot_2d_flow_trajectories(
 
     segments = []
     for j in range(n_trajectories):
-        points = trajectories_np[:, j, :]
+        points = trajectories_np[:, j, :2]
         segs = np.stack([points[:-1], points[1:]], axis=1)
         segments.extend(segs)
 
     lc = LineCollection(segments, colors='blue', alpha=0.15, linewidths=0.5, zorder=1)
     ax.add_collection(lc)
 
-    start_points = trajectories_np[0, :, :]
-    end_points = trajectories_np[-1, :, :]
+    start_points = trajectories_np[0, :, :2]
+    end_points = trajectories_np[-1, :, :2]
 
     if target_points is not None:
         ax.scatter(target_points[:, 0], target_points[:, 1], c='orange', s=5, alpha=0.5, zorder=4, label="Target")
