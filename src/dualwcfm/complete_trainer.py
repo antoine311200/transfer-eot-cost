@@ -19,12 +19,12 @@ class TrainingConfig:
     dataset_size: int = 100_000
 
     marginal_epochs: int = 1000
-    pretrain_epochs: int = 5000
+    pretrain_epochs: int = 10000
     dual_epochs: int = 100
     cfm_epochs: int = 250
 
     iterations: int = 100
-    loss: str = "weighted"
+    loss: str = "implicit"
 
     sigma: float = 0.1
     l2_reg: float = 1e-2
@@ -169,15 +169,15 @@ class Strategy:
 
     def advance(self, step: int, x_mu_next: torch.Tensor, y_nu_next: torch.Tensor, num_steps: int = 100, sigma: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
         """Advance the coupling using the current flow models."""
-        x = x_mu_next.clone()
-        x_next = x_mu_next
+        x_condition = x_mu_next.clone()
+        xt = x_mu_next.clone()
+        dt = 1.0 / num_steps
         with torch.no_grad():
-            for t in torch.linspace(0, 1, steps=num_steps):
-                s = torch.full((x.shape[0], 1), t.item()).to(x.device)
-                u_s = self.forward_model(s, x, x_mu_next)
-                x = x + u_s * (1 / num_steps)
-        y_next = x.clone()
-        return x_next, y_next
+            for i in range(num_steps):
+                t = torch.ones(xt.shape[0], 1).to(xt.device) * (i * dt)
+                vt = self.forward_model(t, xt, x_condition)
+                xt = xt + vt * dt
+        return x_mu_next, xt
 
 class BidirectionalStrategy(Strategy):
     def __init__(self, wrapper, config: FeedForwardConfig):
@@ -259,14 +259,14 @@ class ImplicitCFMLoss(CFMLoss):
         s = torch.rand(config.batch_size, 1).to(config.device)
         xs = flow_matching.interpolate(x0, x1, s, config.sigma)
 
-        if step % 2 != 0:
-            x0, x1 = x1, x0
-
         with torch.no_grad():
             a, b = f_dual(x0), g_dual(x1)
             r = a + b
             log_w = r / config.iterations
             weight = torch.exp(log_w)
+
+            if step % 2 != 0:
+                x0, x1 = x1, x0
 
             b_hat_detached = model(s, xs, x0)
             b_ta = previous_model(s, xs, x0)
@@ -364,7 +364,7 @@ class Trainer:
             loss_nu.backward()
 
             mu_optimizer.step()
-            mu_optimizer.step()
+            nu_optimizer.step()
 
             pbar.set_postfix({"Loss mu": loss_mu.item(), "Loss nu": loss_nu.item()})
 
@@ -408,7 +408,7 @@ class Trainer:
 
     def train_duals_step(self, time_step: int):
         batch_size = self.config.batch_size
-        t_tensor = torch.full((batch_size, 1), time_step, device=self.config.device)
+        t_tensor = torch.full((batch_size, 1), time_step / self.config.iterations, device=self.config.device)
 
         (mu_model, _), (nu_model, _) = self.strategy.get_bridges(self.device)
         f_dual, g_dual, dual_optimizer = self.strategy.get_duals(self.device)
@@ -430,7 +430,7 @@ class Trainer:
 
             with torch.no_grad():
                 u_t = mu_model(t_tensor, x)
-                v_t = mu_model(t_tensor, y)
+                v_t = nu_model(t_tensor, y)
 
             a, a_mu = f_dual(x), f_dual(x_mu)
             b, b_nu = g_dual(y), g_dual(y_nu)
@@ -446,8 +446,11 @@ class Trainer:
             b_term = torch.mean(torch.sum(grad_b * v_t, dim=1))
 
             # Regularization (L2 + Lipshitz)
-            l2_reg = self.config.l2_reg * (torch.mean(a**2) + torch.mean(b**2))
-            lip_reg = self.config.lip_reg * (torch.mean(grad_a**2) + torch.mean(grad_b**2))
+            l2_reg = self.config.l2_reg * (torch.mean(a**2) + torch.mean(b**2) + torch.mean(a_mu**2) + torch.mean(b_nu**2))
+
+            gp_f = ((grad_a.norm(2, dim=1) - 1) ** 2).mean()
+            gp_g = ((grad_b.norm(2, dim=1) - 1) ** 2).mean()
+            lip_reg = self.config.lip_reg * (gp_f + gp_g)
 
             loss = 0.5 * coupling_term - a_term - b_term + l2_reg + lip_reg
 
@@ -492,7 +495,7 @@ class Trainer:
             for i in range(0, self.current_coupling.size, chunks):
                 x_mu, y_nu = self.mu_distribution.dataset[i:i+chunks].to(self.config.device), self.nu_distribution.dataset[i:i+chunks].to(self.config.device)
 
-                t_tensor = torch.full((x_mu.shape[0], 1), time_step).to(self.config.device)
+                t_tensor = torch.full((x_mu.shape[0], 1), time_step / self.config.iterations).to(self.config.device)
 
                 x_mu_next = x_mu.detach() + mu_model(t_tensor, x_mu) * (1 / self.config.iterations)
                 y_nu_next = y_nu.detach() + nu_model(t_tensor, y_nu) * (1 / self.config.iterations)
