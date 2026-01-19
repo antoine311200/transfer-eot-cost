@@ -29,6 +29,11 @@ class CouplingDistribution(Distribution, ABC):
     def sample(self, n: int) -> torch.Tensor:
         return super().coupling_sample(n) # type: ignore
 
+    def clone(self):
+        # Clone the coupling distribution and everything inside
+        import copy
+        return copy.deepcopy(self)
+
 class FunctionalCouplingDistribution(CouplingDistribution):
     def __init__(self, coupling_func):
         self.coupling_func = coupling_func
