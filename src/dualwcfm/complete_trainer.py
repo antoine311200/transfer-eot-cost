@@ -18,7 +18,7 @@ class TrainingConfig:
     device: torch.device
     dataset_size: int = 100_000
 
-    marginal_epochs: int = 1000
+    marginal_epochs: int = 2500
     pretrain_epochs: int = 10000
     dual_epochs: int = 100
     cfm_epochs: int = 250
@@ -27,8 +27,8 @@ class TrainingConfig:
     loss: str = "implicit"
 
     sigma: float = 0.1
-    l2_reg: float = 1e-2
-    lip_reg: float = 1e-2
+    l2_reg: float = 1e-3
+    lip_reg: float = 1e-3
 
     batch_size: int = 4096
 
@@ -37,7 +37,7 @@ class ModelConfig:
     dual_learning_rate = 1e-4
     mu_learning_rate = 1e-3
     nu_learning_rate = 1e-3
-    flow_learning_rate = 1e-3
+    flow_learning_rate = 5e-3
 
 @dataclass
 class FeedForwardConfig(ModelConfig):
@@ -500,7 +500,7 @@ class Trainer:
                 x_mu_next = x_mu.detach() + mu_model(t_tensor, x_mu) * (1 / self.config.iterations)
                 y_nu_next = y_nu.detach() + nu_model(t_tensor, y_nu) * (1 / self.config.iterations)
 
-                x_next, y_next = self.strategy.advance(time_step, x_mu_next, y_nu_next)
+                x_next, y_next = self.strategy.advance(time_step, x_mu_next.clone(), y_nu_next.clone())
 
                 self.current_coupling.dataset[:, i:i+chunks] = torch.stack([x_next, y_next], dim=0).cpu()
                 self.mu_distribution.dataset[i:i+chunks] = x_mu_next.cpu()
