@@ -29,6 +29,10 @@ class FixedSizeDistribution(Distribution):
         idx = torch.randint(0, self.size, (n,))
         return self.dataset[idx]
 
+    def clone(self):
+        import copy
+        return copy.deepcopy(self)
+
 class WeightedDistribution(Distribution):
     def __init__(self, base_fixed_distribution: FixedSizeDistribution):
         self.base_fixed_distribution = base_fixed_distribution
@@ -42,7 +46,7 @@ class WeightedDistribution(Distribution):
 
 class MoonDistribution(Distribution):
     def sample(self, n: int) -> torch.Tensor:
-        return sample_moons(n).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+        return sample_moons(n).to(torch.device("cuda" if torch.cuda.is_available() else "cpu")) * 0.25
 
 class EightGaussiansDistribution(Distribution):
     def sample(self, n: int) -> torch.Tensor:
@@ -114,16 +118,18 @@ class LinearInterpolationDistribution(DynamicLinearInterpolationDistribution):
         self.alpha = alpha
 
 class RotatedDistribution(Distribution):
-    def __init__(self, base_dist: Distribution, angle: float):
+    def __init__(self, base_dist: Distribution, angle: float, transformation: Optional[Callable[[torch.Tensor], torch.Tensor]] = None):
         """
         Rotates samples from base_dist by given angle (in radians).
 
         Args:
             base_dist: Base distribution to rotate
             angle: Rotation angle in radians
+            transformation: Optional transformation function to apply to samples before rotation
         """
         self.base_dist = base_dist
         self.angle = angle
+        self.transformation = transformation if transformation is not None else lambda x: x
 
         self._rotation_matrix = self._create_rotation_matrix(angle)
 
@@ -151,6 +157,7 @@ class RotatedDistribution(Distribution):
                 f"but base distribution has dimension {samples.shape[-1]}"
             )
 
+        samples = self.transformation(samples)
         self._rotation_matrix = self._rotation_matrix.to(samples.device)
         rotated_samples = torch.matmul(samples, self._rotation_matrix.T)
         return rotated_samples
