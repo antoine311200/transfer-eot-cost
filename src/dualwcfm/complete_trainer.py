@@ -15,6 +15,7 @@ from dualwcfm.distributions.distribution import Distribution, FixedSizeDistribut
 
 from torchdyn.core import NeuralODE
 
+
 @dataclass
 class TrainingConfig:
     device: torch.device
@@ -34,6 +35,7 @@ class TrainingConfig:
 
     batch_size: int = 4096
 
+
 @dataclass
 class ModelConfig:
     dual_learning_rate = 1e-4
@@ -41,10 +43,12 @@ class ModelConfig:
     nu_learning_rate = 1e-3
     flow_learning_rate = 5e-3
 
+
 @dataclass
 class FeedForwardConfig(ModelConfig):
     dimension: int
     hidden_size: int
+
 
 @dataclass
 class VisualizeConfig:
@@ -52,12 +56,12 @@ class VisualizeConfig:
     n_trajectories: int = 500
 
 
-
 class Visualizer:
     def __init__(self, config: VisualizeConfig):
         self.config = config
+        self.dim = 2
 
-    def display(self, epoch: int, trainer: 'Trainer'):
+    def display(self, epoch: int, trainer: "Trainer"):
         if epoch % self.config.show_each == 0:
             x, _ = trainer.current_coupling.coupling_sample(self.config.n_trajectories)
             y_target = trainer.new_target.sample(self.config.n_trajectories)
@@ -67,13 +71,15 @@ class Visualizer:
                 trainer.strategy.get_flow(epoch, trainer.device)[0],
                 num_steps=25,
                 sigma=trainer.config.sigma,
-                extend=True
+                extend=True,
             )
-            y = y[:, :2]
+            y = y[:, : self.dim]
             self._display_evolution(x.cpu(), y.cpu(), y_target.cpu())
             plt.show()
 
-    def _display_evolution(self, start_points: torch.Tensor, end_points: torch.Tensor, target_points: Optional[torch.Tensor] = None):
+    def _display_evolution(
+        self, start_points: torch.Tensor, end_points: torch.Tensor, target_points: Optional[torch.Tensor] = None
+    ):
         fig, ax = plt.subplots(figsize=(8, 8))
 
         segments = []
@@ -96,6 +102,61 @@ class Visualizer:
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.legend()
+        ax.set_aspect("equal")
+
+
+class Visualizer3D(Visualizer):
+    def __init__(self, config: VisualizeConfig):
+        super().__init__(config)
+        self.dim = 3
+
+    def _display_evolution(
+        self, start_points: torch.Tensor, end_points: torch.Tensor, target_points: Optional[torch.Tensor] = None
+    ):
+        from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(111, projection="3d")
+
+        for j in range(self.config.n_trajectories):
+            points = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
+            ax.plot(points[:, 0], points[:, 1], points[:, 2], c="gray", alpha=0.5, linewidth=0.8)
+
+        if target_points is not None:
+            ax.scatter(
+                target_points[:, 0],
+                target_points[:, 1],
+                target_points[:, 2],
+                c="orange",
+                s=5,
+                alpha=0.5,
+                zorder=4,
+                label="Target",
+            )
+        ax.scatter(
+            start_points[:, 0],
+            start_points[:, 1],
+            start_points[:, 2],
+            c="red",
+            s=5,
+            alpha=0.5,
+            zorder=4,
+            label="Start",
+        )
+        ax.scatter(
+            end_points[:, 0], end_points[:, 1], end_points[:, 2], c="green", s=5, alpha=0.5, zorder=4, label="End"
+        )
+        mid_points = (start_points + end_points) / 2
+        ax.scatter(
+            mid_points[:, 0], mid_points[:, 1], mid_points[:, 2], c="blue", s=5, alpha=0.5, zorder=4, label="Mid"
+        )
+        ax.grid(True, alpha=0.2)
+
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")  # type: ignore
+        ax.legend()
+        ax.set_box_aspect([1, 1, 1])  # type: ignore
 
 
 class node_wrapper(nn.Module):
@@ -109,6 +170,7 @@ class node_wrapper(nn.Module):
             t = t.repeat(x.shape[0])[:, None]
         return self.model(torch.cat([x, t], dim=1))
 
+
 class MLP(torch.nn.Module):
     def __init__(self, dim, out_dim=None, w=64, time_varying=False, use_norm=None):
         super().__init__()
@@ -117,10 +179,18 @@ class MLP(torch.nn.Module):
             out_dim = dim
         self.net = torch.nn.Sequential(
             torch.nn.Linear(dim + (1 if time_varying else 0), w),
-            torch.nn.BatchNorm1d(w) if use_norm == 'batch' else torch.nn.LayerNorm(w) if use_norm == 'layer' else torch.nn.Identity(),
+            (
+                torch.nn.BatchNorm1d(w)
+                if use_norm == "batch"
+                else torch.nn.LayerNorm(w) if use_norm == "layer" else torch.nn.Identity()
+            ),
             torch.nn.SELU(),
             torch.nn.Linear(w, w),
-            torch.nn.BatchNorm1d(w) if use_norm == 'batch' else torch.nn.LayerNorm(w) if use_norm == 'layer' else torch.nn.Identity(),
+            (
+                torch.nn.BatchNorm1d(w)
+                if use_norm == "batch"
+                else torch.nn.LayerNorm(w) if use_norm == "layer" else torch.nn.Identity()
+            ),
             torch.nn.SELU(),
             torch.nn.Linear(w, out_dim),
         )
@@ -128,8 +198,11 @@ class MLP(torch.nn.Module):
     def forward(self, x):
         return self.net(x)
 
+
 class ConditionalFlowMatching:
-    def vector_field(self, x: torch.Tensor, t: torch.Tensor, x0: torch.Tensor, x1: torch.Tensor, extend: bool = True) -> torch.Tensor:
+    def vector_field(
+        self, x: torch.Tensor, t: torch.Tensor, x0: torch.Tensor, x1: torch.Tensor, extend: bool = True
+    ) -> torch.Tensor:
         """Compute the vector field at position x and time t."""
         if extend:
             return torch.cat([x1 - x0, torch.zeros_like(x0)], dim=1)
@@ -140,7 +213,9 @@ class ConditionalFlowMatching:
         """Interpolate between x0 and x1 at time t with noise sigma."""
         return (1 - t) * x0 + t * x1 + sigma * torch.randn_like(x0) * torch.sqrt(t * (1 - t))
 
-    def evolve(self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True) -> torch.Tensor:
+    def evolve(
+        self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True
+    ) -> torch.Tensor:
         """Evolve the points x_init over time t."""
         node = NeuralODE(node_wrapper(model), solver="dopri5", sensitivity="adjoint", atol=1e-4, rtol=1e-4)
         t_span = torch.linspace(0, 1, num_steps).to(x_init.device)
@@ -155,26 +230,42 @@ class Strategy:
     def __init__(self, wrapper, config: FeedForwardConfig):
         self.wrapper = wrapper
 
-        self.mu_bridge = wrapper(MLP(dim=config.dimension, out_dim=config.dimension, w=config.hidden_size, time_varying=True))
-        self.nu_bridge = wrapper(MLP(dim=config.dimension, out_dim=config.dimension, w=config.hidden_size, time_varying=True))
-        self.f_dual   = wrapper(MLP(dim=config.dimension, out_dim=1, w=config.hidden_size, time_varying=False))
-        self.g_dual   = wrapper(MLP(dim=config.dimension, out_dim=1, w=config.hidden_size, time_varying=False))
+        self.mu_bridge = wrapper(
+            MLP(dim=config.dimension, out_dim=config.dimension, w=config.hidden_size, time_varying=True)
+        )
+        self.nu_bridge = wrapper(
+            MLP(dim=config.dimension, out_dim=config.dimension, w=config.hidden_size, time_varying=True)
+        )
+        self.f_dual = wrapper(MLP(dim=config.dimension, out_dim=1, w=config.hidden_size, time_varying=False))
+        self.g_dual = wrapper(MLP(dim=config.dimension, out_dim=1, w=config.hidden_size, time_varying=False))
 
         self.mu_optimizer = optim.Adam(self.mu_bridge.parameters(), lr=config.mu_learning_rate)
         self.nu_optimizer = optim.Adam(self.nu_bridge.parameters(), lr=config.nu_learning_rate)
-        self.dual_optimizer = optim.Adam(list(self.f_dual.parameters()) + list(self.g_dual.parameters()), lr=config.dual_learning_rate)
+        self.dual_optimizer = optim.Adam(
+            list(self.f_dual.parameters()) + list(self.g_dual.parameters()), lr=config.dual_learning_rate
+        )
 
-        self.forward_model = wrapper(MLP(dim=2*config.dimension, out_dim=2*config.dimension, w=config.hidden_size, time_varying=True))
-        self.previous_forward_model = wrapper(MLP(dim=2*config.dimension, out_dim=2*config.dimension, w=config.hidden_size, time_varying=True))
+        self.forward_model = wrapper(
+            MLP(dim=2 * config.dimension, out_dim=2 * config.dimension, w=config.hidden_size, time_varying=True)
+        )
+        self.previous_forward_model = wrapper(
+            MLP(dim=2 * config.dimension, out_dim=2 * config.dimension, w=config.hidden_size, time_varying=True)
+        )
 
         self.forward_optimizer = optim.Adam(self.forward_model.parameters(), lr=config.flow_learning_rate)
 
         self.config = config
 
         # Save initial state
-        self.initial_mu_bridge = wrapper(MLP(dim=config.dimension, out_dim=config.dimension, w=config.hidden_size, time_varying=True))
-        self.initial_nu_bridge = wrapper(MLP(dim=config.dimension, out_dim=config.dimension, w=config.hidden_size, time_varying=True))
-        self.initial_forward_model = wrapper(MLP(dim=2*config.dimension, out_dim=2*config.dimension, w=config.hidden_size, time_varying=True))
+        self.initial_mu_bridge = wrapper(
+            MLP(dim=config.dimension, out_dim=config.dimension, w=config.hidden_size, time_varying=True)
+        )
+        self.initial_nu_bridge = wrapper(
+            MLP(dim=config.dimension, out_dim=config.dimension, w=config.hidden_size, time_varying=True)
+        )
+        self.initial_forward_model = wrapper(
+            MLP(dim=2 * config.dimension, out_dim=2 * config.dimension, w=config.hidden_size, time_varying=True)
+        )
 
     def get_duals(self, device):
         return self.f_dual.to(device), self.g_dual.to(device), self.dual_optimizer
@@ -194,7 +285,9 @@ class Strategy:
     def get_initial_flow(self, step: int, device):
         return self.initial_forward_model.to(device)
 
-    def advance(self, step: int, x_mu_next: torch.Tensor, y_nu_next: torch.Tensor, num_steps: int = 100, sigma: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
+    def advance(
+        self, step: int, x_mu_next: torch.Tensor, y_nu_next: torch.Tensor, num_steps: int = 100, sigma: float = 0.0
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Advance the coupling using the current flow models."""
         x_condition = x_mu_next.clone()
         xt = x_mu_next.clone()
@@ -203,19 +296,26 @@ class Strategy:
         with torch.no_grad():
             for i in range(num_steps):
                 t = torch.ones(xt.shape[0], 1).to(xt.device) * (i * dt)
-                vt = model(t, xt, x_condition)[:, :xt.shape[1]//2]
+                vt = model(t, xt, x_condition)[:, : xt.shape[1] // 2]
                 xt = xt + vt * dt
         return x_mu_next, xt.clone()
+
 
 class BidirectionalStrategy(Strategy):
     def __init__(self, wrapper, config: FeedForwardConfig):
         super().__init__(wrapper, config)
 
-        self.backward_model =  wrapper(MLP(dim=2*config.dimension, out_dim=2*config.dimension, w=config.hidden_size, time_varying=True))
-        self.previous_backward_model = wrapper(MLP(dim=2*config.dimension, out_dim=2*config.dimension, w=config.hidden_size, time_varying=True))
+        self.backward_model = wrapper(
+            MLP(dim=2 * config.dimension, out_dim=2 * config.dimension, w=config.hidden_size, time_varying=True)
+        )
+        self.previous_backward_model = wrapper(
+            MLP(dim=2 * config.dimension, out_dim=2 * config.dimension, w=config.hidden_size, time_varying=True)
+        )
         self.backward_optimizer = optim.Adam(self.backward_model.parameters(), lr=config.flow_learning_rate)
 
-        self.initial_backward_model = wrapper(MLP(dim=2*config.dimension, out_dim=2*config.dimension, w=config.hidden_size, time_varying=True))
+        self.initial_backward_model = wrapper(
+            MLP(dim=2 * config.dimension, out_dim=2 * config.dimension, w=config.hidden_size, time_varying=True)
+        )
 
     def get_flow(self, step: int, device):
         model = self.forward_model if step % 2 == 0 else self.backward_model
@@ -230,7 +330,9 @@ class BidirectionalStrategy(Strategy):
         initial_model = self.initial_forward_model if step % 2 == 0 else self.initial_backward_model
         return initial_model.to(device)
 
-    def advance(self, step: int, x_mu_next: torch.Tensor, y_nu_next: torch.Tensor, num_steps: int = 100, sigma: float = 0):
+    def advance(
+        self, step: int, x_mu_next: torch.Tensor, y_nu_next: torch.Tensor, num_steps: int = 100, sigma: float = 0
+    ):
         if step % 2 == 0:
             return super().advance(step, x_mu_next, y_nu_next, num_steps, sigma)
         else:
@@ -238,12 +340,16 @@ class BidirectionalStrategy(Strategy):
             return x_next, y_next
 
 
-
-
-
-
 class CFMLoss:
-    def execute(self, x0: torch.Tensor, x1: torch.Tensor, strategy: Strategy, config: TrainingConfig, flow_matching: ConditionalFlowMatching, step: int) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
+    def execute(
+        self,
+        x0: torch.Tensor,
+        x1: torch.Tensor,
+        strategy: Strategy,
+        config: TrainingConfig,
+        flow_matching: ConditionalFlowMatching,
+        step: int,
+    ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         """Compute the CFM loss."""
         raise NotImplementedError("method not implemented")
 
@@ -258,11 +364,16 @@ class CFMLoss:
         else:
             raise NameError(f"loss name `{loss_name}` does not exist (choose between weighted, explicit, implicit)")
 
+
 class WeightedCFMLoss(CFMLoss):
-    def execute(self,
-        x0: torch.Tensor, x1: torch.Tensor,
+    def execute(
+        self,
+        x0: torch.Tensor,
+        x1: torch.Tensor,
         strategy: Strategy,
-        config: TrainingConfig, flow_matching: ConditionalFlowMatching, step: int
+        config: TrainingConfig,
+        flow_matching: ConditionalFlowMatching,
+        step: int,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         f_dual, g_dual, _ = strategy.get_duals(config.device)
         model, optimizer = strategy.get_flow(0, config.device)
@@ -281,11 +392,21 @@ class WeightedCFMLoss(CFMLoss):
 
         return (weight * (u_s - target_u_s) ** 2).mean(), model, optimizer
 
+
 class ExplicitCFMLoss(CFMLoss):
     pass
 
+
 class ImplicitCFMLoss(CFMLoss):
-    def execute(self, x0: torch.Tensor, x1: torch.Tensor, strategy: Strategy, config: TrainingConfig, flow_matching: ConditionalFlowMatching, step: int) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
+    def execute(
+        self,
+        x0: torch.Tensor,
+        x1: torch.Tensor,
+        strategy: Strategy,
+        config: TrainingConfig,
+        flow_matching: ConditionalFlowMatching,
+        step: int,
+    ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         f_dual, g_dual, _ = strategy.get_duals(config.device)
         model, optimizer = strategy.get_flow(step, config.device)
         previous_model = strategy.get_previous_flow(step, config.device)
@@ -311,11 +432,6 @@ class ImplicitCFMLoss(CFMLoss):
         return ((u_s - target) ** 2).mean(), model, optimizer
 
 
-
-
-
-
-
 class Trainer:
 
     def __init__(
@@ -332,7 +448,6 @@ class Trainer:
         self.initial_coupling = initial_coupling
         self.new_source = new_source
         self.new_target = new_target
-
 
         self.visualizer = visualizer
         self.strategy = strategy
@@ -366,7 +481,7 @@ class Trainer:
         self.train_marginal_flows(retrain)
 
         # Pretrain phase
-        if isinstance(self.strategy, BidirectionalStrategy) or hasattr(self.strategy, 'backward_model'):
+        if isinstance(self.strategy, BidirectionalStrategy) or hasattr(self.strategy, "backward_model"):
             print("Pretraining bidirectional flows.")
             forward_model, forward_optimizer = self.strategy.get_flow(0, self.device)
             backward_model, backward_optimizer = self.strategy.get_flow(1, self.device)
@@ -396,8 +511,8 @@ class Trainer:
                 model.load_state_dict(initial_model.state_dict())
 
         # General training loop
-        for iteration in range(self.config.iterations):#, desc="Iteration loop"):
-            print(f'Iteration {iteration+1}/{self.config.iterations}')
+        for iteration in range(self.config.iterations):  # , desc="Iteration loop"):
+            print(f"Iteration {iteration+1}/{self.config.iterations}")
             self.train_duals_step(iteration)
             self.train_cfm_step(iteration)
             self.advance_step(iteration)
@@ -420,9 +535,13 @@ class Trainer:
                 x0, x1, y0, y1 = x0.to(device), x1.to(device), y0.to(device), y1.to(device)
 
                 t = torch.rand(batch_size, 1).to(device)
-                xt, yt = self.flow_matching.interpolate(x0, x1, t, sigma), self.flow_matching.interpolate(y0, y1, t, sigma)
+                xt, yt = self.flow_matching.interpolate(x0, x1, t, sigma), self.flow_matching.interpolate(
+                    y0, y1, t, sigma
+                )
                 ut, vt = mu_model(t, xt), nu_model(t, yt)
-                ut_true, vt_true = self.flow_matching.vector_field(xt, t, x0, x1, extend=False), self.flow_matching.vector_field(yt, t, y0, y1, extend=False)
+                ut_true, vt_true = self.flow_matching.vector_field(
+                    xt, t, x0, x1, extend=False
+                ), self.flow_matching.vector_field(yt, t, y0, y1, extend=False)
 
                 mu_optimizer.zero_grad()
                 nu_optimizer.zero_grad()
@@ -449,11 +568,7 @@ class Trainer:
         start_points = start_points.to(self.device)
 
         end_points = self.flow_matching.evolve(
-            start_points,
-            self.strategy.mu_bridge,
-            num_steps=50,
-            sigma=self.config.sigma,
-            extend=False
+            start_points, self.strategy.mu_bridge, num_steps=50, sigma=self.config.sigma, extend=False
         )
         self.visualizer._display_evolution(start_points.cpu(), end_points.cpu())
         plt.show()
@@ -462,11 +577,7 @@ class Trainer:
         start_points = start_points.to(self.device)
 
         end_points = self.flow_matching.evolve(
-            start_points,
-            self.strategy.nu_bridge,
-            num_steps=50,
-            sigma=self.config.sigma,
-            extend=False
+            start_points, self.strategy.nu_bridge, num_steps=50, sigma=self.config.sigma, extend=False
         )
         self.visualizer._display_evolution(start_points.cpu(), end_points.cpu())
         plt.show()
@@ -503,8 +614,10 @@ class Trainer:
 
         (mu_model, _), (nu_model, _) = self.strategy.get_bridges(self.device)
         f_dual, g_dual, dual_optimizer = self.strategy.get_duals(self.device)
-        f_dual.train(); g_dual.train()
-        mu_model.eval(); nu_model.eval()
+        f_dual.train()
+        g_dual.train()
+        mu_model.eval()
+        nu_model.eval()
 
         pbar = trange(self.config.dual_epochs, desc="Dual Training")
 
@@ -527,7 +640,7 @@ class Trainer:
             b, b_nu = g_dual(y), g_dual(y_nu)
 
             # Coupling term
-            coupling_term = torch.mean((a - a.mean() + b - b.mean())**2)
+            coupling_term = torch.mean((a - a.mean() + b - b.mean()) ** 2)
 
             # Divergence terms
             grad_a = torch.autograd.grad(a_mu.sum(), x_mu, create_graph=True, retain_graph=True, only_inputs=True)[0]
@@ -537,7 +650,9 @@ class Trainer:
             b_term = torch.mean(torch.sum(grad_b * v_t, dim=1))
 
             # Regularization (L2 + Lipshitz)
-            l2_reg = self.config.l2_reg * (torch.mean(a**2) + torch.mean(b**2) + torch.mean(a_mu**2) + torch.mean(b_nu**2))
+            l2_reg = self.config.l2_reg * (
+                torch.mean(a**2) + torch.mean(b**2) + torch.mean(a_mu**2) + torch.mean(b_nu**2)
+            )
 
             gp_f = ((grad_a.norm(2, dim=1) - 1) ** 2).mean()
             gp_g = ((grad_b.norm(2, dim=1) - 1) ** 2).mean()
@@ -561,12 +676,13 @@ class Trainer:
         previous_model.load_state_dict(model.state_dict())
         previous_model.eval()
 
-
         for epoch in pbar:
             x0, x1 = self.current_coupling.coupling_sample(batch_size)
             x0, x1 = x0.to(self.config.device), x1.to(self.config.device)
 
-            loss, model, optimizer = self.loss_cfm.execute(x0, x1, self.strategy, self.config, self.flow_matching, time_step)
+            loss, model, optimizer = self.loss_cfm.execute(
+                x0, x1, self.strategy, self.config, self.flow_matching, time_step
+            )
 
             optimizer.zero_grad()
             loss.backward()
@@ -580,11 +696,14 @@ class Trainer:
         chunks = 100_000
 
         (mu_model, _), (nu_model, _) = self.strategy.get_bridges(self.device)
-        mu_model.eval(); nu_model.eval()
+        mu_model.eval()
+        nu_model.eval()
 
         with torch.no_grad():
             for i in range(0, self.current_coupling.size, chunks):
-                x_mu, y_nu = self.mu_distribution.dataset[i:i+chunks].to(self.config.device), self.nu_distribution.dataset[i:i+chunks].to(self.config.device)
+                x_mu, y_nu = self.mu_distribution.dataset[i : i + chunks].to(
+                    self.config.device
+                ), self.nu_distribution.dataset[i : i + chunks].to(self.config.device)
 
                 t_tensor = torch.full((x_mu.shape[0], 1), time_step / self.config.iterations).to(self.config.device)
 
@@ -595,7 +714,11 @@ class Trainer:
 
                 num_steps = 50
                 flow_model_mu = self.strategy.forward_model
-                flow_model_nu = self.strategy.backward_model if isinstance(self.strategy, BidirectionalStrategy) else self.strategy.forward_model
+                flow_model_nu = (
+                    self.strategy.backward_model
+                    if isinstance(self.strategy, BidirectionalStrategy)
+                    else self.strategy.forward_model
+                )
                 device = self.config.device
                 dt = 1.0 / num_steps
                 if time_step % 2 == 0:
@@ -619,26 +742,26 @@ class Trainer:
                         yt = yt + vt * dt
                     x_next = yt.clone()
 
-                self.current_coupling.dataset[:, i:i+chunks] = torch.stack([x_next, y_next], dim=0).cpu()
-                self.mu_distribution.dataset[i:i+chunks] = x_mu_next.cpu()
-                self.nu_distribution.dataset[i:i+chunks] = y_nu_next.cpu()
+                self.current_coupling.dataset[:, i : i + chunks] = torch.stack([x_next, y_next], dim=0).cpu()
+                self.mu_distribution.dataset[i : i + chunks] = x_mu_next.cpu()
+                self.nu_distribution.dataset[i : i + chunks] = y_nu_next.cpu()
 
-        # Plot mu and nu distributions after advancing
-        mu_samples = self.mu_distribution.sample(2500).to(self.device)
-        nu_samples = self.nu_distribution.sample(2500).to(self.device)
-        # Get coupling samples
-        (mu_coupling_samples, nu_coupling_samples) = self.current_coupling.coupling_sample(250)
-        mu_coupling_samples = mu_coupling_samples.to(self.device)
-        nu_coupling_samples = nu_coupling_samples.to(self.device)
-        plt.figure(figsize=(6, 6))
-        plt.plot(mu_samples[:, 0].cpu(), mu_samples[:, 1].cpu(), '.', label='Mu Distribution', alpha=0.5)
-        plt.plot(nu_samples[:, 0].cpu(), nu_samples[:, 1].cpu(), '.', label='Nu Distribution', alpha=0.5)
-        plt.plot(mu_coupling_samples[:, 0].cpu(), mu_coupling_samples[:, 1].cpu(), 'x', label='Mu Coupling Samples', alpha=0.5)
-        plt.plot(nu_coupling_samples[:, 0].cpu(), nu_coupling_samples[:, 1].cpu(), 'x', label='Nu Coupling Samples', alpha=0.5)
-        # Line between coupling samples
-        for j in range(mu_coupling_samples.shape[0]):
-            plt.plot([mu_coupling_samples[j, 0].cpu(), nu_coupling_samples[j, 0].cpu()],
-                     [mu_coupling_samples[j, 1].cpu(), nu_coupling_samples[j, 1].cpu()],
-                     'k-', alpha=0.1)
-        plt.title(f'Distributions after Advancing Step {time_step+1}')
-        plt.show()
+        # # Plot mu and nu distributions after advancing
+        # mu_samples = self.mu_distribution.sample(2500).to(self.device)
+        # nu_samples = self.nu_distribution.sample(2500).to(self.device)
+        # # Get coupling samples
+        # (mu_coupling_samples, nu_coupling_samples) = self.current_coupling.coupling_sample(250)
+        # mu_coupling_samples = mu_coupling_samples.to(self.device)
+        # nu_coupling_samples = nu_coupling_samples.to(self.device)
+        # plt.figure(figsize=(6, 6))
+        # plt.plot(mu_samples[:, 0].cpu(), mu_samples[:, 1].cpu(), '.', label='Mu Distribution', alpha=0.5)
+        # plt.plot(nu_samples[:, 0].cpu(), nu_samples[:, 1].cpu(), '.', label='Nu Distribution', alpha=0.5)
+        # plt.plot(mu_coupling_samples[:, 0].cpu(), mu_coupling_samples[:, 1].cpu(), 'x', label='Mu Coupling Samples', alpha=0.5)
+        # plt.plot(nu_coupling_samples[:, 0].cpu(), nu_coupling_samples[:, 1].cpu(), 'x', label='Nu Coupling Samples', alpha=0.5)
+        # # Line between coupling samples
+        # for j in range(mu_coupling_samples.shape[0]):
+        #     plt.plot([mu_coupling_samples[j, 0].cpu(), nu_coupling_samples[j, 0].cpu()],
+        #              [mu_coupling_samples[j, 1].cpu(), nu_coupling_samples[j, 1].cpu()],
+        #              'k-', alpha=0.1)
+        # plt.title(f'Distributions after Advancing Step {time_step+1}')
+        # plt.show()

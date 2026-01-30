@@ -4,7 +4,8 @@ from .distribution import (
     Simple2DGaussianDistribution,
     MoonDistribution,
     RotatedDistribution,
-    FixedSizeDistribution
+    FixedSizeDistribution,
+    SphereDistribution
 )
 from .coupling import CouplingDistribution, FixedSizeCouplingDistribution, MarginalDistribution, RotatedShapeCoupling
 
