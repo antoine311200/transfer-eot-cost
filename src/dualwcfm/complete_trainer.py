@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -170,6 +170,38 @@ class Visualizer3D(Visualizer):
         ax.legend()
         ax.set_box_aspect([1, 1, 1])  # type: ignore
 
+class VisualizerImage(Visualizer):
+    def __init__(self, config: VisualizeConfig, img_shape: Tuple[int, int]):
+        super().__init__(config)
+        self.img_shape = img_shape
+        self.dim = img_shape[0] * img_shape[1]
+
+    def _display_evolution(
+        self, start_points: torch.Tensor, end_points: torch.Tensor, target_points: Optional[torch.Tensor] = None
+    ):
+        n = start_points.shape[0]
+        fig, axes = plt.subplots(3, n, figsize=(3 * n, 9))
+
+        for i in range(n):
+            start_img = start_points[i].reshape(self.img_shape).cpu().numpy()
+            end_img = end_points[i].reshape(self.img_shape).cpu().numpy()
+
+            axes[0, i].imshow(start_img, cmap="gray")
+            axes[0, i].set_title("Start")
+            axes[0, i].axis("off")
+
+            axes[1, i].imshow(end_img, cmap="gray")
+            axes[1, i].set_title("End")
+            axes[1, i].axis("off")
+
+            if target_points is not None:
+                target_img = target_points[i].reshape(self.img_shape).cpu().numpy()
+                axes[2, i].imshow(target_img, cmap="gray")
+                axes[2, i].set_title("Target")
+                axes[2, i].axis("off")
+
+        plt.tight_layout()
+
 
 class node_wrapper(nn.Module):
     def __init__(self, model):
@@ -319,7 +351,8 @@ class ConditionalFlowMatching:
         self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True
     ) -> torch.Tensor:
         """Evolve the points x_init over time t."""
-        node = NeuralODE(node_wrapper(model), solver="dopri5", sensitivity="adjoint", atol=1e-4, rtol=1e-4)
+        node = NeuralODE(model, solver="dopri5", sensitivity="adjoint", atol=1e-4, rtol=1e-4)
+        # node = NeuralODE(node_wrapper(model), solver="dopri5", sensitivity="adjoint", atol=1e-4, rtol=1e-4)
         t_span = torch.linspace(0, 1, num_steps).to(x_init.device)
         with torch.no_grad():
             if extend:
@@ -557,12 +590,13 @@ class Trainer:
         mu_distribution, nu_distribution = initial_coupling.get_marginals()
         self.mu_distribution = FixedSizeDistribution(mu_distribution, size=self.config.dataset_size)
         self.nu_distribution = FixedSizeDistribution(nu_distribution, size=self.config.dataset_size)
-        self.current_coupling = FixedSizeCouplingDistribution(initial_coupling.clone(), size=self.config.dataset_size)
+        self.current_coupling = FixedSizeCouplingDistribution(initial_coupling, size=self.config.dataset_size)
+        # self.current_coupling = FixedSizeCouplingDistribution(initial_coupling.clone(), size=self.config.dataset_size)
 
         # Copy to Initial distribution for later use
-        self.initial_mu_distribution = self.mu_distribution.clone()
-        self.initial_nu_distribution = self.nu_distribution.clone()
-        self.initial_coupling_distribution = self.current_coupling.clone()
+        self.initial_mu_distribution = self.mu_distribution#.clone()
+        self.initial_nu_distribution = self.nu_distribution#.clone()
+        self.initial_coupling_distribution = self.current_coupling#.clone()
 
     def _load_pretrained_models(self, dir):
         # Load pretrained models if available
@@ -719,6 +753,7 @@ class Trainer:
                     initial_nu_model.state_dict(),
                     f"{save}/initial_nu_model.pth",
                 )
+                print("Initial marginal flow models saved.")
         else:
             print("Skipping marginal flow matching retraining.")
             print("Loading initial marginal flow models.")
@@ -729,24 +764,26 @@ class Trainer:
                 mu_model.load_state_dict(initial_mu_model.state_dict())
                 nu_model.load_state_dict(initial_nu_model.state_dict())
 
-        start_points = self.mu_distribution.sample(2500)
+        samples = 6 # 2500
+        start_points = self.mu_distribution.sample(samples)
         start_points = start_points.to(self.device)
+        print(start_points.shape)
 
         end_points = self.flow_matching.evolve(
             start_points, self.strategy.mu_bridge, num_steps=50, sigma=self.config.sigma, extend=False
         )
-        target_points = self.new_source.sample(2500)
+        target_points = self.new_source.sample(samples)
         target_points = target_points.to(self.device)
         self.visualizer._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
         plt.show()
 
-        start_points = self.nu_distribution.sample(2500)
+        start_points = self.nu_distribution.sample(samples)
         start_points = start_points.to(self.device)
 
         end_points = self.flow_matching.evolve(
             start_points, self.strategy.nu_bridge, num_steps=50, sigma=self.config.sigma, extend=False
         )
-        target_points = self.new_target.sample(2500)
+        target_points = self.new_target.sample(samples)
         target_points = target_points.to(self.device)
         self.visualizer._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
         plt.show()

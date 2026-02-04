@@ -69,3 +69,5 @@ data/
 *.pdf
 *.npy
 *.pkl
+
+experiments/
