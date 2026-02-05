@@ -82,6 +82,9 @@ class FeedForwardConfig(ModelConfig):
 class VisualizeConfig:
     show_each: int = 10
     n_trajectories: int = 500
+    # Visualization intervals for training phases (0 = disabled)
+    show_each_marginal: int = 0  # During marginal flow training
+    show_each_pretrain: int = 0  # During pretraining
 
 
 class Visualizer:
@@ -131,6 +134,66 @@ class Visualizer:
         ax.set_ylabel("Y")
         ax.legend()
         ax.set_aspect("equal")
+
+    def display_marginal(self, epoch: int, trainer: "Trainer", model: nn.Module,
+                         source_dist, target_dist, title: str = "Marginal Flow"):
+        """Display marginal flow evolution during training.
+
+        Args:
+            epoch: Current epoch number
+            trainer: The trainer instance
+            model: The marginal flow model (mu_bridge or nu_bridge)
+            source_dist: Source distribution to sample from
+            target_dist: Target distribution to compare against
+            title: Title for the plot
+        """
+        if self.config.show_each_marginal <= 0 or epoch % self.config.show_each_marginal != 0:
+            return
+
+        n_samples = min(self.config.n_trajectories, 500)
+        start_points = source_dist.sample(n_samples).to(trainer.device)
+
+        with torch.no_grad():
+            end_points = trainer.flow_matching.evolve(
+                start_points, model, num_steps=50, sigma=trainer.config.sigma, extend=False
+            )
+
+        target_points = target_dist.sample(n_samples).to(trainer.device)
+
+        self._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
+        plt.suptitle(f"{title} - Epoch {epoch}")
+        plt.show()
+
+    def display_pretrain(self, epoch: int, trainer: "Trainer", model: nn.Module, backward: bool = False):
+        """Display pretraining flow evolution during training.
+
+        Args:
+            epoch: Current epoch number
+            trainer: The trainer instance
+            model: The CFM model being pretrained
+            backward: Whether this is backward flow (swaps source/target)
+        """
+        if self.config.show_each_pretrain <= 0 or epoch % self.config.show_each_pretrain != 0:
+            return
+
+        n_samples = min(self.config.n_trajectories, 500)
+        x0, x1 = trainer.initial_coupling.coupling_sample(n_samples)
+        x0, x1 = x0.to(trainer.device), x1.to(trainer.device)
+
+        if backward:
+            x0, x1 = x1, x0
+
+        with torch.no_grad():
+            end_points = trainer.flow_matching.evolve(
+                x0, model, num_steps=50, sigma=trainer.config.sigma, extend=True
+            )
+            # Extract first half of output (evolved part)
+            end_points = end_points[:, :self.dim]
+
+        direction = "Backward" if backward else "Forward"
+        self._display_evolution(x0.cpu(), end_points.cpu(), x1.cpu())
+        plt.suptitle(f"Pretrain {direction} Flow - Epoch {epoch}")
+        plt.show()
 
 
 class Visualizer3D(Visualizer):
@@ -274,6 +337,51 @@ class VisualizerImage(Visualizer):
                 axes[2, i].axis("off")
 
         plt.tight_layout()
+
+    def display_marginal(self, epoch: int, trainer: "Trainer", model: nn.Module,
+                         source_dist, target_dist, title: str = "Marginal Flow"):
+        """Display marginal flow evolution during training for images."""
+        if self.config.show_each_marginal <= 0 or epoch % self.config.show_each_marginal != 0:
+            return
+
+        n_samples = min(self.config.n_trajectories, 6)
+        start_points = source_dist.sample(n_samples).to(trainer.device)
+
+        with torch.no_grad():
+            end_points = trainer.flow_matching.evolve(
+                start_points, model, num_steps=50, sigma=trainer.config.sigma, extend=False
+            )
+
+        target_points = target_dist.sample(n_samples).to(trainer.device)
+
+        self._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
+        plt.suptitle(f"{title} - Epoch {epoch}")
+        plt.show()
+
+    def display_pretrain(self, epoch: int, trainer: "Trainer", model: nn.Module, backward: bool = False):
+        """Display pretraining flow evolution during training for images."""
+        if self.config.show_each_pretrain <= 0 or epoch % self.config.show_each_pretrain != 0:
+            return
+
+        n_samples = min(self.config.n_trajectories, 6)
+        x0, x1 = trainer.initial_coupling.coupling_sample(n_samples)
+        x0, x1 = x0.to(trainer.device), x1.to(trainer.device)
+
+        if backward:
+            x0, x1 = x1, x0
+
+        with torch.no_grad():
+            end_points = trainer.flow_matching.evolve(
+                x0, model, num_steps=50, sigma=trainer.config.sigma, extend=True
+            )
+            # Extract first half of channels (evolved part)
+            if is_image_tensor(end_points):
+                end_points = end_points[:, :self.img_shape[0], :, :]
+
+        direction = "Backward" if backward else "Forward"
+        self._display_evolution(x0.cpu(), end_points.cpu(), x1.cpu())
+        plt.suptitle(f"Pretrain {direction} Flow - Epoch {epoch}")
+        plt.show()
 
 
 class node_wrapper(nn.Module):
@@ -885,6 +993,18 @@ class Trainer:
 
                 pbar.set_postfix({"Loss mu": loss_mu.item(), "Loss nu": loss_nu.item()})
 
+                # Visualize marginal flows during training
+                self.visualizer.display_marginal(
+                    epoch, self, mu_model,
+                    self.mu_distribution, self.new_source,
+                    title="Mu Marginal Flow"
+                )
+                self.visualizer.display_marginal(
+                    epoch, self, nu_model,
+                    self.nu_distribution, self.new_target,
+                    title="Nu Marginal Flow"
+                )
+
             initial_mu_model.load_state_dict(mu_model.state_dict())
             initial_nu_model.load_state_dict(nu_model.state_dict())
 
@@ -962,6 +1082,9 @@ class Trainer:
             optimizer.step()
 
             pbar.set_postfix({"Pretrain Loss": loss.item()})
+
+            # Visualize pretraining flow
+            self.visualizer.display_pretrain(epoch, self, model, backward=backward)
 
     def train_duals_step(self, time_step: int):
         batch_size = self.config.batch_size
@@ -1072,48 +1195,51 @@ class Trainer:
         self.visualizer.display(time_step, self)
 
     def advance_step(self, time_step: int):
-        chunks = 100_000 if not self.config.image_shape else 256  # Smaller chunks for images
+        # Use coupling's chunk size for disk-based coupling, otherwise use defaults
+        if isinstance(self.current_coupling, DiskCouplingDistribution):
+            chunk_size = self.current_coupling.chunk_size
+        else:
+            chunk_size = 100_000 if not self.config.image_shape else 256
 
         (mu_model, _), (nu_model, _) = self.strategy.get_bridges(self.device)
         mu_model.eval()
         nu_model.eval()
 
-        is_image = self.config.image_shape is not None
+        use_disk = isinstance(self.current_coupling, DiskCouplingDistribution)
+        n_chunks = (self.current_coupling.size + chunk_size - 1) // chunk_size
 
         with torch.no_grad():
-            for i in range(0, self.current_coupling.size, chunks):
+            for chunk_idx in trange(n_chunks, desc="Advancing coupling"):
+                i = chunk_idx * chunk_size
+                # Handle last chunk which may be smaller
+                actual_chunk_size = min(chunk_size, self.current_coupling.size - i)
 
                 if self.config.advance_with_flow:
-                    x_mu, y_nu = self.mu_distribution.dataset[i : i + chunks].to(
+                    x_mu, y_nu = self.mu_distribution.dataset[i : i + actual_chunk_size].to(
                         self.config.device
-                    ), self.nu_distribution.dataset[i : i + chunks].to(self.config.device)
+                    ), self.nu_distribution.dataset[i : i + actual_chunk_size].to(self.config.device)
 
                     t_tensor = torch.full((x_mu.shape[0], 1), time_step / self.config.iterations).to(self.config.device)
 
                     x_mu_next = x_mu.detach() + mu_model(t_tensor, x_mu) * (1 / self.config.iterations)
                     y_nu_next = y_nu.detach() + nu_model(t_tensor, y_nu) * (1 / self.config.iterations)
                 else:
-                    # Compute interpolation from sour and new_source, target and new_target for current chunk
-                    t_tensor = torch.full((chunks, 1), time_step / self.config.iterations).to(self.config.device)
-                    print(
-                        chunks,
-                        self.initial_coupling.sample_init(chunks).to(self.config.device).shape,
-                        self.new_source.sample(chunks).to(self.config.device).shape,
-                    t_tensor.shape)
+                    # Compute interpolation from source and new_source, target and new_target for current chunk
+                    t_tensor = torch.full((actual_chunk_size, 1), time_step / self.config.iterations).to(self.config.device)
                     x_mu_next = self.flow_matching.interpolate(
-                        self.initial_coupling.sample_init(chunks).to(self.config.device),
-                        self.new_source.sample(chunks).to(self.config.device),
+                        self.initial_coupling.sample_init(actual_chunk_size).to(self.config.device),
+                        self.new_source.sample(actual_chunk_size).to(self.config.device),
                         t_tensor,
                         0.0
                     )
                     y_nu_next = self.flow_matching.interpolate(
-                        self.initial_coupling.sample_target(chunks).to(self.config.device),
-                        self.new_target.sample(chunks).to(self.config.device),
+                        self.initial_coupling.sample_target(actual_chunk_size).to(self.config.device),
+                        self.new_target.sample(actual_chunk_size).to(self.config.device),
                         t_tensor,
                         0.0
                     )
 
-                num_steps = 50
+                num_steps = 10
                 flow_model_mu = self.strategy.forward_model
                 flow_model_nu = (
                     self.strategy.backward_model
@@ -1129,8 +1255,8 @@ class Trainer:
 
                     for j in range(num_steps):
                         t = torch.ones(x_next.shape[0], 1).to(device) * (j * dt)
-                        if is_image:
-                            x_concat = torch.cat([xt, x_next], dim=1)  # Channel concatenation
+                        if is_image_tensor(xt):
+                            x_concat = torch.cat([xt, x_next], dim=1)
                             vt = flow_model_mu(t, x_concat)
                             n_channels = xt.shape[1]
                             vt = vt[:, :n_channels, :, :]
@@ -1144,7 +1270,7 @@ class Trainer:
 
                     for j in range(num_steps):
                         t = torch.ones(y_next.shape[0], 1).to(device) * (j * dt)
-                        if is_image:
+                        if is_image_tensor(yt):
                             y_concat = torch.cat([yt, y_next], dim=1)
                             vt = flow_model_nu(t, y_concat)
                             n_channels = yt.shape[1]
@@ -1158,16 +1284,15 @@ class Trainer:
                 self.current_coupling.update_chunk(i, x_next.cpu(), y_next.cpu())
 
                 if self.config.advance_with_flow:
-                    self.mu_distribution.dataset[i : i + chunks] = x_mu_next.cpu()
-                    self.nu_distribution.dataset[i : i + chunks] = y_nu_next.cpu()
+                    self.mu_distribution.dataset[i : i + actual_chunk_size] = x_mu_next.cpu()
+                    self.nu_distribution.dataset[i : i + actual_chunk_size] = y_nu_next.cpu()
 
         self.plot_distributions_after_advance(time_step)
 
     def plot_distributions_after_advance(self, time_step: int):
         """Plot distributions after advancing step. Handles both vectors and images."""
-        is_image = self.config.image_shape is not None
 
-        if is_image:
+        if is_image_tensor(self.mu_distribution.sample(1)):
             self._plot_image_distributions_after_advance(time_step)
             return
 
