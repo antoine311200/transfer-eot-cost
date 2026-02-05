@@ -1095,6 +1095,11 @@ class Trainer:
                 else:
                     # Compute interpolation from sour and new_source, target and new_target for current chunk
                     t_tensor = torch.full((chunks, 1), time_step / self.config.iterations).to(self.config.device)
+                    print(
+                        chunks,
+                        self.initial_coupling.sample_init(chunks).to(self.config.device).shape,
+                        self.new_source.sample(chunks).to(self.config.device).shape,
+                    t_tensor.shape)
                     x_mu_next = self.flow_matching.interpolate(
                         self.initial_coupling.sample_init(chunks).to(self.config.device),
                         self.new_source.sample(chunks).to(self.config.device),
