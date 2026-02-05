@@ -1,6 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -11,10 +11,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 
-from dualwcfm.distributions.coupling import CouplingDistribution, FixedSizeCouplingDistribution
+from dualwcfm.distributions.coupling import CouplingDistribution, FixedSizeCouplingDistribution, DiskCouplingDistribution
 from dualwcfm.distributions.distribution import Distribution, FixedSizeDistribution, FixedSizeDistribution
 
 from torchdyn.core import NeuralODE
+
+
+def is_image_tensor(x: torch.Tensor) -> bool:
+    """Check if tensor is image-shaped (4D: batch, channels, height, width)."""
+    return x.dim() == 4
 
 
 @dataclass
@@ -29,12 +34,21 @@ class TrainingConfig:
 
     iterations: int = 100
     loss: str = "implicit"
+    advance_with_flow: bool = False
 
     sigma: float = 0.1
     l2_reg: float = 1e-3
     lip_reg: float = 1e-3
 
     batch_size: int = 4096
+
+    # Image-specific settings
+    image_shape: Optional[Tuple[int, int, int]] = None  # (C, H, W) if working with images
+
+    # Disk-based coupling for memory efficiency with images
+    use_disk_coupling: bool = False  # Set True for large image datasets
+    coupling_save_dir: Optional[str] = None  # Directory for disk coupling (None = temp dir)
+    coupling_chunk_size: int = 256  # Samples per chunk file
 
 
 @dataclass
@@ -49,6 +63,19 @@ class ModelConfig:
 class FeedForwardConfig(ModelConfig):
     dimension: int = 2
     hidden_size: int = 64
+    # For image models
+    image_shape: Optional[Tuple[int, int, int]] = None  # (C, H, W)
+
+    @property
+    def is_image_model(self) -> bool:
+        return self.image_shape is not None
+
+    @property
+    def flat_dimension(self) -> int:
+        """Return flattened dimension for compatibility."""
+        if self.image_shape:
+            return self.image_shape[0] * self.image_shape[1] * self.image_shape[2]
+        return self.dimension
 
 
 @dataclass
@@ -84,7 +111,7 @@ class Visualizer:
         fig, ax = plt.subplots(figsize=(8, 8))
 
         segments = []
-        for j in range(self.config.n_trajectories):
+        for j in range(min(self.config.n_trajectories, start_points.shape[0])):
             points = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
             segs = np.stack([points[:-1], points[1:]], axis=1)
             segments.extend(segs)
@@ -171,33 +198,79 @@ class Visualizer3D(Visualizer):
         ax.set_box_aspect([1, 1, 1])  # type: ignore
 
 class VisualizerImage(Visualizer):
-    def __init__(self, config: VisualizeConfig, img_shape: Tuple[int, int]):
+    def __init__(self, config: VisualizeConfig, img_shape: Tuple[int, int, int]):
+        """
+        Args:
+            config: Visualization configuration
+            img_shape: Image shape as (C, H, W)
+        """
         super().__init__(config)
-        self.img_shape = img_shape
-        self.dim = img_shape[0] * img_shape[1]
+        self.img_shape = img_shape  # (C, H, W)
+        self.dim = img_shape[0] * img_shape[1] * img_shape[2]
+
+    def display(self, epoch: int, trainer: "Trainer"):
+        """Override to handle image tensors properly."""
+        if epoch % self.config.show_each == 0:
+            n_samples = min(self.config.n_trajectories, 6)  # Show max 6 images
+            x, _ = trainer.current_coupling.coupling_sample(n_samples)
+            y_target = trainer.new_target.sample(n_samples)
+            x, y_target = x.to(trainer.device), y_target.to(trainer.device)
+            y = trainer.flow_matching.evolve(
+                x,
+                trainer.strategy.get_flow(epoch, trainer.device)[0],
+                num_steps=25,
+                sigma=trainer.config.sigma,
+                extend=True,
+            )
+            # For images, extract first half of channels (the evolved part)
+            if is_image_tensor(y):
+                y = y[:, :self.img_shape[0], :, :]
+            self._display_evolution(x.cpu(), y.cpu(), y_target.cpu())
+            plt.show()
 
     def _display_evolution(
         self, start_points: torch.Tensor, end_points: torch.Tensor, target_points: Optional[torch.Tensor] = None
     ):
-        n = start_points.shape[0]
-        fig, axes = plt.subplots(3, n, figsize=(3 * n, 9))
+        """Display image evolution.
+
+        Args:
+            start_points: Tensor of shape (N, C, H, W) or (N, C*H*W)
+            end_points: Tensor of shape (N, C, H, W) or (N, C*H*W)
+            target_points: Optional tensor of shape (N, C, H, W) or (N, C*H*W)
+        """
+        n = min(start_points.shape[0], 6)  # Show max 6 images
+        fig, axes = plt.subplots(3, n, figsize=(2 * n, 6))
+
+        # Handle case where n=1 (axes won't be 2D)
+        if n == 1:
+            axes = axes.reshape(3, 1)
 
         for i in range(n):
-            start_img = start_points[i].reshape(self.img_shape).cpu().numpy()
-            end_img = end_points[i].reshape(self.img_shape).cpu().numpy()
+            # Handle both 4D (N, C, H, W) and 2D (N, flat) tensors
+            if start_points.dim() == 4:
+                start_img = start_points[i].squeeze(0).cpu().numpy()  # Remove channel dim for grayscale
+                end_img = end_points[i].squeeze(0).cpu().numpy()
+            else:
+                start_img = start_points[i].reshape(self.img_shape[1], self.img_shape[2]).cpu().numpy()
+                end_img = end_points[i].reshape(self.img_shape[1], self.img_shape[2]).cpu().numpy()
 
-            axes[0, i].imshow(start_img, cmap="gray")
+            axes[0, i].imshow(start_img, cmap="gray", vmin=-1, vmax=1)
             axes[0, i].set_title("Start")
             axes[0, i].axis("off")
 
-            axes[1, i].imshow(end_img, cmap="gray")
+            axes[1, i].imshow(end_img, cmap="gray", vmin=-1, vmax=1)
             axes[1, i].set_title("End")
             axes[1, i].axis("off")
 
             if target_points is not None:
-                target_img = target_points[i].reshape(self.img_shape).cpu().numpy()
-                axes[2, i].imshow(target_img, cmap="gray")
+                if target_points.dim() == 4:
+                    target_img = target_points[i].squeeze(0).cpu().numpy()
+                else:
+                    target_img = target_points[i].reshape(self.img_shape[1], self.img_shape[2]).cpu().numpy()
+                axes[2, i].imshow(target_img, cmap="gray", vmin=-1, vmax=1)
                 axes[2, i].set_title("Target")
+                axes[2, i].axis("off")
+            else:
                 axes[2, i].axis("off")
 
         plt.tight_layout()
@@ -337,33 +410,67 @@ class ConditionalFlowMatching:
     def vector_field(
         self, x: torch.Tensor, t: torch.Tensor, x0: torch.Tensor, x1: torch.Tensor, extend: bool = True
     ) -> torch.Tensor:
-        """Compute the vector field at position x and time t."""
+        """Compute the vector field at position x and time t.
+
+        Handles both vector (N, D) and image (N, C, H, W) tensors.
+        """
         if extend:
+            # For images, concatenate along channel dimension (dim=1)
             return torch.cat([x1 - x0, torch.zeros_like(x0)], dim=1)
         else:
             return x1 - x0
 
     def interpolate(self, x0: torch.Tensor, x1: torch.Tensor, t: torch.Tensor, sigma: float) -> torch.Tensor:
-        """Interpolate between x0 and x1 at time t with noise sigma."""
+        """Interpolate between x0 and x1 at time t with noise sigma.
+
+        Handles both vector (N, D) and image (N, C, H, W) tensors.
+        """
+        # Reshape t for proper broadcasting with images
+        if is_image_tensor(x0):
+            # t is (N, 1), reshape to (N, 1, 1, 1) for image broadcasting
+            while t.dim() < x0.dim():
+                t = t.unsqueeze(-1)
+        # print("Interpolate shapes:", t.shape, x0.shape, x1.shape)
+
         return (1 - t) * x0 + t * x1 + sigma * torch.randn_like(x0) * torch.sqrt(t * (1 - t))
 
     def evolve(
         self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True
     ) -> torch.Tensor:
-        """Evolve the points x_init over time t."""
-        node = NeuralODE(model, solver="dopri5", sensitivity="adjoint", atol=1e-4, rtol=1e-4)
-        # node = NeuralODE(node_wrapper(model), solver="dopri5", sensitivity="adjoint", atol=1e-4, rtol=1e-4)
-        t_span = torch.linspace(0, 1, num_steps).to(x_init.device)
+        """Evolve the points x_init over time t using Euler integration.
+
+        Handles both vector (N, D) and image (N, C, H, W) tensors.
+        """
+        device = x_init.device
+        dt = 1.0 / num_steps
+
         with torch.no_grad():
             if extend:
-                x_init = torch.cat([x_init, x_init], dim=1)
-            trajectory = node.trajectory(x_init, t_span)
-        return trajectory[-1]
+                xt = torch.cat([x_init, x_init], dim=1)
+            else:
+                xt = x_init.clone()
+
+            for i in range(num_steps):
+                t = torch.ones(xt.shape[0], 1, device=device) * (i * dt)
+                vt = model(t, xt)
+                xt = xt + vt * dt
+
+        model = model.to(device)
+        xt = xt.to(device)
+
+        return xt
 
 
 class Strategy:
+    """Base strategy for training transport models.
+
+    This class can be subclassed to customize model architectures.
+    For custom models (e.g., UNets for images), override _create_models().
+    """
+
     def __init__(self, wrapper, config: FeedForwardConfig):
         self.wrapper = wrapper
+        self.config = config
 
         dim = config.dimension
         hidden_size = config.hidden_size
@@ -371,9 +478,8 @@ class Strategy:
         self._create_models(dim, hidden_size)
         self._create_optimizers(config)
 
-        self.config = config
-
     def _create_models(self, dim: int, hidden_size: int):
+        """Create all models. Override this method for custom architectures."""
         wrapper = self.wrapper
         self.mu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
         self.nu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
@@ -386,6 +492,12 @@ class Strategy:
         self.initial_mu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
         self.initial_nu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
         self.initial_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
+
+    def get_output_channels(self, x: torch.Tensor) -> int:
+        """Get the number of channels to extract from model output for images."""
+        if is_image_tensor(x):
+            return x.shape[1]  # Number of channels
+        return x.shape[1] // 2  # Half of vector dimension
 
     def _create_optimizers(self, config: FeedForwardConfig):
         dual_params = list(self.f_dual.parameters()) + list(self.g_dual.parameters())
@@ -510,6 +622,11 @@ class WeightedCFMLoss(CFMLoss):
             log_w = r / config.iterations
             weight = torch.exp(log_w)
 
+            # For images, expand weight to broadcast properly
+            if is_image_tensor(x0):
+                while weight.dim() < x0.dim():
+                    weight = weight.unsqueeze(-1)
+
             target_u_s = x1 - x0
 
         s = torch.rand(config.batch_size, 1).to(config.device)
@@ -541,10 +658,16 @@ class ImplicitCFMLoss(CFMLoss):
         xs = flow_matching.interpolate(x0, x1, s, config.sigma)
 
         with torch.no_grad():
+            # For dual models: output shape is [batch, 1]
             a, b = f_dual(x0), g_dual(x1)
             r = a + b
             log_w = r / config.iterations
             weight = torch.exp(log_w)
+
+            # For images, expand weight to broadcast properly: [batch, 1] -> [batch, 1, 1, 1]
+            if is_image_tensor(x0):
+                while weight.dim() < x0.dim():
+                    weight = weight.unsqueeze(-1)
 
             if step % 2 != 0:
                 x0, x1 = x1, x0
@@ -588,14 +711,27 @@ class Trainer:
 
     def _init_distributions(self, initial_coupling: CouplingDistribution):
         mu_distribution, nu_distribution = initial_coupling.get_marginals()
-        self.mu_distribution = FixedSizeDistribution(mu_distribution, size=self.config.dataset_size)
-        self.nu_distribution = FixedSizeDistribution(nu_distribution, size=self.config.dataset_size)
-        self.current_coupling = FixedSizeCouplingDistribution(initial_coupling, size=self.config.dataset_size)
-        # self.current_coupling = FixedSizeCouplingDistribution(initial_coupling.clone(), size=self.config.dataset_size)
+        self.mu_distribution = mu_distribution#.clone()
+        self.nu_distribution = nu_distribution#.clone()
+        # self.mu_distribution = FixedSizeDistribution(mu_distribution, size=self.config.dataset_size)
+        # self.nu_distribution = FixedSizeDistribution(nu_distribution, size=self.config.dataset_size)
+
+        # Use disk-based coupling for images to avoid OOM
+        if self.config.use_disk_coupling or (self.config.image_shape is not None and self.config.dataset_size > 1000):
+            print("Using disk-based coupling distribution for memory efficiency.")
+            self.current_coupling = DiskCouplingDistribution(
+                initial_coupling,
+                size=self.config.dataset_size,
+                save_dir=self.config.coupling_save_dir,
+                chunk_size=self.config.coupling_chunk_size,
+                device=self.device,
+            )
+        else:
+            self.current_coupling = FixedSizeCouplingDistribution(initial_coupling, size=self.config.dataset_size)
 
         # Copy to Initial distribution for later use
-        self.initial_mu_distribution = self.mu_distribution#.clone()
-        self.initial_nu_distribution = self.nu_distribution#.clone()
+        self.initial_mu_distribution = mu_distribution#.clone()
+        self.initial_nu_distribution = nu_distribution#.clone()
         self.initial_coupling_distribution = self.current_coupling#.clone()
 
     def _load_pretrained_models(self, dir):
@@ -647,6 +783,9 @@ class Trainer:
 
                 # Save initial models
                 if save:
+                    # Create directory if it doesn't exist
+                    import os
+                    os.makedirs(save, exist_ok=True)
                     torch.save(
                         initial_forward_model.state_dict(),
                         f"{save}/initial_forward_model.pth",
@@ -676,12 +815,18 @@ class Trainer:
                 print("Loading initial flow model.")
                 model.load_state_dict(initial_model.state_dict())
 
-        start_points = self.mu_distribution.sample(2500)
+        n_vis = 6 if self.config.image_shape else 2500
+        start_points = self.mu_distribution.sample(n_vis)
         start_points = start_points.to(self.device)
         end_points = self.flow_matching.evolve(
             start_points, self.strategy.get_flow(0, self.device)[0], num_steps=50, sigma=self.config.sigma, extend=True
-        )[:, : self.strategy.config.dimension]
-        target_points = self.nu_distribution.sample(2500)
+        )
+        # Extract first half of output (evolved part, not frozen condition)
+        if is_image_tensor(end_points):
+            end_points = end_points[:, :start_points.shape[1], :, :]
+        else:
+            end_points = end_points[:, : self.strategy.config.dimension]
+        target_points = self.nu_distribution.sample(n_vis)
         target_points = target_points.to(self.device)
         self.visualizer._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
         plt.show()
@@ -745,6 +890,8 @@ class Trainer:
 
             # Save initial models
             if save:
+                import os
+                os.makedirs(save, exist_ok=True)
                 torch.save(
                     initial_mu_model.state_dict(),
                     f"{save}/initial_mu_model.pth",
@@ -764,10 +911,12 @@ class Trainer:
                 mu_model.load_state_dict(initial_mu_model.state_dict())
                 nu_model.load_state_dict(initial_nu_model.state_dict())
 
-        samples = 6 # 2500
+        # Free cuda memory after pretraining
+        torch.cuda.empty_cache()
+
+        samples = 2500
         start_points = self.mu_distribution.sample(samples)
         start_points = start_points.to(self.device)
-        print(start_points.shape)
 
         end_points = self.flow_matching.evolve(
             start_points, self.strategy.mu_bridge, num_steps=50, sigma=self.config.sigma, extend=False
@@ -817,6 +966,7 @@ class Trainer:
     def train_duals_step(self, time_step: int):
         batch_size = self.config.batch_size
         t_tensor = torch.full((batch_size, 1), time_step / self.config.iterations, device=self.config.device)
+        is_image = self.config.image_shape is not None
 
         (mu_model, _), (nu_model, _) = self.strategy.get_bridges(self.device)
         f_dual, g_dual, dual_optimizer = self.strategy.get_duals(self.device)
@@ -829,8 +979,22 @@ class Trainer:
 
         for epoch in pbar:
             x, y = self.current_coupling.coupling_sample(self.config.batch_size)
-            x_mu = self.mu_distribution.sample(self.config.batch_size)
-            y_nu = self.nu_distribution.sample(self.config.batch_size)
+            # x_mu = self.mu_distribution.sample(self.config.batch_size)
+            # y_nu = self.nu_distribution.sample(self.config.batch_size)
+
+            # Create mu_t, nu_t sampels from interpolating between source and new_source, target and new_target for current batch
+            x_mu = self.flow_matching.interpolate(
+                self.initial_coupling.sample_init(batch_size).to(self.config.device),
+                self.new_source.sample(batch_size).to(self.config.device),
+                t_tensor,
+                0.0#self.config.sigma
+            )
+            y_nu = self.flow_matching.interpolate(
+                self.initial_coupling.sample_target(batch_size).to(self.config.device),
+                self.new_target.sample(batch_size).to(self.config.device),
+                t_tensor,
+                0.0#self.config.sigma
+            )
 
             x, y = x.to(self.config.device), y.to(self.config.device)
             x_mu, y_nu = x_mu.to(self.config.device), y_nu.to(self.config.device)
@@ -852,16 +1016,25 @@ class Trainer:
             grad_a = torch.autograd.grad(a_mu.sum(), x_mu, create_graph=True, retain_graph=True, only_inputs=True)[0]
             grad_b = torch.autograd.grad(b_nu.sum(), y_nu, create_graph=True, retain_graph=True, only_inputs=True)[0]
 
-            a_term = torch.mean(torch.sum(grad_a * u_t, dim=1))
-            b_term = torch.mean(torch.sum(grad_b * v_t, dim=1))
+            # For images: sum over all dimensions except batch
+            if is_image:
+                # grad_a, u_t have shape [batch, C, H, W]
+                a_term = torch.mean((grad_a * u_t).sum(dim=[1, 2, 3]))
+                b_term = torch.mean((grad_b * v_t).sum(dim=[1, 2, 3]))
+                # Compute gradient norm over flattened dimensions
+                gp_f = ((grad_a.view(batch_size, -1).norm(2, dim=1) - 1) ** 2).mean()
+                gp_g = ((grad_b.view(batch_size, -1).norm(2, dim=1) - 1) ** 2).mean()
+            else:
+                a_term = torch.mean(torch.sum(grad_a * u_t, dim=1))
+                b_term = torch.mean(torch.sum(grad_b * v_t, dim=1))
+                gp_f = ((grad_a.norm(2, dim=1) - 1) ** 2).mean()
+                gp_g = ((grad_b.norm(2, dim=1) - 1) ** 2).mean()
 
             # Regularization (L2 + Lipshitz)
             l2_reg = self.config.l2_reg * (
                 torch.mean(a**2) + torch.mean(b**2) + torch.mean(a_mu**2) + torch.mean(b_nu**2)
             )
 
-            gp_f = ((grad_a.norm(2, dim=1) - 1) ** 2).mean()
-            gp_g = ((grad_b.norm(2, dim=1) - 1) ** 2).mean()
             lip_reg = self.config.lip_reg * (gp_f + gp_g)
 
             loss = 0.5 * coupling_term - a_term - b_term + l2_reg + lip_reg
@@ -899,24 +1072,41 @@ class Trainer:
         self.visualizer.display(time_step, self)
 
     def advance_step(self, time_step: int):
-        chunks = 100_000
+        chunks = 100_000 if not self.config.image_shape else 256  # Smaller chunks for images
 
         (mu_model, _), (nu_model, _) = self.strategy.get_bridges(self.device)
         mu_model.eval()
         nu_model.eval()
 
+        is_image = self.config.image_shape is not None
+
         with torch.no_grad():
             for i in range(0, self.current_coupling.size, chunks):
-                x_mu, y_nu = self.mu_distribution.dataset[i : i + chunks].to(
-                    self.config.device
-                ), self.nu_distribution.dataset[i : i + chunks].to(self.config.device)
 
-                t_tensor = torch.full((x_mu.shape[0], 1), time_step / self.config.iterations).to(self.config.device)
+                if self.config.advance_with_flow:
+                    x_mu, y_nu = self.mu_distribution.dataset[i : i + chunks].to(
+                        self.config.device
+                    ), self.nu_distribution.dataset[i : i + chunks].to(self.config.device)
 
-                x_mu_next = x_mu.detach() + mu_model(t_tensor, x_mu) * (1 / self.config.iterations)
-                y_nu_next = y_nu.detach() + nu_model(t_tensor, y_nu) * (1 / self.config.iterations)
+                    t_tensor = torch.full((x_mu.shape[0], 1), time_step / self.config.iterations).to(self.config.device)
 
-                # x_next, y_next = self.strategy.advance(time_step, x_mu_next.clone(), y_nu_next.clone())
+                    x_mu_next = x_mu.detach() + mu_model(t_tensor, x_mu) * (1 / self.config.iterations)
+                    y_nu_next = y_nu.detach() + nu_model(t_tensor, y_nu) * (1 / self.config.iterations)
+                else:
+                    # Compute interpolation from sour and new_source, target and new_target for current chunk
+                    t_tensor = torch.full((chunks, 1), time_step / self.config.iterations).to(self.config.device)
+                    x_mu_next = self.flow_matching.interpolate(
+                        self.initial_coupling.sample_init(chunks).to(self.config.device),
+                        self.new_source.sample(chunks).to(self.config.device),
+                        t_tensor,
+                        0.0
+                    )
+                    y_nu_next = self.flow_matching.interpolate(
+                        self.initial_coupling.sample_target(chunks).to(self.config.device),
+                        self.new_target.sample(chunks).to(self.config.device),
+                        t_tensor,
+                        0.0
+                    )
 
                 num_steps = 50
                 flow_model_mu = self.strategy.forward_model
@@ -927,37 +1117,75 @@ class Trainer:
                 )
                 device = self.config.device
                 dt = 1.0 / num_steps
-                if time_step % 2 == 0:
-                    # x_next = x.detach() + delta * flow_mu(torch.cat([x, t_tensor], dim=1))
-                    x_next = x_mu_next.detach().clone()
 
+                if time_step % 2 == 0:
+                    x_next = x_mu_next.detach().clone()
                     xt = x_next.clone()
+
                     for j in range(num_steps):
                         t = torch.ones(x_next.shape[0], 1).to(device) * (j * dt)
-                        vt = flow_model_mu(torch.cat([xt, x_next, t], dim=1))[:, : self.strategy.config.dimension]
+                        if is_image:
+                            x_concat = torch.cat([xt, x_next], dim=1)  # Channel concatenation
+                            vt = flow_model_mu(t, x_concat)
+                            n_channels = xt.shape[1]
+                            vt = vt[:, :n_channels, :, :]
+                        else:
+                            vt = flow_model_mu(torch.cat([xt, x_next, t], dim=1))[:, : self.strategy.config.dimension]
                         xt = xt + vt * dt
                     y_next = xt.clone()
                 else:
-                    # y_next = y.detach() + delta * flow_nu(torch.cat([y, t_tensor], dim=1))
                     y_next = y_nu_next.detach().clone()
-
                     yt = y_next.clone()
+
                     for j in range(num_steps):
                         t = torch.ones(y_next.shape[0], 1).to(device) * (j * dt)
-                        vt = flow_model_nu(torch.cat([yt, y_next, t], dim=1))[:, : self.strategy.config.dimension]
+                        if is_image:
+                            y_concat = torch.cat([yt, y_next], dim=1)
+                            vt = flow_model_nu(t, y_concat)
+                            n_channels = yt.shape[1]
+                            vt = vt[:, :n_channels, :, :]
+                        else:
+                            vt = flow_model_nu(torch.cat([yt, y_next, t], dim=1))[:, : self.strategy.config.dimension]
                         yt = yt + vt * dt
                     x_next = yt.clone()
 
-                self.current_coupling.dataset[:, i : i + chunks] = torch.stack([x_next, y_next], dim=0).cpu()
-                self.mu_distribution.dataset[i : i + chunks] = x_mu_next.cpu()
-                self.nu_distribution.dataset[i : i + chunks] = y_nu_next.cpu()
+                # Update coupling dataset
+                self.current_coupling.update_chunk(i, x_next.cpu(), y_next.cpu())
+
+                if self.config.advance_with_flow:
+                    self.mu_distribution.dataset[i : i + chunks] = x_mu_next.cpu()
+                    self.nu_distribution.dataset[i : i + chunks] = y_nu_next.cpu()
 
         self.plot_distributions_after_advance(time_step)
 
     def plot_distributions_after_advance(self, time_step: int):
-        # # Plot mu and nu distributions after advancing
-        mu_samples = self.mu_distribution.sample(2500).to(self.device)
-        nu_samples = self.nu_distribution.sample(2500).to(self.device)
+        """Plot distributions after advancing step. Handles both vectors and images."""
+        is_image = self.config.image_shape is not None
+
+        if is_image:
+            self._plot_image_distributions_after_advance(time_step)
+            return
+
+        # Vector distributions visualization
+        # mu_samples = self.mu_distribution.sample(2500).to(self.device)
+        # nu_samples = self.nu_distribution.sample(2500).to(self.device)
+
+        # Sample mu_t, nu_t from interpolating between source and new_source, target and new_target for current time step
+        n_samples = 2500
+        t_tensor = torch.full((n_samples // 10, 1), time_step / self.config.iterations, device=self.device)
+        mu_samples = self.flow_matching.interpolate(
+            self.initial_coupling.sample_init(n_samples // 10).to(self.device),
+            self.new_source.sample(n_samples // 10).to(self.device),
+            t_tensor,
+            0.0#self.config.sigma
+        )
+        nu_samples = self.flow_matching.interpolate(
+            self.initial_coupling.sample_target(n_samples // 10).to(self.device),
+            self.new_target.sample(n_samples // 10).to(self.device),
+            t_tensor,
+            0.0#self.config.sigma
+        )
+
         # Get coupling samples
         (mu_coupling_samples, nu_coupling_samples) = self.current_coupling.coupling_sample(250)
         mu_coupling_samples = mu_coupling_samples.to(self.device)
@@ -1057,16 +1285,48 @@ class Trainer:
 
             ax.set_title(f"Distributions after Advancing Step {time_step+1}")
             plt.show()
+        else:
+            plt.figure(figsize=(6, 6))
+            plt.plot(mu_samples[:, 0].cpu(), mu_samples[:, 1].cpu(), '.', label='Mu Distribution', alpha=0.5)
+            plt.plot(nu_samples[:, 0].cpu(), nu_samples[:, 1].cpu(), '.', label='Nu Distribution', alpha=0.5)
+            plt.plot(mu_coupling_samples[:, 0].cpu(), mu_coupling_samples[:, 1].cpu(), 'x', label='Mu Coupling Samples', alpha=0.5)
+            plt.plot(nu_coupling_samples[:, 0].cpu(), nu_coupling_samples[:, 1].cpu(), 'x', label='Nu Coupling Samples', alpha=0.5)
+            # Line between coupling samples
+            for j in range(mu_coupling_samples.shape[0]):
+                plt.plot([mu_coupling_samples[j, 0].cpu(), nu_coupling_samples[j, 0].cpu()],
+                        [mu_coupling_samples[j, 1].cpu(), nu_coupling_samples[j, 1].cpu()],
+                        'k-', alpha=0.1)
+            plt.title(f'Distributions after Advancing Step {time_step+1}')
+            plt.show()
 
-        # plt.figure(figsize=(6, 6))
-        # plt.plot(mu_samples[:, 0].cpu(), mu_samples[:, 1].cpu(), '.', label='Mu Distribution', alpha=0.5)
-        # plt.plot(nu_samples[:, 0].cpu(), nu_samples[:, 1].cpu(), '.', label='Nu Distribution', alpha=0.5)
-        # plt.plot(mu_coupling_samples[:, 0].cpu(), mu_coupling_samples[:, 1].cpu(), 'x', label='Mu Coupling Samples', alpha=0.5)
-        # plt.plot(nu_coupling_samples[:, 0].cpu(), nu_coupling_samples[:, 1].cpu(), 'x', label='Nu Coupling Samples', alpha=0.5)
-        # # Line between coupling samples
-        # for j in range(mu_coupling_samples.shape[0]):
-        #     plt.plot([mu_coupling_samples[j, 0].cpu(), nu_coupling_samples[j, 0].cpu()],
-        #              [mu_coupling_samples[j, 1].cpu(), nu_coupling_samples[j, 1].cpu()],
-        #              'k-', alpha=0.1)
-        # plt.title(f'Distributions after Advancing Step {time_step+1}')
-        # plt.show()
+    def _plot_image_distributions_after_advance(self, time_step: int):
+        """Plot image distributions after advancing step."""
+        n_samples = 4
+        (mu_coupling, nu_coupling) = self.current_coupling.coupling_sample(n_samples)
+        mu_coupling = mu_coupling.cpu()
+        nu_coupling = nu_coupling.cpu()
+
+        fig, axes = plt.subplots(2, n_samples, figsize=(3 * n_samples, 6))
+
+        for i in range(n_samples):
+            # Source (mu) images
+            if mu_coupling.dim() == 4:
+                mu_img = mu_coupling[i].squeeze(0).numpy()
+            else:
+                mu_img = mu_coupling[i].reshape(self.config.image_shape[1], self.config.image_shape[2]).numpy()
+            axes[0, i].imshow(mu_img, cmap="gray", vmin=-1, vmax=1)
+            axes[0, i].set_title(f"Source {i+1}")
+            axes[0, i].axis("off")
+
+            # Target (nu) images
+            if nu_coupling.dim() == 4:
+                nu_img = nu_coupling[i].squeeze(0).numpy()
+            else:
+                nu_img = nu_coupling[i].reshape(self.config.image_shape[1], self.config.image_shape[2]).numpy()
+            axes[1, i].imshow(nu_img, cmap="gray", vmin=-1, vmax=1)
+            axes[1, i].set_title(f"Target {i+1}")
+            axes[1, i].axis("off")
+
+        plt.suptitle(f"Coupling after Step {time_step + 1}")
+        plt.tight_layout()
+        plt.show()
