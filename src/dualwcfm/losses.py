@@ -51,16 +51,16 @@ class WeightedCFMLoss(CFMLoss):
         step: int,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         f_dual, g_dual, _ = strategy.get_duals(config.device)
-        model, optimizer = strategy.get_flow(0, config.device)
-
-        if step % 2 != 0:
-            x0, x1 = x1, x0
+        model, optimizer = strategy.get_flow(step, config.device)
 
         with torch.no_grad():
             a, b = f_dual(x0), g_dual(x1)
             log_w = (a + b) / config.iterations
             weight = _expand_weight(torch.exp(log_w), x0)
 
+            # Network a and b take non-permuted inputss
+            if step % 2 != 0:
+                x0, x1 = x1, x0
 
             target_u_s = torch.cat([x1 - x0, torch.zeros_like(x0)], dim=-1)
 
@@ -89,6 +89,13 @@ class ImplicitCFMLoss(CFMLoss):
         model, optimizer = strategy.get_flow(step, config.device)
         previous_model = strategy.get_previous_flow(step, config.device)
 
+
+
+        with torch.no_grad():
+            a, b = f_dual(x0), g_dual(x1)
+            log_w = (a + b) / config.iterations
+            weight = _expand_weight(torch.exp(log_w), x0)
+
         if step % 2 != 0:
             x0, x1 = x1, x0
 
@@ -96,10 +103,6 @@ class ImplicitCFMLoss(CFMLoss):
         xs = flow_matching.interpolate(x0, x1, s, config.sigma)
 
         with torch.no_grad():
-            a, b = f_dual(x0), g_dual(x1)
-            log_w = (a + b) / config.iterations
-            weight = _expand_weight(torch.exp(log_w), x0)
-
             b_ta = previous_model(s, xs, x0)
             u_t = flow_matching.vector_field(x0, None, x0, x1)
 
