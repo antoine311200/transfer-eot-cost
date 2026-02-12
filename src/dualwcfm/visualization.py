@@ -204,8 +204,8 @@ class VisualizerImage(Visualizer):
         """Override to handle image tensors properly."""
         if epoch % self.config.show_each == 0:
             n_samples = min(self.config.n_trajectories, 6)  # Show max 6 images
-            x, _ = trainer.current_coupling.coupling_sample(n_samples)
-            y_target = trainer.new_target.sample(n_samples)
+            x, y_target = trainer.current_coupling.coupling_sample(n_samples)
+            # y_target = trainer.new_target.sample(n_samples)
             x, y_target = x.to(trainer.device), y_target.to(trainer.device)
             y = trainer.flow_matching.evolve(
                 x,

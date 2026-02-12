@@ -8,6 +8,13 @@ from dualwcfm.strategy import Strategy
 from dualwcfm.flow_matching import ConditionalFlowMatching
 
 
+def _expand_weight(weight: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Expand weight [batch, 1] to match target dims (e.g. [batch, 1, 1, 1] for images)."""
+    if is_image_tensor(target):
+        return weight.view(weight.shape[0], *([1] * (target.dim() - 1)))
+    return weight
+
+
 class CFMLoss:
     def execute(
         self,
@@ -48,18 +55,15 @@ class WeightedCFMLoss(CFMLoss):
 
         with torch.no_grad():
             a, b = f_dual(x0), g_dual(x1)
-            r = a + b
-            log_w = r / config.iterations
-            weight = torch.exp(log_w)
+            log_w = (a + b) / config.iterations
+            weight = _expand_weight(torch.exp(log_w), x0)
 
-            # For images, expand weight to broadcast properly
-            if is_image_tensor(x0):
-                while weight.dim() < x0.dim():
-                    weight = weight.unsqueeze(-1)
+            if step % 2 != 0:
+                x0, x1 = x1, x0
 
-            target_u_s = x1 - x0
+            target_u_s = torch.cat([x1 - x0, torch.zeros_like(x0)], dim=-1)
 
-        s = torch.rand(config.batch_size, 1).to(config.device)
+        s = torch.rand(config.batch_size, 1, device=config.device)
         x_s = flow_matching.interpolate(x0, x1, s, config.sigma)
         u_s = model(s, x_s, x0)
 
@@ -84,28 +88,23 @@ class ImplicitCFMLoss(CFMLoss):
         model, optimizer = strategy.get_flow(step, config.device)
         previous_model = strategy.get_previous_flow(step, config.device)
 
-        s = torch.rand(config.batch_size, 1).to(config.device)
+        s = torch.rand(config.batch_size, 1, device=config.device)
         xs = flow_matching.interpolate(x0, x1, s, config.sigma)
 
         with torch.no_grad():
-            # For dual models: output shape is [batch, 1]
             a, b = f_dual(x0), g_dual(x1)
-            r = a + b
-            log_w = r / config.iterations
-            weight = torch.exp(log_w)
-
-            # For images, expand weight to broadcast properly: [batch, 1] -> [batch, 1, 1, 1]
-            if is_image_tensor(x0):
-                while weight.dim() < x0.dim():
-                    weight = weight.unsqueeze(-1)
+            log_w = (a + b) / config.iterations
+            weight = _expand_weight(torch.exp(log_w), x0)
 
             if step % 2 != 0:
                 x0, x1 = x1, x0
 
-            b_hat_detached = model(s, xs, x0)
             b_ta = previous_model(s, xs, x0)
+            u_t = flow_matching.vector_field(x0, None, x0, x1)
 
-            u_t = flow_matching.vector_field(x0, torch.zeros_like(x0), x0, x1)
-            target = b_ta + (weight - 1) * (u_t - b_hat_detached)
+        # Single forward pass -- use detach() for the target instead of running model twice
         u_s = model(s, xs, x0)
+        with torch.no_grad():
+            target = b_ta + (weight - 1) * (u_t - u_s.detach())
+
         return ((u_s - target) ** 2).mean(), model, optimizer

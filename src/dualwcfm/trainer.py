@@ -45,8 +45,16 @@ class Trainer:
         self.config = config
         self.device = device
 
+        # AMP scaler for mixed precision
+        self._amp_enabled = config.use_amp and device.type == "cuda"
+        self._scaler = torch.cuda.amp.GradScaler(enabled=self._amp_enabled)
+
         # Fixed sized mu_t, nu_t and coupling distributions
         self._init_distributions(initial_coupling)
+
+    def _autocast(self):
+        """Return autocast context manager (no-op on CPU or when AMP is disabled)."""
+        return torch.cuda.amp.autocast(enabled=self._amp_enabled)
 
     def _init_distributions(self, initial_coupling: CouplingDistribution):
         mu_distribution, nu_distribution = initial_coupling.get_marginals()
@@ -94,8 +102,11 @@ class Trainer:
     def train(self, retrain: bool = False, save: str = None):
         self.strategy._create_models(self.strategy.config.dimension, self.strategy.config.hidden_size)
         self.strategy._create_optimizers(self.strategy.config)
+        # Move all models to device once
+        self.strategy.to_device(self.device)
 
         if not retrain:
+            print(self.initial_mu_distribution)
             self.mu_distribution = self.initial_mu_distribution.clone()
             self.nu_distribution = self.initial_nu_distribution.clone()
             self.current_coupling = self.initial_coupling_distribution.clone()
@@ -167,10 +178,10 @@ class Trainer:
 
         # Divide by 10 learning rates for cfm
         for param_group in self.strategy.get_flow(0, self.device)[1].param_groups:
-            param_group["lr"] = param_group["lr"] / 10.0
+            param_group["lr"] = param_group["lr"] / 3.0
         if isinstance(self.strategy, BidirectionalStrategy):
             for param_group in self.strategy.get_flow(1, self.device)[1].param_groups:
-                param_group["lr"] = param_group["lr"] / 10.0
+                param_group["lr"] = param_group["lr"] / 3.0
 
         # General training loop
         for iteration in range(self.config.iterations):
@@ -189,6 +200,8 @@ class Trainer:
         initial_mu_model, initial_nu_model = self.strategy.get_initial_bridges(device)
 
         if retrain:
+            mu_model.train()
+            nu_model.train()
 
             pbar = trange(self.config.marginal_epochs, desc="Marginal Flow Matching")
             for epoch in pbar:
@@ -196,25 +209,37 @@ class Trainer:
                 x1, y1 = self.new_source.sample(batch_size), self.new_target.sample(batch_size)
                 x0, x1, y0, y1 = x0.to(device), x1.to(device), y0.to(device), y1.to(device)
 
-                t = torch.rand(batch_size, 1).to(device)
-                xt, yt = self.flow_matching.interpolate(x0, x1, t, sigma), self.flow_matching.interpolate(
-                    y0, y1, t, sigma
-                )
-                ut, vt = mu_model(t, xt), nu_model(t, yt)
-                ut_true, vt_true = self.flow_matching.vector_field(
-                    xt, t, x0, x1, extend=False
-                ), self.flow_matching.vector_field(yt, t, y0, y1, extend=False)
+                t = torch.rand(batch_size, 1, device=device)
+                xt = self.flow_matching.interpolate(x0, x1, t, sigma)
+                yt = self.flow_matching.interpolate(y0, y1, t, sigma)
 
                 mu_optimizer.zero_grad()
                 nu_optimizer.zero_grad()
 
-                loss_mu = loss_fn(ut, ut_true)
-                loss_mu.backward()
-                mu_optimizer.step()
+                with self._autocast():
+                    ut = mu_model(t, xt)
+                    ut_true = self.flow_matching.vector_field(xt, t, x0, x1, extend=False)
+                    loss_mu = loss_fn(ut, ut_true)
 
-                loss_nu = loss_fn(vt, vt_true)
-                loss_nu.backward()
-                nu_optimizer.step()
+                if self._amp_enabled:
+                    self._scaler.scale(loss_mu).backward()
+                    self._scaler.step(mu_optimizer)
+                else:
+                    loss_mu.backward()
+                    mu_optimizer.step()
+
+                with self._autocast():
+                    vt = nu_model(t, yt)
+                    vt_true = self.flow_matching.vector_field(yt, t, y0, y1, extend=False)
+                    loss_nu = loss_fn(vt, vt_true)
+
+                if self._amp_enabled:
+                    self._scaler.scale(loss_nu).backward()
+                    self._scaler.step(nu_optimizer)
+                    self._scaler.update()
+                else:
+                    loss_nu.backward()
+                    nu_optimizer.step()
 
                 pbar.set_postfix({"Loss mu": loss_mu.item(), "Loss nu": loss_nu.item()})
 
@@ -258,6 +283,7 @@ class Trainer:
         start_points = self.mu_distribution.sample(samples)
         start_points = start_points.to(self.device)
 
+        mu_model.eval()
         end_points = self.flow_matching.evolve(
             start_points, self.strategy.mu_bridge, num_steps=50, sigma=self.config.sigma, extend=False
         )
@@ -269,6 +295,7 @@ class Trainer:
         start_points = self.nu_distribution.sample(samples)
         start_points = start_points.to(self.device)
 
+        nu_model.eval()
         end_points = self.flow_matching.evolve(
             start_points, self.strategy.nu_bridge, num_steps=50, sigma=self.config.sigma, extend=False
         )
@@ -282,6 +309,8 @@ class Trainer:
         batch_size = self.config.batch_size
         loss_fn = nn.MSELoss()
 
+        model.train()
+
         pbar = trange(self.config.pretrain_epochs, desc="Pretraining")
 
         for epoch in pbar:
@@ -290,16 +319,23 @@ class Trainer:
             if backward:
                 x0, x1 = x1, x0
 
-            s = torch.rand(batch_size, 1).to(self.config.device)
+            s = torch.rand(batch_size, 1, device=self.config.device)
             x_s = self.flow_matching.interpolate(x0, x1, s, sigma)
-            u_s = model(s, x_s, x0)
-            u_s_true = self.flow_matching.vector_field(x_s, s, x0, x1)
-
-            loss = loss_fn(u_s, u_s_true)
 
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+
+            with self._autocast():
+                u_s = model(s, x_s, x0)
+                u_s_true = self.flow_matching.vector_field(x_s, s, x0, x1)
+                loss = loss_fn(u_s, u_s_true)
+
+            if self._amp_enabled:
+                self._scaler.scale(loss).backward()
+                self._scaler.step(optimizer)
+                self._scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             pbar.set_postfix({"Pretrain Loss": loss.item()})
 
@@ -308,7 +344,8 @@ class Trainer:
 
     def train_duals_step(self, time_step: int):
         batch_size = self.config.batch_size
-        t_tensor = torch.full((batch_size, 1), time_step / self.config.iterations, device=self.config.device)
+        device = self.config.device
+        t_tensor = torch.full((batch_size, 1), time_step / self.config.iterations, device=device)
         is_image = self.config.image_shape is not None
 
         (mu_model, _), (nu_model, _) = self.strategy.get_bridges(self.device)
@@ -320,25 +357,40 @@ class Trainer:
 
         pbar = trange(self.config.dual_epochs, desc="Dual Training")
 
+        # x, y = self.current_coupling.coupling_sample(self.config.batch_size)
+        x = self.flow_matching.interpolate(
+            self.initial_coupling.sample_init(batch_size).to(device),
+            self.new_source.sample(batch_size).to(device),
+            t_tensor,
+            0.0,
+        )
+        y = self.flow_matching.interpolate(
+            self.initial_coupling.sample_target(batch_size).to(device),
+            self.new_target.sample(batch_size).to(device),
+            t_tensor,
+            0.0,
+        )
+        self.visualizer._display_evolution(x.cpu(), y.cpu())
+        plt.show()
+
         for epoch in pbar:
             x, y = self.current_coupling.coupling_sample(self.config.batch_size)
 
             # Create mu_t, nu_t samples from interpolating between source and new_source, target and new_target for current batch
             x_mu = self.flow_matching.interpolate(
-                self.initial_coupling.sample_init(batch_size).to(self.config.device),
-                self.new_source.sample(batch_size).to(self.config.device),
+                self.initial_coupling.sample_init(batch_size).to(device),
+                self.new_source.sample(batch_size).to(device),
                 t_tensor,
                 0.0,
             )
             y_nu = self.flow_matching.interpolate(
-                self.initial_coupling.sample_target(batch_size).to(self.config.device),
-                self.new_target.sample(batch_size).to(self.config.device),
+                self.initial_coupling.sample_target(batch_size).to(device),
+                self.new_target.sample(batch_size).to(device),
                 t_tensor,
                 0.0,
             )
 
-            x, y = x.to(self.config.device), y.to(self.config.device)
-            x_mu, y_nu = x_mu.to(self.config.device), y_nu.to(self.config.device)
+            x, y = x.to(device), y.to(device)
 
             with torch.no_grad():
                 u_t = mu_model(t_tensor, x)
@@ -352,6 +404,7 @@ class Trainer:
 
             # Coupling term
             coupling_term = torch.mean((a - a.mean() + b - b.mean()) ** 2)
+            # coupling_term = torch.mean((a + b) ** 2)
 
             # Divergence terms
             grad_a = torch.autograd.grad(a_mu.sum(), x_mu, create_graph=True, retain_graph=True, only_inputs=True)[0]
@@ -378,7 +431,14 @@ class Trainer:
 
             lip_reg = self.config.lip_reg * (gp_f + gp_g)
 
+            # Penalize a-E(a) and b-E(q) to avoid trivial solutions where a and b go to infinity but their sum remains constant
+            # mean_a_loss = torch.mean(a)**2  # Force mean to 0
+            # mean_b_loss = torch.mean(b - a.detach())**2
+            # mean_a_mu_loss = torch.mean(a_mu)**2  # Force mean to 0
+            # mean_b_nu_loss = torch.mean(b_nu - a_mu.detach())**2
+
             loss = 0.5 * coupling_term - a_term - b_term + l2_reg + lip_reg
+            # loss += 0.1 * mean_a_loss + 0.1 * mean_b_loss + 0.1 * mean_a_mu_loss + 0.1 * mean_b_nu_loss
 
             dual_optimizer.zero_grad()
             loss.backward()
@@ -395,18 +455,25 @@ class Trainer:
         previous_model = self.strategy.get_previous_flow(time_step, self.config.device)
         previous_model.load_state_dict(model.state_dict())
         previous_model.eval()
+        model.train()
 
         for epoch in pbar:
             x0, x1 = self.current_coupling.coupling_sample(batch_size)
             x0, x1 = x0.to(self.config.device), x1.to(self.config.device)
 
-            loss, model, optimizer = self.loss_cfm.execute(
-                x0, x1, self.strategy, self.config, self.flow_matching, time_step
-            )
+            with self._autocast():
+                loss, model, optimizer = self.loss_cfm.execute(
+                    x0, x1, self.strategy, self.config, self.flow_matching, time_step
+                )
 
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            if self._amp_enabled:
+                self._scaler.scale(loss).backward()
+                self._scaler.step(optimizer)
+                self._scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             pbar.set_postfix({"CFM Loss": loss.item()})
 
@@ -423,8 +490,8 @@ class Trainer:
         mu_model.eval()
         nu_model.eval()
 
-        use_disk = isinstance(self.current_coupling, DiskCouplingDistribution)
         n_chunks = (self.current_coupling.size + chunk_size - 1) // chunk_size
+        device = self.config.device
 
         with torch.no_grad():
             for chunk_idx in trange(n_chunks, desc="Advancing coupling"):
@@ -433,74 +500,67 @@ class Trainer:
                 actual_chunk_size = min(chunk_size, self.current_coupling.size - i)
 
                 if self.config.advance_with_flow:
-                    x_mu, y_nu = self.mu_distribution.dataset[i : i + actual_chunk_size].to(
-                        self.config.device
-                    ), self.nu_distribution.dataset[i : i + actual_chunk_size].to(self.config.device)
+                    x_mu = self.mu_distribution.dataset[i : i + actual_chunk_size].to(device)
+                    y_nu = self.nu_distribution.dataset[i : i + actual_chunk_size].to(device)
 
-                    t_tensor = torch.full((x_mu.shape[0], 1), time_step / self.config.iterations).to(
-                        self.config.device
-                    )
+                    t_tensor = torch.full((x_mu.shape[0], 1), time_step / self.config.iterations, device=device)
 
-                    x_mu_next = x_mu.detach() + mu_model(t_tensor, x_mu) * (1 / self.config.iterations)
-                    y_nu_next = y_nu.detach() + nu_model(t_tensor, y_nu) * (1 / self.config.iterations)
+                    x_mu_next = x_mu + mu_model(t_tensor, x_mu) * (1 / self.config.iterations)
+                    y_nu_next = y_nu + nu_model(t_tensor, y_nu) * (1 / self.config.iterations)
                 else:
                     # Compute interpolation from source and new_source, target and new_target for current chunk
-                    t_tensor = torch.full((actual_chunk_size, 1), time_step / self.config.iterations).to(
-                        self.config.device
-                    )
+                    t_tensor = torch.full((actual_chunk_size, 1), time_step / self.config.iterations, device=device)
                     x_mu_next = self.flow_matching.interpolate(
-                        self.initial_coupling.sample_init(actual_chunk_size).to(self.config.device),
-                        self.new_source.sample(actual_chunk_size).to(self.config.device),
+                        self.initial_coupling.sample_init(actual_chunk_size).to(device),
+                        self.new_source.sample(actual_chunk_size).to(device),
                         t_tensor,
                         0.0,
                     )
-                    y_nu_next = self.flow_matching.interpolate(
-                        self.initial_coupling.sample_target(actual_chunk_size).to(self.config.device),
-                        self.new_target.sample(actual_chunk_size).to(self.config.device),
+                    y_mu_next = self.flow_matching.interpolate(
+                        self.initial_coupling.sample_target(actual_chunk_size).to(device),
+                        self.new_target.sample(actual_chunk_size).to(device),
                         t_tensor,
                         0.0,
                     )
+                    y_nu_next = y_mu_next
 
-                num_steps = 10
+                num_steps = self.config.advance_steps
                 flow_model_mu = self.strategy.forward_model
                 flow_model_nu = (
                     self.strategy.backward_model
                     if isinstance(self.strategy, BidirectionalStrategy)
                     else self.strategy.forward_model
                 )
-                device = self.config.device
                 dt = 1.0 / num_steps
 
                 if time_step % 2 == 0:
-                    x_next = x_mu_next.detach().clone()
-                    xt = x_next.clone()
+                    x_next = x_mu_next.clone()
+                    xt = x_next
 
                     for j in range(num_steps):
-                        t = torch.ones(x_next.shape[0], 1).to(device) * (j * dt)
+                        t = torch.full((x_next.shape[0], 1), j * dt, device=device)
                         if is_image_tensor(xt):
                             x_concat = torch.cat([xt, x_next], dim=1)
                             vt = flow_model_mu(t, x_concat)
-                            n_channels = xt.shape[1]
-                            vt = vt[:, :n_channels, :, :]
+                            vt = vt[:, :xt.shape[1], :, :]
                         else:
                             vt = flow_model_mu(torch.cat([xt, x_next, t], dim=1))[:, : self.strategy.config.dimension]
                         xt = xt + vt * dt
-                    y_next = xt.clone()
+                    y_next = xt
                 else:
-                    y_next = y_nu_next.detach().clone()
-                    yt = y_next.clone()
+                    y_next = y_nu_next.clone()
+                    yt = y_next
 
                     for j in range(num_steps):
-                        t = torch.ones(y_next.shape[0], 1).to(device) * (j * dt)
+                        t = torch.full((y_next.shape[0], 1), j * dt, device=device)
                         if is_image_tensor(yt):
                             y_concat = torch.cat([yt, y_next], dim=1)
                             vt = flow_model_nu(t, y_concat)
-                            n_channels = yt.shape[1]
-                            vt = vt[:, :n_channels, :, :]
+                            vt = vt[:, :yt.shape[1], :, :]
                         else:
                             vt = flow_model_nu(torch.cat([yt, y_next, t], dim=1))[:, : self.strategy.config.dimension]
                         yt = yt + vt * dt
-                    x_next = yt.clone()
+                    x_next = yt
 
                 # Update coupling dataset
                 self.current_coupling.update_chunk(i, x_next.cpu(), y_next.cpu())
@@ -534,10 +594,10 @@ class Trainer:
             0.0,
         )
 
-        # Get coupling samples
+        # Get coupling samples and move to CPU once
         (mu_coupling_samples, nu_coupling_samples) = self.current_coupling.coupling_sample(250)
-        mu_coupling_samples = mu_coupling_samples.to(self.device)
-        nu_coupling_samples = nu_coupling_samples.to(self.device)
+        mu_cpu = mu_coupling_samples.cpu()
+        nu_cpu = nu_coupling_samples.cpu()
 
         # 3D plot
         if self.strategy.config.dimension == 3:
@@ -546,51 +606,22 @@ class Trainer:
             fig = plt.figure(figsize=(8, 8))
             ax = fig.add_subplot(111, projection="3d")
 
-            ax.scatter(
-                mu_samples[:, 0].cpu(),
-                mu_samples[:, 1].cpu(),
-                mu_samples[:, 2].cpu(),
-                c="blue",
-                alpha=0.1,
-                depthshade=True,
-                s=3,
-            )
-            ax.scatter(
-                nu_samples[:, 0].cpu(),
-                nu_samples[:, 1].cpu(),
-                nu_samples[:, 2].cpu(),
-                c="red",
-                alpha=0.1,
-                depthshade=True,
-                s=3,
-            )
-            ax.scatter(
-                mu_coupling_samples[:, 0].cpu(),
-                mu_coupling_samples[:, 1].cpu(),
-                mu_coupling_samples[:, 2].cpu(),
-                c="purple",
-                marker="x",
-                alpha=0.75,
-                depthshade=True,
-            )
-            ax.scatter(
-                nu_coupling_samples[:, 0].cpu(),
-                nu_coupling_samples[:, 1].cpu(),
-                nu_coupling_samples[:, 2].cpu(),
-                c="orange",
-                marker="x",
-                alpha=0.75,
-                depthshade=True,
-            )
+            mu_s_cpu = mu_samples.cpu()
+            nu_s_cpu = nu_samples.cpu()
+
+            ax.scatter(mu_s_cpu[:, 0], mu_s_cpu[:, 1], mu_s_cpu[:, 2], c="blue", alpha=0.1, depthshade=True, s=3)
+            ax.scatter(nu_s_cpu[:, 0], nu_s_cpu[:, 1], nu_s_cpu[:, 2], c="red", alpha=0.1, depthshade=True, s=3)
+            ax.scatter(mu_cpu[:, 0], mu_cpu[:, 1], mu_cpu[:, 2], c="purple", marker="x", alpha=0.75, depthshade=True)
+            ax.scatter(nu_cpu[:, 0], nu_cpu[:, 1], nu_cpu[:, 2], c="orange", marker="x", alpha=0.75, depthshade=True)
 
             # Line between coupling samples
-            dist = torch.norm(nu_coupling_samples - mu_coupling_samples, dim=1).cpu()
+            dist = torch.norm(nu_cpu - mu_cpu, dim=1)
 
-            for j in range(mu_coupling_samples.shape[0]):
+            for j in range(mu_cpu.shape[0]):
                 ax.plot(
-                    [mu_coupling_samples[j, 0].cpu(), nu_coupling_samples[j, 0].cpu()],
-                    [mu_coupling_samples[j, 1].cpu(), nu_coupling_samples[j, 1].cpu()],
-                    [mu_coupling_samples[j, 2].cpu(), nu_coupling_samples[j, 2].cpu()],
+                    [mu_cpu[j, 0], nu_cpu[j, 0]],
+                    [mu_cpu[j, 1], nu_cpu[j, 1]],
+                    [mu_cpu[j, 2], nu_cpu[j, 2]],
                     color="gray",
                     alpha=0.8,
                 )
@@ -615,28 +646,19 @@ class Trainer:
             ax.set_title(f"Distributions after Advancing Step {time_step+1}")
             plt.show()
         else:
+            mu_s_cpu = mu_samples.cpu()
+            nu_s_cpu = nu_samples.cpu()
+
             plt.figure(figsize=(6, 6))
-            plt.plot(mu_samples[:, 0].cpu(), mu_samples[:, 1].cpu(), ".", label="Mu Distribution", alpha=0.5)
-            plt.plot(nu_samples[:, 0].cpu(), nu_samples[:, 1].cpu(), ".", label="Nu Distribution", alpha=0.5)
-            plt.plot(
-                mu_coupling_samples[:, 0].cpu(),
-                mu_coupling_samples[:, 1].cpu(),
-                "x",
-                label="Mu Coupling Samples",
-                alpha=0.5,
-            )
-            plt.plot(
-                nu_coupling_samples[:, 0].cpu(),
-                nu_coupling_samples[:, 1].cpu(),
-                "x",
-                label="Nu Coupling Samples",
-                alpha=0.5,
-            )
+            plt.plot(mu_s_cpu[:, 0], mu_s_cpu[:, 1], ".", label="Mu Distribution", alpha=0.5)
+            plt.plot(nu_s_cpu[:, 0], nu_s_cpu[:, 1], ".", label="Nu Distribution", alpha=0.5)
+            plt.plot(mu_cpu[:, 0], mu_cpu[:, 1], "x", label="Mu Coupling Samples", alpha=0.5)
+            plt.plot(nu_cpu[:, 0], nu_cpu[:, 1], "x", label="Nu Coupling Samples", alpha=0.5)
             # Line between coupling samples
-            for j in range(mu_coupling_samples.shape[0]):
+            for j in range(mu_cpu.shape[0]):
                 plt.plot(
-                    [mu_coupling_samples[j, 0].cpu(), nu_coupling_samples[j, 0].cpu()],
-                    [mu_coupling_samples[j, 1].cpu(), nu_coupling_samples[j, 1].cpu()],
+                    [mu_cpu[j, 0], nu_cpu[j, 0]],
+                    [mu_cpu[j, 1], nu_cpu[j, 1]],
                     "k-",
                     alpha=0.1,
                 )

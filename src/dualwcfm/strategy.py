@@ -17,6 +17,7 @@ class Strategy:
     def __init__(self, wrapper, config: FeedForwardConfig):
         self.wrapper = wrapper
         self.config = config
+        self._device = None
 
         dim = config.dimension
         hidden_size = config.hidden_size
@@ -39,6 +40,22 @@ class Strategy:
         self.initial_nu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
         self.initial_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
 
+    def to_device(self, device: torch.device):
+        """Move all models to device once. Call this before training."""
+        if self._device == device:
+            return
+        self._device = device
+        for attr in self._model_attrs():
+            getattr(self, attr).to(device)
+
+    def _model_attrs(self):
+        """Return names of all model attributes."""
+        return [
+            "mu_bridge", "nu_bridge", "f_dual", "g_dual",
+            "forward_model", "previous_forward_model",
+            "initial_mu_bridge", "initial_nu_bridge", "initial_forward_model",
+        ]
+
     def get_output_channels(self, x: torch.Tensor) -> int:
         """Get the number of channels to extract from model output for images."""
         if is_image_tensor(x):
@@ -53,22 +70,28 @@ class Strategy:
         self.forward_optimizer = optim.Adam(self.forward_model.parameters(), lr=config.flow_learning_rate)
 
     def get_duals(self, device):
-        return self.f_dual.to(device), self.g_dual.to(device), self.dual_optimizer
+        self.to_device(device)
+        return self.f_dual, self.g_dual, self.dual_optimizer
 
     def get_bridges(self, device):
-        return (self.mu_bridge.to(device), self.mu_optimizer), (self.nu_bridge.to(device), self.nu_optimizer)
+        self.to_device(device)
+        return (self.mu_bridge, self.mu_optimizer), (self.nu_bridge, self.nu_optimizer)
 
     def get_flow(self, step: int, device):
-        return self.forward_model.to(device), self.forward_optimizer
+        self.to_device(device)
+        return self.forward_model, self.forward_optimizer
 
     def get_previous_flow(self, step: int, device):
-        return self.previous_forward_model.to(device)
+        self.to_device(device)
+        return self.previous_forward_model
 
     def get_initial_bridges(self, device):
-        return self.initial_mu_bridge.to(device), self.initial_nu_bridge.to(device)
+        self.to_device(device)
+        return self.initial_mu_bridge, self.initial_nu_bridge
 
     def get_initial_flow(self, step: int, device):
-        return self.initial_forward_model.to(device)
+        self.to_device(device)
+        return self.initial_forward_model
 
     def advance(
         self, step: int, x_mu_next: torch.Tensor, y_nu_next: torch.Tensor, num_steps: int = 100, sigma: float = 0.0
@@ -77,10 +100,11 @@ class Strategy:
         x_condition = x_mu_next.clone()
         xt = x_mu_next.clone()
         dt = 1.0 / num_steps
-        model = self.get_flow(step, x_mu_next.device)[0]
+        device = x_mu_next.device
+        model = self.get_flow(step, device)[0]
         with torch.no_grad():
             for i in range(num_steps):
-                t = torch.ones(xt.shape[0], 1).to(xt.device) * (i * dt)
+                t = torch.full((xt.shape[0], 1), i * dt, device=device)
                 vt = model(t, xt, x_condition)[:, : xt.shape[1] // 2]
                 xt = xt + vt * dt
         return x_mu_next, xt.clone()
@@ -97,22 +121,30 @@ class BidirectionalStrategy(Strategy):
         self.previous_backward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
         self.initial_backward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
 
+    def _model_attrs(self):
+        return super()._model_attrs() + [
+            "backward_model", "previous_backward_model", "initial_backward_model",
+        ]
+
     def _create_optimizers(self, config: FeedForwardConfig):
         super()._create_optimizers(config)
         self.backward_optimizer = optim.Adam(self.backward_model.parameters(), lr=config.flow_learning_rate)
 
     def get_flow(self, step: int, device):
+        self.to_device(device)
         model = self.forward_model if step % 2 == 0 else self.backward_model
         optimizer = self.forward_optimizer if step % 2 == 0 else self.backward_optimizer
-        return model.to(device), optimizer
+        return model, optimizer
 
     def get_previous_flow(self, step: int, device):
+        self.to_device(device)
         previous_model = self.previous_forward_model if step % 2 == 0 else self.previous_backward_model
-        return previous_model.to(device)
+        return previous_model
 
     def get_initial_flow(self, step: int, device):
+        self.to_device(device)
         initial_model = self.initial_forward_model if step % 2 == 0 else self.initial_backward_model
-        return initial_model.to(device)
+        return initial_model
 
     def advance(
         self, step: int, x_mu_next: torch.Tensor, y_nu_next: torch.Tensor, num_steps: int = 100, sigma: float = 0

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 import math
 import os
 import tempfile
@@ -16,6 +17,11 @@ class MarginalDistribution(Distribution):
 
     def sample(self, n: int) -> torch.Tensor:
         return self.sample_func(n)
+
+    def clone(self):
+        import copy
+
+        return copy.deepcopy(self)
 
 
 class CouplingDistribution(Distribution, ABC):
@@ -188,10 +194,6 @@ class FixedSizeCouplingDistribution(CouplingDistribution):
         end_idx = start_idx + x_chunk.shape[0]
         self.dataset_x[start_idx:end_idx] = x_chunk
         self.dataset_y[start_idx:end_idx] = y_chunk
-        # Update legacy dataset
-        if isinstance(self.dataset, torch.Tensor):
-            self.dataset[0, start_idx:end_idx] = x_chunk
-            self.dataset[1, start_idx:end_idx] = y_chunk
 
 
 class DiskCouplingDistribution(CouplingDistribution):
@@ -233,6 +235,10 @@ class DiskCouplingDistribution(CouplingDistribution):
 
         self.n_chunks = (size + chunk_size - 1) // chunk_size
 
+        # LRU cache for loaded chunks (avoids re-reading disk on every sample call)
+        self._chunk_cache: OrderedDict[int, Tuple[torch.Tensor, torch.Tensor]] = OrderedDict()
+        self._cache_max_size = max(64, (size + chunk_size - 1) // chunk_size)  # Cache all chunks by default
+
         # Initialize from distribution if provided
         if coupling_distribution is not None:
             self._initialize_from_distribution(coupling_distribution)
@@ -256,13 +262,30 @@ class DiskCouplingDistribution(CouplingDistribution):
         print(f"Disk coupling initialized: {self.size} samples in {self.n_chunks} chunks")
 
     def _save_chunk(self, chunk_idx: int, x: torch.Tensor, y: torch.Tensor):
-        """Save a chunk to disk."""
+        """Save a chunk to disk and invalidate its cache entry."""
         torch.save({"x": x, "y": y}, self._chunk_path(chunk_idx))
+        self._invalidate_cache(chunk_idx)
 
     def _load_chunk(self, chunk_idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Load a chunk from disk."""
-        data = torch.load(self._chunk_path(chunk_idx), weights_only=True)
-        return data["x"], data["y"]
+        """Load a chunk from disk with LRU caching."""
+        if chunk_idx in self._chunk_cache:
+            # Move to end (most recently used)
+            self._chunk_cache.move_to_end(chunk_idx)
+            return self._chunk_cache[chunk_idx]
+
+        data = torch.load(self._chunk_path(chunk_idx), weights_only=True, map_location="cpu")
+        result = (data["x"], data["y"])
+
+        # Add to cache, evict oldest if full
+        self._chunk_cache[chunk_idx] = result
+        if len(self._chunk_cache) > self._cache_max_size:
+            self._chunk_cache.popitem(last=False)
+
+        return result
+
+    def _invalidate_cache(self, chunk_idx: int):
+        """Remove a chunk from cache (call after writing to disk)."""
+        self._chunk_cache.pop(chunk_idx, None)
 
     def coupling_sample(self, n: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Sample n random pairs from disk."""
@@ -270,28 +293,25 @@ class DiskCouplingDistribution(CouplingDistribution):
         return self._get_samples_by_indices(indices)
 
     def _get_samples_by_indices(self, indices: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Load samples for given indices, grouping by chunk for efficiency."""
+        """Load samples for given indices, using batch indexing per chunk."""
         chunk_indices = indices // self.chunk_size
         local_indices = indices % self.chunk_size
 
-        # Pre-allocate output tensors after loading first sample to get shape
-        x_samples = []
-        y_samples = []
+        # Pre-allocate output tensors using shape from first chunk
+        first_chunk = self._load_chunk(chunk_indices[0].item())
+        sample_shape = first_chunk[0].shape[1:]  # Shape without batch dim
+        x_out = torch.empty(len(indices), *sample_shape)
+        y_out = torch.empty(len(indices), *sample_shape)
 
-        # Cache to avoid reloading same chunk multiple times
-        chunk_cache = {}
+        # Batch-index per unique chunk instead of per-sample Python loop
+        for chunk_idx in chunk_indices.unique():
+            mask = chunk_indices == chunk_idx
+            x_chunk, y_chunk = self._load_chunk(chunk_idx.item())
+            local = local_indices[mask]
+            x_out[mask] = x_chunk[local]
+            y_out[mask] = y_chunk[local]
 
-        for i, (chunk_idx, local_idx) in enumerate(zip(chunk_indices.tolist(), local_indices.tolist())):
-            if chunk_idx not in chunk_cache:
-                chunk_cache[chunk_idx] = self._load_chunk(chunk_idx)
-
-            x_chunk, y_chunk = chunk_cache[chunk_idx]
-            x_samples.append(x_chunk[local_idx])
-            y_samples.append(y_chunk[local_idx])
-
-        x_out = torch.stack(x_samples).to(self.device)
-        y_out = torch.stack(y_samples).to(self.device)
-        return x_out, y_out
+        return x_out.to(self.device), y_out.to(self.device)
 
     def sample_init(self, n: int) -> torch.Tensor:
         """Sample n source (x) values."""
@@ -377,6 +397,8 @@ class DiskCouplingDistribution(CouplingDistribution):
         cloned.save_dir = new_save_dir
         cloned.n_chunks = self.n_chunks
         cloned._is_temp = True  # Cloned temp dirs should be cleaned up
+        cloned._chunk_cache = OrderedDict()
+        cloned._cache_max_size = self._cache_max_size
 
         return cloned
 
@@ -412,6 +434,8 @@ class DiskCouplingDistribution(CouplingDistribution):
         dist.save_dir = save_dir
         dist.n_chunks = (size + chunk_size - 1) // chunk_size
         dist._is_temp = False
+        dist._chunk_cache = OrderedDict()
+        dist._cache_max_size = max(64, dist.n_chunks)
         return dist
 
 

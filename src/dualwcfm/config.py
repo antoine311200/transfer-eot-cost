@@ -13,6 +13,7 @@ class TrainingConfig:
     pretrain_epochs: int = 10000
     dual_epochs: int = 100
     cfm_epochs: int = 250
+    advance_steps: int = 100
 
     iterations: int = 100
     loss: str = "implicit"
@@ -31,6 +32,9 @@ class TrainingConfig:
     use_disk_coupling: bool = False  # Set True for large image datasets
     coupling_save_dir: Optional[str] = None  # Directory for disk coupling (None = temp dir)
     coupling_chunk_size: int = 256  # Samples per chunk file
+
+    # Mixed precision training (float16 forward/backward, float32 optimizer)
+    use_amp: bool = False  # Set True for ~2x speedup on modern GPUs with tensor cores
 
 
 @dataclass
