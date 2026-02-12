@@ -7,7 +7,7 @@ from .distribution import (
     FixedSizeDistribution,
     SphereDistribution
 )
-from .coupling import CouplingDistribution, FixedSizeCouplingDistribution, DiskCouplingDistribution, MarginalDistribution, RotatedShapeCoupling
+from .coupling import CouplingDistribution, FixedSizeCouplingDistribution, MarginalDistribution, RotatedShapeCoupling, DiskCouplingDistribution
 
 import torch
 from typing import Tuple, Optional

@@ -393,8 +393,8 @@ class Trainer:
             x, y = x.to(device), y.to(device)
 
             with torch.no_grad():
-                u_t = mu_model(t_tensor, x)
-                v_t = nu_model(t_tensor, y)
+                u_t = mu_model(t_tensor, x_mu)
+                v_t = nu_model(t_tensor, y_nu)
 
             x, y = x.requires_grad_(True), y.requires_grad_(True)
             x_mu, y_nu = x_mu.requires_grad_(True), y_nu.requires_grad_(True)

@@ -136,41 +136,17 @@ class RotatedShapeCoupling(CouplingDistribution):
 
 
 class FixedSizeCouplingDistribution(CouplingDistribution):
-    """Fixed-size coupling distribution that stores samples for reuse.
-
-    Supports both vector data (N, D) and image data (N, C, H, W).
-    """
 
     def __init__(self, coupling_distribution: CouplingDistribution, size: int = 1000):
         self.coupling_distribution = coupling_distribution
         self.size = size
-        x, y = self.coupling_distribution.coupling_sample(self.size)
-        # Store as tuple of tensors instead of stacked tensor for better image support
-        self.dataset_x = x
-        self.dataset_y = y
-        # Keep legacy dataset attribute for backward compatibility
-        self._update_legacy_dataset()
-
-    def _update_legacy_dataset(self):
-        """Update legacy stacked dataset for backward compatibility."""
-        # Only stack if both tensors have compatible shapes for stacking
-        if self.dataset_x.dim() == self.dataset_y.dim():
-            self.dataset = torch.stack([self.dataset_x, self.dataset_y], dim=0)
-        else:
-            self.dataset = (self.dataset_x, self.dataset_y)
+        self.dataset = torch.stack(list(self.coupling_distribution.coupling_sample(self.size)), dim=0)
 
     @staticmethod
     def from_dataset(dataset: Union[tuple[torch.Tensor, torch.Tensor], torch.Tensor]):
         obj = FixedSizeCouplingDistribution.__new__(FixedSizeCouplingDistribution)
-        if isinstance(dataset, tuple):
-            obj.dataset_x = dataset[0]
-            obj.dataset_y = dataset[1]
-            obj.size = dataset[0].shape[0]
-        else:
-            obj.dataset_x = dataset[0]
-            obj.dataset_y = dataset[1]
-            obj.size = dataset[0].shape[0]
-        obj._update_legacy_dataset()
+        obj.size = dataset[0].shape[0]
+        obj.dataset = dataset
         return obj
 
     def clone(self):
@@ -179,22 +155,22 @@ class FixedSizeCouplingDistribution(CouplingDistribution):
 
     def coupling_sample(self, n: int):
         idx = torch.randint(0, self.size, (n,))
-        return (self.dataset_x[idx], self.dataset_y[idx])
+        return (self.dataset[0][idx], self.dataset[1][idx])
 
     def sample_init(self, n: int):
         idx = torch.randint(0, self.size, (n,))
-        return self.dataset_x[idx]
+        return self.dataset[0][idx]
 
     def sample_target(self, n: int):
         idx = torch.randint(0, self.size, (n,))
-        return self.dataset_y[idx]
+        return self.dataset[1][idx]
 
     def update_chunk(self, start_idx: int, x_chunk: torch.Tensor, y_chunk: torch.Tensor):
-        """Update a chunk of the dataset (used during training)."""
+        """Updates a chunk of the dataset in-place."""
         end_idx = start_idx + x_chunk.shape[0]
-        self.dataset_x[start_idx:end_idx] = x_chunk
-        self.dataset_y[start_idx:end_idx] = y_chunk
 
+        self.dataset[0][start_idx:end_idx] = x_chunk
+        self.dataset[1][start_idx:end_idx] = y_chunk
 
 class DiskCouplingDistribution(CouplingDistribution):
     """Disk-based coupling distribution that stores samples on disk instead of memory.
