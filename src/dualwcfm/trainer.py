@@ -358,20 +358,20 @@ class Trainer:
         pbar = trange(self.config.dual_epochs, desc="Dual Training")
 
         # x, y = self.current_coupling.coupling_sample(self.config.batch_size)
-        x = self.flow_matching.interpolate(
-            self.initial_coupling.sample_init(batch_size).to(device),
-            self.new_source.sample(batch_size).to(device),
-            t_tensor,
-            0.0,
-        )
-        y = self.flow_matching.interpolate(
-            self.initial_coupling.sample_target(batch_size).to(device),
-            self.new_target.sample(batch_size).to(device),
-            t_tensor,
-            0.0,
-        )
-        self.visualizer._display_evolution(x.cpu(), y.cpu())
-        plt.show()
+        # x = self.flow_matching.interpolate(
+        #     self.initial_coupling.sample_init(batch_size).to(device),
+        #     self.new_source.sample(batch_size).to(device),
+        #     t_tensor,
+        #     0.0,
+        # )
+        # y = self.flow_matching.interpolate(
+        #     self.initial_coupling.sample_target(batch_size).to(device),
+        #     self.new_target.sample(batch_size).to(device),
+        #     t_tensor,
+        #     0.0,
+        # )
+        # self.visualizer._display_evolution(x.cpu(), y.cpu())
+        # plt.show()
 
         for epoch in pbar:
             x, y = self.current_coupling.coupling_sample(self.config.batch_size)
@@ -403,8 +403,8 @@ class Trainer:
             b, b_nu = g_dual(y), g_dual(y_nu)
 
             # Coupling term
-            coupling_term = torch.mean((a - a.mean() + b - b.mean()) ** 2)
-            # coupling_term = torch.mean((a + b) ** 2)
+            # coupling_term = torch.mean((a - a.mean() + b - b.mean()) ** 2)
+            coupling_term = torch.mean((a + b) ** 2)
 
             # Divergence terms
             grad_a = torch.autograd.grad(a_mu.sum(), x_mu, create_graph=True, retain_graph=True, only_inputs=True)[0]
