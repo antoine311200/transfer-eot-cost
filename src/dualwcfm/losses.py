@@ -24,6 +24,7 @@ class CFMLoss:
         config: TrainingConfig,
         flow_matching: ConditionalFlowMatching,
         step: int,
+        backward: bool = False,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         """Compute the CFM loss."""
         raise NotImplementedError("method not implemented")
@@ -49,6 +50,7 @@ class WeightedCFMLoss(CFMLoss):
         config: TrainingConfig,
         flow_matching: ConditionalFlowMatching,
         step: int,
+        backward: bool = False,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         f_dual, g_dual, _ = strategy.get_duals(config.device)
         model, optimizer = strategy.get_flow(step, config.device)
@@ -59,14 +61,17 @@ class WeightedCFMLoss(CFMLoss):
             weight = _expand_weight(torch.exp(log_w), x0)
 
             # Network a and b take non-permuted inputss
-            if step % 2 != 0:
+
+            if backward and step % 2 != 0:
                 x0, x1 = x1, x0
 
-            target_u_s = torch.cat([x1 - x0, torch.zeros_like(x0)], dim=-1)
+            # target_u_s = torch.cat([x1 - x0, torch.zeros_like(x0)], dim=-1)
 
-        s = torch.rand(config.batch_size, 1, device=config.device)
-        x_s = flow_matching.interpolate(x0, x1, s, config.sigma)
+        # s = torch.rand(config.batch_size, 1, device=config.device)
+        s = flow_matching.random_time(config.batch_size, config.device)
+        x_s = flow_matching.interpolate(x0, x1, s, config.sigma2)
         u_s = model(s, x_s, x0)
+        target_u_s = flow_matching.vector_field(x_s, s, x0, x1, extend=True, noisy=True)
 
         return (weight * (u_s - target_u_s) ** 2).mean(), model, optimizer
 
@@ -84,27 +89,27 @@ class ImplicitCFMLoss(CFMLoss):
         config: TrainingConfig,
         flow_matching: ConditionalFlowMatching,
         step: int,
+        backward: bool = False,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         f_dual, g_dual, _ = strategy.get_duals(config.device)
         model, optimizer = strategy.get_flow(step, config.device)
         previous_model = strategy.get_previous_flow(step, config.device)
-
-
 
         with torch.no_grad():
             a, b = f_dual(x0), g_dual(x1)
             log_w = (a + b) / config.iterations
             weight = _expand_weight(torch.exp(log_w), x0)
 
-        if step % 2 != 0:
+        if backward and step % 2 != 0:
             x0, x1 = x1, x0
 
-        s = torch.rand(config.batch_size, 1, device=config.device)
+        # s = torch.rand(config.batch_size, 1, device=config.device)
+        s = flow_matching.random_time(config.batch_size, config.device)
         xs = flow_matching.interpolate(x0, x1, s, config.sigma)
 
         with torch.no_grad():
             b_ta = previous_model(s, xs, x0)
-            u_t = flow_matching.vector_field(x0, None, x0, x1)
+            u_t = flow_matching.vector_field(x0, None, x0, x1, noisy=True)
 
         # Single forward pass -- use detach() for the target instead of running model twice
         u_s = model(s, xs, x0)

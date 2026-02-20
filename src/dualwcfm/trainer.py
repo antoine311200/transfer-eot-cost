@@ -17,7 +17,7 @@ from dualwcfm.distributions.coupling import (
     FixedSizeCouplingDistribution,
     DiskCouplingDistribution,
 )
-from dualwcfm.distributions.distribution import Distribution
+from dualwcfm.distributions.distribution import Distribution, FixedSizeDistribution
 
 
 class Trainer:
@@ -58,8 +58,15 @@ class Trainer:
 
     def _init_distributions(self, initial_coupling: CouplingDistribution):
         mu_distribution, nu_distribution = initial_coupling.get_marginals()
-        self.mu_distribution = mu_distribution
-        self.nu_distribution = nu_distribution
+
+        # When advancing with flow, track marginal particles in a fixed-size dataset
+        # (Euler-stepped each iteration, like the reference notebook)
+        if self.config.advance_with_flow:
+            self.mu_distribution = FixedSizeDistribution(mu_distribution, size=self.config.dataset_size)
+            self.nu_distribution = FixedSizeDistribution(nu_distribution, size=self.config.dataset_size)
+        else:
+            self.mu_distribution = mu_distribution
+            self.nu_distribution = nu_distribution
 
         # Use disk-based coupling for images to avoid OOM
         if self.config.use_disk_coupling or (self.config.image_shape is not None and self.config.dataset_size > 1000):
@@ -74,9 +81,9 @@ class Trainer:
         else:
             self.current_coupling = FixedSizeCouplingDistribution(initial_coupling, size=self.config.dataset_size)
 
-        # Copy to Initial distribution for later use
-        self.initial_mu_distribution = mu_distribution
-        self.initial_nu_distribution = nu_distribution
+        # Copy to Initial distribution for later use (clone so training mutations don't affect the template)
+        self.initial_mu_distribution = self.mu_distribution.clone()
+        self.initial_nu_distribution = self.nu_distribution.clone()
         self.initial_coupling_distribution = self.current_coupling
 
     def _load_pretrained_models(self, dir):
@@ -177,18 +184,20 @@ class Trainer:
         plt.show()
 
         # Divide by 10 learning rates for cfm
-        for param_group in self.strategy.get_flow(0, self.device)[1].param_groups:
-            param_group["lr"] = param_group["lr"] / 3.0
-        if isinstance(self.strategy, BidirectionalStrategy):
-            for param_group in self.strategy.get_flow(1, self.device)[1].param_groups:
-                param_group["lr"] = param_group["lr"] / 3.0
+        # for param_group in self.strategy.get_flow(0, self.device)[1].param_groups:
+        #     param_group["lr"] = param_group["lr"] / 3.0
+        # if isinstance(self.strategy, BidirectionalStrategy):
+        #     for param_group in self.strategy.get_flow(1, self.device)[1].param_groups:
+        #         param_group["lr"] = param_group["lr"] / 3.0
 
+        print("Is bidirectional?", isinstance(self.strategy, BidirectionalStrategy))
         # General training loop
         for iteration in range(self.config.iterations):
             print(f"Iteration {iteration+1}/{self.config.iterations}")
+            self.plot_distributions_after_advance(iteration)
             self.train_duals_step(iteration)
             self.train_cfm_step(iteration)
-            self.advance_step(iteration)
+            self.advance_step(iteration, backward=isinstance(self.strategy, BidirectionalStrategy))
 
     def train_marginal_flows(self, retrain: bool = False, save: str = None):
         sigma = self.config.sigma
@@ -209,7 +218,7 @@ class Trainer:
                 x1, y1 = self.new_source.sample(batch_size), self.new_target.sample(batch_size)
                 x0, x1, y0, y1 = x0.to(device), x1.to(device), y0.to(device), y1.to(device)
 
-                t = torch.rand(batch_size, 1, device=device)
+                t = self.flow_matching.random_time(batch_size, self.config.device)
                 xt = self.flow_matching.interpolate(x0, x1, t, sigma)
                 yt = self.flow_matching.interpolate(y0, y1, t, sigma)
 
@@ -218,7 +227,7 @@ class Trainer:
 
                 with self._autocast():
                     ut = mu_model(t, xt)
-                    ut_true = self.flow_matching.vector_field(xt, t, x0, x1, extend=False)
+                    ut_true = self.flow_matching.vector_field(xt, t, x0, x1, extend=False, noisy=True)
                     loss_mu = loss_fn(ut, ut_true)
 
                 if self._amp_enabled:
@@ -230,7 +239,7 @@ class Trainer:
 
                 with self._autocast():
                     vt = nu_model(t, yt)
-                    vt_true = self.flow_matching.vector_field(yt, t, y0, y1, extend=False)
+                    vt_true = self.flow_matching.vector_field(yt, t, y0, y1, extend=False, noisy=True)
                     loss_nu = loss_fn(vt, vt_true)
 
                 if self._amp_enabled:
@@ -305,7 +314,7 @@ class Trainer:
         plt.show()
 
     def pretrain(self, model, optimizer, backward: bool = False):
-        sigma = self.config.sigma
+        sigma2 = self.config.sigma2
         batch_size = self.config.batch_size
         loss_fn = nn.MSELoss()
 
@@ -319,14 +328,14 @@ class Trainer:
             if backward:
                 x0, x1 = x1, x0
 
-            s = torch.rand(batch_size, 1, device=self.config.device)
-            x_s = self.flow_matching.interpolate(x0, x1, s, sigma)
+            s = self.flow_matching.random_time(batch_size, self.config.device)
+            x_s = self.flow_matching.interpolate(x0, x1, s, sigma2)
 
             optimizer.zero_grad()
 
             with self._autocast():
                 u_s = model(s, x_s, x0)
-                u_s_true = self.flow_matching.vector_field(x_s, s, x0, x1)
+                u_s_true = self.flow_matching.vector_field(x_s, s, x0, x1, noisy=True)
                 loss = loss_fn(u_s, u_s_true)
 
             if self._amp_enabled:
@@ -376,19 +385,25 @@ class Trainer:
         for epoch in pbar:
             x, y = self.current_coupling.coupling_sample(self.config.batch_size)
 
-            # Create mu_t, nu_t samples from interpolating between source and new_source, target and new_target for current batch
-            x_mu = self.flow_matching.interpolate(
-                self.initial_coupling.sample_init(batch_size).to(device),
-                self.new_source.sample(batch_size).to(device),
-                t_tensor,
-                0.0,
-            )
-            y_nu = self.flow_matching.interpolate(
-                self.initial_coupling.sample_target(batch_size).to(device),
-                self.new_target.sample(batch_size).to(device),
-                t_tensor,
-                0.0,
-            )
+            # Sample from current marginals mu_t, nu_t
+            if self.config.advance_with_flow:
+                # Use tracked particle datasets (Euler-stepped each iteration)
+                x_mu = self.mu_distribution.sample(batch_size).to(device)
+                y_nu = self.nu_distribution.sample(batch_size).to(device)
+            else:
+                # Interpolate between original and new marginals at current time
+                x_mu = self.flow_matching.interpolate(
+                    self.initial_coupling.sample_init(batch_size).to(device),
+                    self.new_source.sample(batch_size).to(device),
+                    t_tensor,
+                    sigma=self.config.sigma
+                )
+                y_nu = self.flow_matching.interpolate(
+                    self.initial_coupling.sample_target(batch_size).to(device),
+                    self.new_target.sample(batch_size).to(device),
+                    t_tensor,
+                    sigma=self.config.sigma
+                )
 
             x, y = x.to(device), y.to(device)
 
@@ -431,13 +446,14 @@ class Trainer:
 
             lip_reg = self.config.lip_reg * (gp_f + gp_g)
 
-            # Penalize a-E(a) and b-E(q) to avoid trivial solutions where a and b go to infinity but their sum remains constant
-            # mean_a_loss = torch.mean(a)**2  # Force mean to 0
-            # mean_b_loss = torch.mean(b - a.detach())**2
-            # mean_a_mu_loss = torch.mean(a_mu)**2  # Force mean to 0
-            # mean_b_nu_loss = torch.mean(b_nu - a_mu.detach())**2
+            # # Penalize a-E(a) and b-E(q) to avoid trivial solutions where a and b go to infinity but their sum remains constant
+            # mean_a = torch.mean(a)
+            # mean_a_mu = torch.mean(a_mu)
+            # loss_mean_a = torch.mean((a - mean_a) ** 2)  # Force a to have low variance around its mean
+            # loss_mean_b = torch.mean((b + mean_a) ** 2)  # Force b to be close to -a to prevent trivial solutions
+            mean_loss = self.config.mean_reg * (torch.mean(a + b))**2
 
-            loss = 0.5 * coupling_term - a_term - b_term + l2_reg + lip_reg
+            loss = 0.5 * coupling_term - a_term - b_term + l2_reg + lip_reg + mean_loss
             # loss += 0.1 * mean_a_loss + 0.1 * mean_b_loss + 0.1 * mean_a_mu_loss + 0.1 * mean_b_nu_loss
 
             dual_optimizer.zero_grad()
@@ -459,11 +475,11 @@ class Trainer:
 
         for epoch in pbar:
             x0, x1 = self.current_coupling.coupling_sample(batch_size)
-            x0, x1 = x0.to(self.config.device), x1.to(self.config.device)
+            x0, x1 = x0.clone().to(self.config.device), x1.clone().to(self.config.device)
 
             with self._autocast():
                 loss, model, optimizer = self.loss_cfm.execute(
-                    x0, x1, self.strategy, self.config, self.flow_matching, time_step
+                    x0, x1, self.strategy, self.config, self.flow_matching, time_step, backward=isinstance(self.strategy, BidirectionalStrategy)
                 )
 
             optimizer.zero_grad()
@@ -479,7 +495,14 @@ class Trainer:
 
         self.visualizer.display(time_step, self)
 
-    def advance_step(self, time_step: int):
+        x0, _ = self.current_coupling.coupling_sample(10000)
+        x0 = x0.clone()
+        x1 = self.flow_matching.evolve(x0.to(self.config.device), model, num_steps=100, sigma=self.config.sigma, extend=True)[:, :self.strategy.config.dimension]
+        transport_cost = self.visualizer.transport_cost(x0.cpu(), x1.cpu())
+        print(torch.norm(transport_cost, dim=1).mean().item())
+        print(transport_cost[:10])
+
+    def advance_step(self, time_step: int, backward: bool = False):
         # Use coupling's chunk size for disk-based coupling, otherwise use defaults
         if isinstance(self.current_coupling, DiskCouplingDistribution):
             chunk_size = self.current_coupling.chunk_size
@@ -509,33 +532,30 @@ class Trainer:
                     y_nu_next = y_nu + nu_model(t_tensor, y_nu) * (1 / self.config.iterations)
                 else:
                     # Compute interpolation from source and new_source, target and new_target for current chunk
-                    t_tensor = torch.full((actual_chunk_size, 1), time_step / self.config.iterations, device=device)
+                    t_tensor = torch.full((actual_chunk_size, 1), (time_step + 1) / self.config.iterations, device=device)
                     x_mu_next = self.flow_matching.interpolate(
                         self.initial_coupling.sample_init(actual_chunk_size).to(device),
                         self.new_source.sample(actual_chunk_size).to(device),
                         t_tensor,
-                        0.0,
+                        # 0.0,
+                        sigma=self.config.sigma
                     )
-                    y_mu_next = self.flow_matching.interpolate(
+                    y_nu_next = self.flow_matching.interpolate(
                         self.initial_coupling.sample_target(actual_chunk_size).to(device),
                         self.new_target.sample(actual_chunk_size).to(device),
                         t_tensor,
-                        0.0,
+                        # 0.0,
+                        sigma=self.config.sigma
                     )
-                    y_nu_next = y_mu_next
 
                 num_steps = self.config.advance_steps
-                flow_model_mu = self.strategy.forward_model
-                flow_model_nu = (
-                    self.strategy.backward_model
-                    if isinstance(self.strategy, BidirectionalStrategy)
-                    else self.strategy.forward_model
-                )
+                flow_model_mu, _ = self.strategy.get_flow(0, device=self.device)
+                flow_model_nu, _ = self.strategy.get_flow(1, device=self.device)
                 dt = 1.0 / num_steps
 
-                if time_step % 2 == 0:
+                if not backward or time_step % 2 == 0:
                     x_next = x_mu_next.clone()
-                    xt = x_next
+                    xt = x_next.clone()
 
                     for j in range(num_steps):
                         t = torch.full((x_next.shape[0], 1), j * dt, device=device)
@@ -544,12 +564,12 @@ class Trainer:
                             vt = flow_model_mu(t, x_concat)
                             vt = vt[:, :xt.shape[1], :, :]
                         else:
-                            vt = flow_model_mu(torch.cat([xt, x_next, t], dim=1))[:, : self.strategy.config.dimension]
+                            vt = flow_model_mu(t, xt, x_next)[:, : self.strategy.config.dimension]
                         xt = xt + vt * dt
                     y_next = xt
                 else:
                     y_next = y_nu_next.clone()
-                    yt = y_next
+                    yt = y_next.clone()
 
                     for j in range(num_steps):
                         t = torch.full((y_next.shape[0], 1), j * dt, device=device)
@@ -558,18 +578,21 @@ class Trainer:
                             vt = flow_model_nu(t, y_concat)
                             vt = vt[:, :yt.shape[1], :, :]
                         else:
-                            vt = flow_model_nu(torch.cat([yt, y_next, t], dim=1))[:, : self.strategy.config.dimension]
+                            # vt = flow_model_nu(torch.cat([yt, y_next, t], dim=1))[:, : self.strategy.config.dimension]
+                            vt = flow_model_nu(t, yt, y_next)[:, : self.strategy.config.dimension]
                         yt = yt + vt * dt
                     x_next = yt
 
                 # Update coupling dataset
-                self.current_coupling.update_chunk(i, x_next.cpu(), y_next.cpu())
+                self.current_coupling.update_chunk(i, x_next.detach().cpu(), y_next.detach().cpu())
 
                 if self.config.advance_with_flow:
                     self.mu_distribution.dataset[i : i + actual_chunk_size] = x_mu_next.cpu()
                     self.nu_distribution.dataset[i : i + actual_chunk_size] = y_nu_next.cpu()
 
-        self.plot_distributions_after_advance(time_step)
+        # Plot every 10 steps to avoid excessive plotting overhead
+        if (time_step + 1) % 1 == 0 or time_step == self.config.iterations - 1:
+            self.plot_distributions_after_advance(time_step)
 
     def plot_distributions_after_advance(self, time_step: int):
         """Plot distributions after advancing step. Handles both vectors and images."""
@@ -580,7 +603,7 @@ class Trainer:
 
         # Vector distributions visualization
         n_samples = 2500
-        t_tensor = torch.full((n_samples // 10, 1), time_step / self.config.iterations, device=self.device)
+        t_tensor = torch.full((n_samples // 10, 1), (time_step + 1) / self.config.iterations, device=self.device)
         mu_samples = self.flow_matching.interpolate(
             self.initial_coupling.sample_init(n_samples // 10).to(self.device),
             self.new_source.sample(n_samples // 10).to(self.device),
@@ -596,8 +619,11 @@ class Trainer:
 
         # Get coupling samples and move to CPU once
         (mu_coupling_samples, nu_coupling_samples) = self.current_coupling.coupling_sample(250)
-        mu_cpu = mu_coupling_samples.cpu()
-        nu_cpu = nu_coupling_samples.cpu()
+        mu_cpu = mu_coupling_samples.clone().cpu()
+        nu_cpu = nu_coupling_samples.clone().cpu()
+
+        nu_flow = self.flow_matching.evolve(mu_cpu.to(self.device), self.strategy.get_flow(0, self.device)[0], num_steps=100, sigma=self.config.sigma, extend=True)[:, :self.strategy.config.dimension]
+        nu_flow_cpu = nu_flow.cpu()
 
         # 3D plot
         if self.strategy.config.dimension == 3:
@@ -613,6 +639,7 @@ class Trainer:
             ax.scatter(nu_s_cpu[:, 0], nu_s_cpu[:, 1], nu_s_cpu[:, 2], c="red", alpha=0.1, depthshade=True, s=3)
             ax.scatter(mu_cpu[:, 0], mu_cpu[:, 1], mu_cpu[:, 2], c="purple", marker="x", alpha=0.75, depthshade=True)
             ax.scatter(nu_cpu[:, 0], nu_cpu[:, 1], nu_cpu[:, 2], c="orange", marker="x", alpha=0.75, depthshade=True)
+            ax.scatter(nu_flow_cpu[:, 0], nu_flow_cpu[:, 1], nu_flow_cpu[:, 2], c="green", marker="o", alpha=0.75, depthshade=True, s=50, label="Flow Evolved")
 
             # Line between coupling samples
             dist = torch.norm(nu_cpu - mu_cpu, dim=1)
@@ -662,6 +689,7 @@ class Trainer:
                     "k-",
                     alpha=0.1,
                 )
+            plt.legend()
             plt.title(f"Distributions after Advancing Step {time_step+1}")
             plt.show()
 

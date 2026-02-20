@@ -20,8 +20,10 @@ class TrainingConfig:
     advance_with_flow: bool = False
 
     sigma: float = 0.1
+    sigma2: float = 0.1
     l2_reg: float = 1e-3
     lip_reg: float = 1e-3
+    mean_reg: float = 0.1
 
     batch_size: int = 4096
 

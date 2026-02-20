@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import Optional, Tuple, TYPE_CHECKING, Callable
 
 import torch
 import torch.nn as nn
@@ -16,8 +16,9 @@ if TYPE_CHECKING:
 
 
 class Visualizer:
-    def __init__(self, config: VisualizeConfig):
+    def __init__(self, config: VisualizeConfig, transport_map: Callable):
         self.config = config
+        self.transport_map = transport_map
         self.dim = 2
 
     def display(self, epoch: int, trainer: Trainer):
@@ -35,6 +36,11 @@ class Visualizer:
             y = y[:, : self.dim]
             self._display_evolution(x.cpu(), y.cpu(), y_target.cpu())
             plt.show()
+
+    def transport_cost(self, x: torch.Tensor, y: torch.Tensor):
+        if self.transport_map is None:
+            return None
+        return y - self.transport_map(x)
 
     def _display_evolution(
         self, start_points: torch.Tensor, end_points: torch.Tensor, target_points: Optional[torch.Tensor] = None
@@ -311,3 +317,52 @@ class VisualizerImage(Visualizer):
         self._display_evolution(x0.cpu(), end_points.cpu(), x1.cpu())
         plt.suptitle(f"Pretrain {direction} Flow - Epoch {epoch}")
         plt.show()
+
+
+
+def plot_2d_flow_trajectories(
+    trajectories: torch.Tensor,
+    t: torch.Tensor,
+    n_trajectories: int = 50,
+    target_points: Optional[torch.Tensor] = None,
+    xlim: Optional[Tuple[float, float]] = None,
+    ylim: Optional[Tuple[float, float]] = None,
+    title: str = "Flow Trajectories",
+):
+    """Plot sample flow trajectories"""
+    fig, ax = plt.subplots(figsize=(8, 8))
+    trajectories_np = trajectories.cpu().numpy()
+
+    n_trajectories = min(n_trajectories, trajectories.shape[1])
+
+    from matplotlib.collections import LineCollection
+
+    segments = []
+    for j in range(n_trajectories):
+        points = trajectories_np[:, j, :2]
+        segs = np.stack([points[:-1], points[1:]], axis=1)
+        segments.extend(segs)
+
+    start_points = trajectories_np[0, :, :2]
+    end_points = trajectories_np[-1, :, :2]
+
+    if target_points is not None:
+        ax.scatter(target_points[:, 0], target_points[:, 1], c="orange", s=5, alpha=0.5, zorder=4, label="Target")
+    ax.scatter(start_points[:, 0], start_points[:, 1], c="red", s=5, alpha=0.5, zorder=4, label="Start")
+    ax.scatter(end_points[:, 0], end_points[:, 1], c="green", s=5, alpha=0.5, zorder=4, label="End")
+    mid_points = trajectories_np[trajectories_np.shape[0] // 2, :, :2]
+    ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=5, alpha=0.5, zorder=4, label="Mid")
+    ax.grid(True, alpha=0.2)
+    ax.set_title(title)
+
+    lc = LineCollection(segments, colors="gray", alpha=0.5, linewidths=0.8, zorder=1)
+    ax.add_collection(lc)
+
+    if xlim is not None:
+        ax.set_xlim(xlim)
+    if ylim is not None:
+        ax.set_ylim(ylim)
+
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.legend()

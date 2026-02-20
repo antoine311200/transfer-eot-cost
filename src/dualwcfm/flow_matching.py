@@ -5,18 +5,28 @@ from dualwcfm.utils import is_image_tensor
 
 
 class ConditionalFlowMatching:
+
+    def random_time(self, batch_size, device, eps=1e-3):
+        s = torch.rand(batch_size, 1, device=device)
+        s = s * (1 - 2 * eps) + eps
+        return s
+
     def vector_field(
-        self, x: torch.Tensor, t, x0: torch.Tensor, x1: torch.Tensor, extend: bool = True
+        self, x: torch.Tensor, t, x0: torch.Tensor, x1: torch.Tensor, extend: bool = True, noisy: bool = False#, noise: torch.Tensor = None
     ) -> torch.Tensor:
         """Compute the vector field at position x and time t.
 
         Handles both vector (N, D) and image (N, C, H, W) tensors.
         Note: x and t are unused in this linear flow -- kept for API compatibility.
         """
-        if extend:
-            return torch.cat([x1 - x0, torch.zeros_like(x0)], dim=1)
+        if noisy:
+            field = x1 - x0 + (1 - 2*t) / (2 * t * (1 - t)) * (x - (t * x1 + (1 - t) * x0))
         else:
-            return x1 - x0
+            field = x1 - x0
+        if extend:
+            return torch.cat([field, torch.zeros_like(x0)], dim=1)
+        else:
+            return field
 
     def interpolate(self, x0: torch.Tensor, x1: torch.Tensor, t: torch.Tensor, sigma: float) -> torch.Tensor:
         """Interpolate between x0 and x1 at time t with noise sigma.
@@ -30,7 +40,9 @@ class ConditionalFlowMatching:
         if sigma == 0.0:
             return (1 - t) * x0 + t * x1
 
-        return (1 - t) * x0 + t * x1 + sigma * torch.randn_like(x0) * torch.sqrt(t * (1 - t))
+        noise = sigma * torch.randn_like(x0)
+
+        return (1 - t) * x0 + t * x1 + noise * torch.sqrt(t * (1 - t))
 
     def evolve(
         self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True
