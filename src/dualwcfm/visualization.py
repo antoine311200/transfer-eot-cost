@@ -42,6 +42,133 @@ class Visualizer:
             return None
         return y - self.transport_map(x)
 
+    # ------------------------------------------------------------------
+    # Diagnostic: sliced Wasserstein distances between marginals
+    # ------------------------------------------------------------------
+
+    def _sliced_wasserstein(
+        self,
+        X: torch.Tensor,
+        Y: torch.Tensor,
+        n_proj: int = 200,
+        p: int = 1,
+    ) -> float:
+        """Sliced Wasserstein-p distance between two point clouds.
+
+        Projects X and Y onto *n_proj* random unit directions, computes the
+        1-D Wasserstein-p for each projection, and returns the average (for
+        p=1) or the sqrt-of-average-squared (for p=2), matching the standard
+        sliced Wasserstein definition.
+
+        Args:
+            X: (n, d) float tensor.
+            Y: (m, d) float tensor.
+            n_proj: Number of random 1-D projections.
+            p: Wasserstein order — 1 or 2.
+
+        Returns:
+            Scalar sliced Wasserstein-p estimate.
+        """
+        d = X.shape[1]
+        device = X.device
+        dtype = X.dtype
+
+        # Random unit directions: (d, n_proj)
+        dirs = torch.randn(d, n_proj, device=device, dtype=dtype)
+        dirs = dirs / dirs.norm(dim=0, keepdim=True).clamp(min=1e-8)
+
+        # Scalar projections: (n, n_proj) and (m, n_proj)
+        X_proj = X @ dirs
+        Y_proj = Y @ dirs
+
+        # Sort along the sample axis
+        X_sorted = X_proj.sort(dim=0).values
+        Y_sorted = Y_proj.sort(dim=0).values
+
+        # Align sizes via uniform quantile sub-indexing
+        n, m = X_sorted.shape[0], Y_sorted.shape[0]
+        if n != m:
+            n_q = min(n, m)
+            idx_X = torch.linspace(0, n - 1, n_q, device=device).long()
+            idx_Y = torch.linspace(0, m - 1, n_q, device=device).long()
+            X_sorted = X_sorted[idx_X]
+            Y_sorted = Y_sorted[idx_Y]
+
+        diff = (X_sorted - Y_sorted).abs()  # (n_q, n_proj)
+        if p == 1:
+            return diff.mean().item()
+        else:  # p == 2 — SW_2 = sqrt(E[W_2^2])
+            return diff.pow(2).mean().sqrt().item()
+
+    def analyse(
+        self,
+        time_step: int,
+        trainer,
+        n_samples: int = 2000,
+        n_proj: int = 200,
+    ) -> dict:
+        """Measure drift between theoretical marginals and current coupling.
+
+        Computes sliced Wasserstein-1 and -2 between:
+          * mu_t  (noiseless linear interpolation of mu_0 → mu_1 at global
+                   time t = time_step / iterations)
+            and the *first* marginal of ``trainer.current_coupling``.
+          * nu_t  (noiseless linear interpolation of nu_0 → nu_1 at time t)
+            and the *second* marginal of ``trainer.current_coupling``.
+
+        This quantifies how much error has accumulated in the coupling
+        relative to the ideal linear-interpolation path.
+
+        Args:
+            time_step: Current training iteration index.
+            trainer: The :class:`~dualwcfm.trainer.Trainer` instance.
+            n_samples: Number of samples used for the distance estimates.
+            n_proj: Number of random projections for sliced Wasserstein.
+
+        Returns:
+            dict with keys ``'W1_mu'``, ``'W2_mu'``, ``'W1_nu'``, ``'W2_nu'``.
+        """
+        device = trainer.device
+        config = trainer.config
+        t = time_step / config.iterations
+        t_tensor = torch.full((n_samples, 1), t, device=device)
+
+        with torch.no_grad():
+            # Theoretical mu_t: noiseless linear interpolation at time t
+            mu_t = trainer.flow_matching.interpolate(
+                trainer.initial_coupling.sample_init(n_samples).to(device),
+                trainer.new_source.sample(n_samples).to(device),
+                t_tensor,
+                sigma=0.0,
+            )
+            # Theoretical nu_t: noiseless linear interpolation at time t
+            nu_t = trainer.flow_matching.interpolate(
+                trainer.initial_coupling.sample_target(n_samples).to(device),
+                trainer.new_target.sample(n_samples).to(device),
+                t_tensor,
+                sigma=0.0,
+            )
+            # First and second marginals of the current coupling
+            x_coupling, y_coupling = trainer.current_coupling.coupling_sample(n_samples)
+            x_coupling = x_coupling.to(device)
+            y_coupling = y_coupling.to(device)
+
+        # Flatten to (N, d) — works for both vector and image data
+        n_x = x_coupling.shape[0]
+        n_y = y_coupling.shape[0]
+        mu_t_flat = mu_t.view(n_samples, -1).float()
+        nu_t_flat = nu_t.view(n_samples, -1).float()
+        x_flat = x_coupling.view(n_x, -1).float()
+        y_flat = y_coupling.view(n_y, -1).float()
+
+        results = {
+            "W1_mu": self._sliced_wasserstein(mu_t_flat, x_flat, n_proj=n_proj, p=1),
+            "W2_mu": self._sliced_wasserstein(mu_t_flat, x_flat, n_proj=n_proj, p=2),
+            "W1_nu": self._sliced_wasserstein(nu_t_flat, y_flat, n_proj=n_proj, p=1),
+            "W2_nu": self._sliced_wasserstein(nu_t_flat, y_flat, n_proj=n_proj, p=2),
+        }
+        return results
+
     def _display_evolution(
         self, start_points: torch.Tensor, end_points: torch.Tensor, target_points: Optional[torch.Tensor] = None
     ):

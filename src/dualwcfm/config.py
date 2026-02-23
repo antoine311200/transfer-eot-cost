@@ -38,6 +38,14 @@ class TrainingConfig:
     # Mixed precision training (float16 forward/backward, float32 optimizer)
     use_amp: bool = False  # Set True for ~2x speedup on modern GPUs with tensor cores
 
+    # Error-accumulation correction
+    # correction_each > 0: run a correction step every `correction_each` iterations.
+    # The correction retrains the nu bridge (and mu bridge if bidirectional) from
+    # nu_t_with_errors (actual forward-model output at time t) to nu_1, then uses
+    # these corrected bridges to retrain the dual networks f and g.
+    correction_each: int = 0    # 0 = disabled
+    correction_epochs: int = 100
+
 
 @dataclass
 class ModelConfig:
