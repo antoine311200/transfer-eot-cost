@@ -105,7 +105,7 @@ class Visualizer:
         time_step: int,
         trainer,
         n_samples: int = 2000,
-        n_proj: int = 200,
+        n_proj: int = 2000,
     ) -> dict:
         """Measure drift between theoretical marginals and current coupling.
 

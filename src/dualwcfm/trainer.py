@@ -268,22 +268,22 @@ class Trainer:
 
             # Sample from mu_t, then use the forward model to get nu_t_with_errors samples for correction training.
             xt = self.flow_matching.interpolate(x0, x1, t_tensor, self.config.sigma)
-            yt = self.flow_matching.evolve(xt, forward_model, num_steps=50, sigma=self.config.sigma, extend=True)[:, : self.strategy.config.dimension]
+            yt = self.flow_matching.evolve(xt, forward_model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
 
             y1 = self.new_target.sample(batch_size).to(device)
             y1 = y1.to(device)
 
             # Interpolate between nu_t_with_errors and nu_1 to get training samples for the correction bridge
             s = self.flow_matching.random_time(batch_size, self.config.device)
-            # Modify s to be in [t, 1] so that we stay in the second half of the trajectory where errors have accumulated.
-            s = t + s * (1 - t)
             zs = self.flow_matching.interpolate(yt, y1, s, self.config.sigma)
+            # Modify s to be in [t, 1] so that we stay in the second half of the trajectory where errors have accumulated.
+            s_dilate = t + s * (1 - t)
 
             nu_optimizer.zero_grad()
 
             with self._autocast():
-                vt = nu_model(s, zs)
-                vt_true = self.flow_matching.vector_field(zs, s, yt, y1, extend=False, noisy=True)
+                vt = nu_model(s_dilate, zs)
+                vt_true = self.flow_matching.vector_field(zs, s_dilate, yt, y1, extend=False, noisy=True)
                 loss_nu = loss_fn(vt, vt_true)
 
             if self._amp_enabled:
@@ -297,250 +297,20 @@ class Trainer:
             pbar.set_postfix({"Correction Loss nu": loss_nu.item()})
 
             # Visualize marginal flows during training
-            self.visualizer.display_marginal(
-                epoch, self, nu_model, self.nu_distribution, self.new_target, title="Nu Marginal Flow"
-            )
-
-        # nu_corrected_model = copy.deepcopy(nu_model).to(device)
-        # nu_corrected_optmizer = torch.optim.Adam(
-        #     nu_corrected_model.parameters(),
-        #     lr=self.strategy.config.nu_learning_rate,
-        # )
-
-        # # ------------------------------------------------------------------
-        # # Build a fixed buffer of error-distribution samples.
-        # # evolve() is an internal no_grad ODE (sigma argument is unused).
-        # # ------------------------------------------------------------------
-        # n_buffer = max(batch_size * 8, 16384)
-        # t_buf = torch.full((n_buffer, 1), t, device=device)
-
-        # if self.config.advance_with_flow:
-        #     mu_t_buf = self.mu_distribution.sample(n_buffer).to(device)
-        # else:
-        #     with torch.no_grad():
-        #         mu_t_buf = self.flow_matching.interpolate(
-        #             self.initial_coupling.sample_init(n_buffer).to(device),
-        #             self.new_source.sample(n_buffer).to(device),
-        #             t_buf, sigma=0.0,
-        #         )
-        # # nu_t_with_errors: deterministic ODE rollout of the forward model from mu_t
-        # nu_t_err_buf = self.flow_matching.evolve(
-        #     mu_t_buf, forward_model,
-        #     num_steps=self.config.advance_steps,
-        #     extend=True,
-        # )[:, :self.strategy.config.dimension]
-
-        # mu_t_err_buf = None
-        # if is_bidirectional:
-        #     backward_model, _ = self.strategy.get_flow(1, device)
-        #     backward_model.eval()
-        #     if self.config.advance_with_flow:
-        #         nu_t_buf = self.nu_distribution.sample(n_buffer).to(device)
-        #     else:
-        #         with torch.no_grad():
-        #             nu_t_buf = self.flow_matching.interpolate(
-        #                 self.initial_coupling.sample_target(n_buffer).to(device),
-        #                 self.new_target.sample(n_buffer).to(device),
-        #                 t_buf, sigma=0.0,
-        #             )
-        #     # mu_t_with_errors: deterministic ODE rollout of the backward model from nu_t
-        #     mu_t_err_buf = self.flow_matching.evolve(
-        #         nu_t_buf, backward_model,
-        #         num_steps=self.config.advance_steps,
-        #         extend=True,
-        #     )[:, :self.strategy.config.dimension]
-
-        # # ------------------------------------------------------------------
-        # # Create correction bridges as deep-copies of the current originals.
-        # # Original bridges are left intact so advance_step is unaffected.
-        # # ------------------------------------------------------------------
-        # self._corr_nu_bridge = copy.deepcopy(nu_model).to(device)
-        # corr_nu_opt = torch.optim.Adam(
-        #     self._corr_nu_bridge.parameters(),
-        #     lr=self.strategy.config.nu_learning_rate,
-        # )
-
-        # # ------------------------------------------------------------------
-        # # Train correction nu bridge: nu_t_errors → nu_1
-        # # ------------------------------------------------------------------
-        # self._corr_nu_bridge.train()
-        # pbar_nu = trange(self.config.correction_epochs, desc="Correction nu bridge")
-        # for _ in pbar_nu:
-        #     idx = torch.randint(0, n_buffer, (batch_size,), device=device)
-        #     nu0 = nu_t_err_buf[idx].detach()
-        #     y1 = self.new_target.sample(batch_size).to(device)
-        #     s = self.flow_matching.random_time(batch_size, device)
-        #     ys = self.flow_matching.interpolate(nu0, y1, s, self.config.sigma)
-
-        #     corr_nu_opt.zero_grad()
-        #     vt_pred = self._corr_nu_bridge(s, ys)
-        #     vt_true = self.flow_matching.vector_field(ys, s, nu0, y1, extend=False, noisy=True)
-        #     loss = loss_fn(vt_pred, vt_true)
-        #     loss.backward()
-        #     corr_nu_opt.step()
-        #     pbar_nu.set_postfix({"nu_corr": loss.item()})
-        # self._corr_nu_bridge.eval()
-
-        # # ------------------------------------------------------------------
-        # # Train correction mu bridge: mu_t_errors → mu_1  (bidirectional only)
-        # # ------------------------------------------------------------------
-        # if is_bidirectional and mu_t_err_buf is not None:
-        #     self._corr_mu_bridge = copy.deepcopy(mu_model).to(device)
-        #     corr_mu_opt = torch.optim.Adam(
-        #         self._corr_mu_bridge.parameters(),
-        #         lr=self.strategy.config.mu_learning_rate,
-        #     )
-
-        #     self._corr_mu_bridge.train()
-        #     pbar_mu = trange(self.config.correction_epochs, desc="Correction mu bridge")
-        #     for _ in pbar_mu:
-        #         idx = torch.randint(0, n_buffer, (batch_size,), device=device)
-        #         mu0 = mu_t_err_buf[idx].detach()
-        #         x1 = self.new_source.sample(batch_size).to(device)
-        #         s = self.flow_matching.random_time(batch_size, device)
-        #         xs = self.flow_matching.interpolate(mu0, x1, s, self.config.sigma)
-
-        #         corr_mu_opt.zero_grad()
-        #         ut_pred = self._corr_mu_bridge(s, xs)
-        #         ut_true = self.flow_matching.vector_field(xs, s, mu0, x1, extend=False, noisy=True)
-        #         loss = loss_fn(ut_pred, ut_true)
-        #         loss.backward()
-        #         corr_mu_opt.step()
-        #         pbar_mu.set_postfix({"mu_corr": loss.item()})
-        #     self._corr_mu_bridge.eval()
-
-        # # ------------------------------------------------------------------
-        # # Persist error buffers on CPU for use by subsequent train_duals_step calls.
-        # # ------------------------------------------------------------------
-        # self._corr_nu_errors = nu_t_err_buf.cpu()
-        # if is_bidirectional and mu_t_err_buf is not None:
-        #     self._corr_mu_errors = mu_t_err_buf.cpu()
-
-        # # ------------------------------------------------------------------
-        # # Immediate boundary correction of f and g at s = eps.
-        # # ------------------------------------------------------------------
-        # self._correction_dual_step(time_step, nu_t_err_buf, mu_t_err_buf)
-
-    # def _correction_dual_step(
-    #     self,
-    #     time_step: int,
-    #     nu_t_errors: torch.Tensor,
-    #     mu_t_errors: torch.Tensor = None,
-    # ):
-    #     """Dual training step that uses the actual error-containing distributions.
-
-    #     After :meth:`correction_step` has temporarily retrained the bridges from
-    #     *nu_t_with_errors → nu_1* (and optionally *mu_t_with_errors → mu_1*),
-    #     this method trains f and g using:
-
-    #     * ``y_nu`` sampled from ``nu_t_errors`` (the true forward-model output),
-    #       not from the ideal linear interpolation.
-    #     * ``v_t`` from the corrected nu bridge evaluated at *internal correction
-    #       time s = 0* (the start of the correction interval, i.e. at nu_t_errors).
-    #     * ``x_mu`` / ``u_t`` either from ``mu_t_errors`` (bidirectional) or the
-    #       unchanged linear-interpolation mu_t.
-
-    #     The coupling samples ``(x, y)`` still come from ``current_coupling`` so
-    #     the coupling-term in the dual loss is consistent with training.
-
-    #     Args:
-    #         time_step: Current training iteration index.
-    #         nu_t_errors: Buffer of samples from nu_t_with_errors — shape (N, d).
-    #         mu_t_errors: Buffer of samples from mu_t_with_errors — shape (N, d),
-    #             or ``None`` for unidirectional strategies.
-    #     """
-    #     batch_size = self.config.batch_size
-    #     device = self.config.device
-    #     is_image = self.config.image_shape is not None
-    #     n_nu = nu_t_errors.shape[0]
-
-    #     # Use the persistent correction bridges created by correction_step.
-    #     # For mu, fall back to the original bridge (unidirectional strategy) with
-    #     # global time if no correction bridge exists for it.
-    #     (mu_model, _), _ = self.strategy.get_bridges(self.device)
-    #     f_dual, g_dual, dual_optimizer = self.strategy.get_duals(self.device)
-    #     f_dual.train()
-    #     g_dual.train()
-    #     mu_model.eval()
-    #     if self._corr_nu_bridge is not None:
-    #         self._corr_nu_bridge.eval()
-    #     if self._corr_mu_bridge is not None:
-    #         self._corr_mu_bridge.eval()
-
-    #     # Query correction bridges at the lower training-range boundary s=eps so we
-    #     # stay inside [eps, 1-eps] (avoids score singularity in vector_field targets).
-    #     _eps = 1e-3  # must match random_time default eps
-    #     s_eps = torch.full((batch_size, 1), _eps, device=device)
-    #     t_tensor = torch.full((batch_size, 1), time_step / self.config.iterations, device=device)
-    #     # mu: corrected bridge at s=eps if available, else original bridge at global t
-    #     mu_time = s_eps if self._corr_mu_bridge is not None else t_tensor
-
-    #     pbar = trange(self.config.dual_epochs, desc="Correction Dual Training")
-    #     for _ in pbar:
-    #         x, y = self.current_coupling.coupling_sample(batch_size)
-    #         x, y = x.to(device), y.to(device)
-
-    #         # Sample y_nu from the error distribution (with replacement)
-    #         idx_nu = torch.randint(0, n_nu, (batch_size,), device=device)
-    #         y_nu = nu_t_errors[idx_nu].detach()
-
-    #         if mu_t_errors is not None:
-    #             idx_mu = torch.randint(0, mu_t_errors.shape[0], (batch_size,), device=device)
-    #             x_mu = mu_t_errors[idx_mu].detach()
-    #         elif self.config.advance_with_flow:
-    #             x_mu = self.mu_distribution.sample(batch_size).to(device)
-    #         else:
-    #             x_mu = self.flow_matching.interpolate(
-    #                 self.initial_coupling.sample_init(batch_size).to(device),
-    #                 self.new_source.sample(batch_size).to(device),
-    #                 t_tensor, sigma=self.config.sigma,
-    #             )
-
-    #         with torch.no_grad():
-    #             _mu_bridge = self._corr_mu_bridge if self._corr_mu_bridge is not None else mu_model
-    #             u_t = _mu_bridge(mu_time, x_mu)          # corrected (s=eps) or original (global t)
-    #             v_t = self._corr_nu_bridge(s_eps, y_nu)  # corrected bridge at s=eps ≈ nu_t_errors
-
-    #         x, y = x.requires_grad_(True), y.requires_grad_(True)
-    #         x_mu = x_mu.requires_grad_(True)
-    #         y_nu = y_nu.requires_grad_(True)
-
-    #         a, a_mu = f_dual(x), f_dual(x_mu)
-    #         b, b_nu = g_dual(y), g_dual(y_nu)
-
-    #         coupling_term = torch.mean((a + b) ** 2)
-
-    #         grad_a = torch.autograd.grad(
-    #             a_mu.sum(), x_mu, create_graph=True, retain_graph=True, only_inputs=True
-    #         )[0]
-    #         grad_b = torch.autograd.grad(
-    #             b_nu.sum(), y_nu, create_graph=True, retain_graph=True, only_inputs=True
-    #         )[0]
-
-    #         if is_image:
-    #             a_term = torch.mean((grad_a * u_t).sum(dim=[1, 2, 3]))
-    #             b_term = torch.mean((grad_b * v_t).sum(dim=[1, 2, 3]))
-    #             gp_f = ((grad_a.view(batch_size, -1).norm(2, dim=1) - 1) ** 2).mean()
-    #             gp_g = ((grad_b.view(batch_size, -1).norm(2, dim=1) - 1) ** 2).mean()
-    #         else:
-    #             a_term = torch.mean(torch.sum(grad_a * u_t, dim=1))
-    #             b_term = torch.mean(torch.sum(grad_b * v_t, dim=1))
-    #             gp_f = ((grad_a.norm(2, dim=1) - 1) ** 2).mean()
-    #             gp_g = ((grad_b.norm(2, dim=1) - 1) ** 2).mean()
-
-    #         l2_reg = self.config.l2_reg * (
-    #             torch.mean(a**2) + torch.mean(b**2) + torch.mean(a_mu**2) + torch.mean(b_nu**2)
-    #         )
-    #         lip_reg = self.config.lip_reg * (gp_f + gp_g)
-    #         mean_loss = self.config.mean_reg * (torch.mean(a + b)) ** 2
-
-    #         loss = 0.5 * coupling_term - a_term - b_term + l2_reg + lip_reg + mean_loss
-
-    #         dual_optimizer.zero_grad()
-    #         loss.backward()
-    #         dual_optimizer.step()
-
-    #         pbar.set_postfix({"Corr Dual Loss": loss.item()})
+            # self.visualizer.display_marginal(
+            #     epoch, self, nu_model, self.nu_distribution, self.new_target, title="Nu Marginal Flow"
+            # )
+        x, y = self.current_coupling.coupling_sample(2000)
+        y_target = self.new_target.sample(2000)
+        x, y, y_target = x.to(self.device), y.to(self.device), y_target.to(self.device)
+        y1 = self.flow_matching.evolve(
+            y,
+            nu_model,
+            num_steps=50,
+            extend=False,
+            start_time=t,
+        )
+        self.visualizer._display_evolution(y.cpu(), y1.cpu(), y_target.cpu())
 
     def train_marginal_flows(self, retrain: bool = False, save: str = None):
         sigma = self.config.sigma
@@ -707,85 +477,32 @@ class Trainer:
         mu_model.eval()
         nu_model.eval()
 
-        # ------------------------------------------------------------------
-        # Persistent-correction path: when correction bridges are active use
-        # local time within the current correction sub-interval instead of
-        # global time.  The correction bridge was trained from nu_t_errors → nu_1
-        # (s∈[0,1]); local time s_local = (step % correction_each)/correction_each
-        # advances along that path across every iteration in the interval.
-        # ------------------------------------------------------------------
-        _corr_active = (
-            self.config.correction_each > 0
-            and self._corr_nu_bridge is not None
-        )
-        if _corr_active:
-            _s_val = (time_step % self.config.correction_each) / self.config.correction_each
-            _s_val = max(_s_val, 1e-3)  # stay inside training range [eps, 1-eps]
-            _s_local = torch.full((batch_size, 1), _s_val, device=device)
-            self._corr_nu_bridge.eval()
-            if self._corr_mu_bridge is not None:
-                self._corr_mu_bridge.eval()
-
         pbar = trange(self.config.dual_epochs, desc="Dual Training")
 
         for epoch in pbar:
             x, y = self.current_coupling.coupling_sample(self.config.batch_size)
             x, y = x.to(device), y.to(device)
 
-            if _corr_active:
-                self._corr_nu_errors = self._corr_nu_errors.to(device)
-                # ----------------------------------------------------------
-                # Correction path: marginal samples come from the interpolated
-                # error distribution at local correction time s_local.
-                # ----------------------------------------------------------
-                _n_nu = self._corr_nu_errors.shape[0]
-                _idx_nu = torch.randint(0, _n_nu, (batch_size,), device=device)
-                _nu_err = self._corr_nu_errors[_idx_nu].to(device)
-                _y1 = self.new_target.sample(batch_size).to(device)
-                y_nu = self.flow_matching.interpolate(_nu_err, _y1, _s_local, sigma=self.config.sigma)
-
-                if self._corr_mu_bridge is not None:
-                    _n_mu = self._corr_mu_errors.shape[0]
-                    _idx_mu = torch.randint(0, _n_mu, (batch_size,), device=device)
-                    _mu_err = self._corr_mu_errors[_idx_mu].to(device)
-                    _x1 = self.new_source.sample(batch_size).to(device)
-                    x_mu = self.flow_matching.interpolate(_mu_err, _x1, _s_local, sigma=self.config.sigma)
-                elif self.config.advance_with_flow:
-                    x_mu = self.mu_distribution.sample(batch_size).to(device)
-                else:
-                    x_mu = self.flow_matching.interpolate(
-                        self.initial_coupling.sample_init(batch_size).to(device),
-                        self.new_source.sample(batch_size).to(device),
-                        t_tensor, sigma=self.config.sigma,
-                    )
-
-                with torch.no_grad():
-                    _mu_bridge = self._corr_mu_bridge if self._corr_mu_bridge is not None else mu_model
-                    _mu_time   = _s_local if self._corr_mu_bridge is not None else t_tensor
-                    u_t = _mu_bridge(_mu_time, x_mu)
-                    v_t = self._corr_nu_bridge(_s_local, y_nu)
+            if self.config.advance_with_flow:
+                x_mu = self.mu_distribution.sample(batch_size).to(device)
+                y_nu = self.nu_distribution.sample(batch_size).to(device)
             else:
-                # ----------------------------------------------------------
-                # Original path: global time, linear-interpolation marginals.
-                # ----------------------------------------------------------
-                if self.config.advance_with_flow:
-                    x_mu = self.mu_distribution.sample(batch_size).to(device)
-                    y_nu = self.nu_distribution.sample(batch_size).to(device)
-                else:
-                    x_mu = self.flow_matching.interpolate(
-                        self.initial_coupling.sample_init(batch_size).to(device),
-                        self.new_source.sample(batch_size).to(device),
-                        t_tensor, sigma=self.config.sigma,
-                    )
-                    y_nu = self.flow_matching.interpolate(
-                        self.initial_coupling.sample_target(batch_size).to(device),
-                        self.new_target.sample(batch_size).to(device),
-                        t_tensor, sigma=self.config.sigma,
-                    )
+                x_mu = self.flow_matching.interpolate(
+                    self.initial_coupling.sample_init(batch_size).to(device),
+                    self.new_source.sample(batch_size).to(device),
+                    t_tensor, sigma=self.config.sigma,
+                )
+                # TODO: Change sampling from nu_t to sampling from nu_t_with_errors for correction training
+                # y_nu = self.flow_matching.interpolate(
+                #     self.initial_coupling.sample_target(batch_size).to(device),
+                #     self.new_target.sample(batch_size).to(device),
+                #     t_tensor, sigma=self.config.sigma,
+                # )
+                y_nu = self.current_coupling.sample_target(batch_size).to(device)
 
-                with torch.no_grad():
-                    u_t = mu_model(t_tensor, x_mu)
-                    v_t = nu_model(t_tensor, y_nu)
+            with torch.no_grad():
+                u_t = mu_model(t_tensor, x_mu)
+                v_t = nu_model(t_tensor, y_nu)
 
             x, y = x.requires_grad_(True), y.requires_grad_(True)
             x_mu, y_nu = x_mu.requires_grad_(True), y_nu.requires_grad_(True)
