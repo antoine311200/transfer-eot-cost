@@ -196,11 +196,11 @@ class Trainer:
         plt.show()
 
         # Divide by 10 learning rates for cfm
-        # for param_group in self.strategy.get_flow(0, self.device)[1].param_groups:
-        #     param_group["lr"] = param_group["lr"] / 3.0
-        # if isinstance(self.strategy, BidirectionalStrategy):
-        #     for param_group in self.strategy.get_flow(1, self.device)[1].param_groups:
-        #         param_group["lr"] = param_group["lr"] / 3.0
+        for param_group in self.strategy.get_flow(0, self.device)[1].param_groups:
+            param_group["lr"] = param_group["lr"] / 3.0
+        if isinstance(self.strategy, BidirectionalStrategy):
+            for param_group in self.strategy.get_flow(1, self.device)[1].param_groups:
+                param_group["lr"] = param_group["lr"] / 3.0
 
         print("Is bidirectional?", isinstance(self.strategy, BidirectionalStrategy))
         # General training loop
@@ -546,10 +546,10 @@ class Trainer:
         f_dual, g_dual, _ = self.strategy.get_duals(self.device)
         with torch.no_grad():
             a, b = f_dual(x0_test), g_dual(x1_test)
+            sm = torch.exp((a+b) / self.config.iterations)
             print(f"   f_dual(x0) mean: {a.mean().item():.4f}, std: {a.std().item():.4f}")
             print(f"   g_dual(x1) mean: {b.mean().item():.4f}, std: {b.std().item():.4f}")
-            print(f"   sum mean: {(a+b).mean().item():.4f}, std:{(a+b).std().item():.4f}, ex: {(a+b)[:5]}")
-
+            print(f"   sum mean: {sm.mean().item():.4f}, std:{sm.std().item():.4f}, ex: {sm[:5]}")
 
         for epoch in pbar:
             x, y = self.current_coupling.coupling_sample(self.config.batch_size)
@@ -640,9 +640,9 @@ class Trainer:
             mean_b = torch.mean(b)
             drift_penalty = self.config.mean_reg * (mean_a**2 + mean_b**2)
             mean_sum_constraint = self.config.mean_reg * (mean_a + mean_b)**2
-            # l2_reg_centered = self.config.l2_reg * (torch.mean((a - mean_a)**2) + torch.mean((b - mean_b)**2))
+            l2_reg_centered = self.config.mean_reg * (torch.mean((a - mean_a)**2) + torch.mean((b - mean_b)**2))
 
-            loss = 0.5 * coupling_term - a_term - b_term + l2_reg + lip_reg + drift_penalty + mean_sum_constraint
+            loss = 0.5 * coupling_term - a_term - b_term# + l2_reg + lip_reg + drift_penalty + mean_sum_constraint #+ l2_reg_centered
             # loss += 0.1 * mean_a_loss + 0.1 * mean_b_loss + 0.1 * mean_a_mu_loss + 0.1 * mean_b_nu_loss
 
             dual_optimizer.zero_grad()
@@ -656,9 +656,28 @@ class Trainer:
         f_dual, g_dual, _ = self.strategy.get_duals(self.device)
         with torch.no_grad():
             a, b = f_dual(x0_test), g_dual(x1_test)
+            sm = torch.exp((a+b) / self.config.iterations)
             print(f"   f_dual(x0) mean: {a.mean().item():.4f}, std: {a.std().item():.4f}")
             print(f"   g_dual(x1) mean: {b.mean().item():.4f}, std: {b.std().item():.4f}")
-            print(f"   sum mean: {(a+b).mean().item():.4f}, std:{(a+b).std().item():.4f}, ex: {(a+b)[:5]}")
+            print(f"   sum mean: {sm.mean().item():.4f}, std:{sm.std().item():.4f}, ex: {sm[:5]}")
+            x0_plot = x0_test.cpu().numpy()
+            x1_plot = x1_test.cpu().numpy()
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        cmap = 'viridis'
+        sc0 = axes[0].scatter(x0_plot[:, 0], x0_plot[:, 1], c=sm.detach().cpu().numpy(), cmap=cmap, edgecolors='k', alpha=0.7)
+        axes[0].set_title(r"Source $x_0$ colored by $\exp((a+b)/\epsilon)$")
+        axes[0].set_xlabel("Dim 1")
+        axes[0].set_ylabel("Dim 2")
+        sc1 = axes[1].scatter(x1_plot[:, 0], x1_plot[:, 1], c=sm.detach().cpu().numpy(), cmap=cmap, edgecolors='k', alpha=0.7)
+        axes[1].set_title(r"Target $x_1$ colored by $\exp((a+b)/\epsilon)$")
+        axes[1].set_xlabel("Dim 1")
+        axes[1].set_ylabel("Dim 2")
+        cbar = fig.colorbar(sc1, ax=axes.ravel().tolist())
+        cbar.set_label(r'$\exp(\frac{a+b}{iter})$ magnitude')
+
+        plt.tight_layout()
+        plt.show()
 
     def train_cfm_step(self, time_step: int):
         batch_size = self.config.batch_size
@@ -720,7 +739,7 @@ class Trainer:
         x1 = self.flow_matching.evolve(x0.to(self.config.device), model, num_steps=100, sigma=self.config.sigma, extend=True)[:, :self.strategy.config.dimension]
         transport_cost = self.visualizer.transport_cost(x0.cpu(), x1.cpu())
         print(torch.norm(transport_cost, dim=1).mean().item())
-        print(transport_cost[:10])
+        print(transport_cost[:3])
 
     def advance_step(self, time_step: int, backward: bool = False):
         # Use coupling's chunk size for disk-based coupling, otherwise use defaults
