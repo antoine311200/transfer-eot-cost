@@ -6,20 +6,30 @@ from torchdyn.core import NeuralODE
 
 from dualwcfm.distributions import Distribution, CouplingDistribution
 
+
 class torch_wrapper(torch.nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
+
     def forward(self, t, x, *args, **kwargs):
         t = t.to(x.device)
         if t.dim() < 2:
             t = t.repeat(x.shape[0])[:, None]
         return self.model(torch.cat([x, t], dim=1))
 
+
 class GenerativeModel(ABC):
     @abstractmethod
-    def get_trajectory(self, n_samples: int = 0, x0: Optional[torch.Tensor] = None, n_timesteps: int = 100, device: Optional[torch.device] = None) -> torch.Tensor:
+    def get_trajectory(
+        self,
+        n_samples: int = 0,
+        x0: Optional[torch.Tensor] = None,
+        n_timesteps: int = 100,
+        device: Optional[torch.device] = None,
+    ) -> torch.Tensor:
         pass
+
 
 class ConditionalFlowMatching(GenerativeModel):
     """Main class for conditional flow matching
@@ -32,7 +42,9 @@ class ConditionalFlowMatching(GenerativeModel):
         wrapper: Wrapper for the neural network to include time as input for Neural ODE support
     """
 
-    def __init__(self, source_dist: Distribution, target_dist: Distribution, network, sigma: float = 0.0, wrapper=None):
+    def __init__(
+        self, source_dist: Distribution, target_dist: Distribution, network, sigma: float = 0.0, wrapper=None
+    ):
         self.source_dist = source_dist
         self.target_dist = target_dist
         self.sigma = sigma
@@ -76,7 +88,7 @@ class ConditionalFlowMatching(GenerativeModel):
         x0: Optional[torch.Tensor] = None,
         n_timesteps: int = 100,
         device: Optional[torch.device] = None,
-        reverse: bool = False
+        reverse: bool = False,
     ) -> torch.Tensor:
         """Sample entire flow trajectories
 
@@ -111,51 +123,3 @@ class ConditionalFlowMatching(GenerativeModel):
         self.network.to(self.device)
         return trajectories
 
-
-class CouplingDistributionFromTrajectory(CouplingDistribution):
-    def __init__(self, base_dist: Distribution, coupling_model: GenerativeModel, **kwargs):
-        self.base_dist = base_dist
-        self.coupling_model = coupling_model
-        self.n_timesteps = kwargs.get("n_timesteps", 100)
-
-    def sample(self, n: int) -> torch.Tensor:
-        return self.coupling_model.get_trajectory(n_samples=n, n_timesteps=self.n_timesteps)[-1, :, :] # type: ignore
-
-    def sample_init(self, n: int) -> torch.Tensor:
-        x0 = self.base_dist.sample(n)
-        return x0
-
-    def sample_target(self, n: int) -> torch.Tensor:
-        return self.coupling_sample(n)[1]
-
-    def coupling_sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
-        x0 = self.base_dist.sample(n)
-        trajectories = self.coupling_model.get_trajectory(n_samples=n, n_timesteps=self.n_timesteps)
-        x1 = trajectories[-1, :, :] # type: ignore
-        return x0, x1
-
-class FixedCouplingDistribution(CouplingDistribution):
-    def __init__(self, base_dist: Distribution, coupling_model: GenerativeModel, **kwargs):
-        self.base_dist = base_dist
-        self.coupling_model = coupling_model
-        self.n_timesteps = kwargs.get("n_timesteps", 100)
-        self.total_samples = kwargs.get("total_samples", 10000)
-
-        self.init_samples = self.base_dist.sample(self.total_samples)
-        self.target_samples = self.coupling_model.get_trajectory(n_samples=self.total_samples, n_timesteps=self.n_timesteps)[-1, :, :]  # type: ignore
-        print(self.init_samples.shape, self.target_samples.shape)
-
-    def sample(self, n: int) -> torch.Tensor:
-        raise NotImplementedError("Use sample_target to sample from the target distribution.")
-
-    def sample_init(self, n: int) -> torch.Tensor:
-        indices = torch.randint(0, self.total_samples, (n,))
-        return self.init_samples[indices]
-
-    def sample_target(self, n: int) -> torch.Tensor:
-        indices = torch.randint(0, self.total_samples, (n,))
-        return self.target_samples[indices]
-
-    def coupling_sample(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
-        indices = torch.randint(0, self.total_samples, (n,))
-        return self.init_samples[indices], self.target_samples[indices]
