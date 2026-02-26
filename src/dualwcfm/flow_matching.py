@@ -45,7 +45,7 @@ class ConditionalFlowMatching:
         return (1 - t) * x0 + t * x1 + noise * torch.sqrt(t * (1 - t))
 
     def evolve(
-        self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_time: float = 0.0
+        self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_index: int = 0, start_time: float = 0.0, verbose: bool = False
     ) -> torch.Tensor:
         """Evolve the points x_init over time t using Euler integration.
 
@@ -60,9 +60,10 @@ class ConditionalFlowMatching:
             else:
                 xt = x_init.clone()
 
-            for i in range(num_steps):
+            for i in range(num_steps - start_index):
                 t = torch.full((xt.shape[0], 1), i * dt + start_time, device=device)
                 vt = model(t, xt)
                 xt = xt + vt * dt
-
+            if verbose:
+                print(i * dt + start_time)
         return xt
