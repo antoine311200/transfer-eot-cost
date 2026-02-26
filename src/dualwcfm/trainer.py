@@ -207,6 +207,12 @@ class Trainer:
         for iteration in range(self.config.iterations):
             print(f"Iteration {iteration+1}/{self.config.iterations}")
             # self.plot_distributions_after_advance(iteration)
+            # Error-accumulation correction: retrain bridges from nu_t_errors → nu_1,
+            # then use corrected bridges to refine dual networks f and g.
+            if self.config.correction_each > 0 and (iteration + 1) % self.config.correction_each == 0 and iteration > 0:
+                print(f"Running correction step at iteration {iteration + 1}")
+                self.correction_step(iteration)
+
             self.train_duals_step(iteration)
             self.train_cfm_step(iteration)
             self.advance_step(iteration, backward=isinstance(self.strategy, BidirectionalStrategy))
@@ -219,11 +225,6 @@ class Trainer:
                 f"W1_nu={distances['W1_nu']:.4f}  W2_nu={distances['W2_nu']:.4f}"
             )
 
-            # Error-accumulation correction: retrain bridges from nu_t_errors → nu_1,
-            # then use corrected bridges to refine dual networks f and g.
-            if self.config.correction_each > 0 and (iteration + 1) % self.config.correction_each == 0:
-                print(f"Running correction step at iteration {iteration + 1}")
-                self.correction_step(iteration)
 
     # ------------------------------------------------------------------
     # Error-accumulation correction
@@ -258,27 +259,45 @@ class Trainer:
         t = time_step / self.config.iterations
         t_tensor = torch.full((batch_size, 1), t, device=device)
 
-        nu_model, nu_optimizer = self.strategy.get_bridges(device)[1]
-        forward_model, _ = self.strategy.get_flow(0, device)
-        forward_model.eval()
+        # nu_model, nu_optimizer = self.strategy.get_bridges(device)[1]
+        # if bidirectional and even step take nu bridge for backward correction, else take forward nu bridge
+        if isinstance(self.strategy, BidirectionalStrategy):
+            if time_step % 2 == 0:
+                bridge_model, bridge_optimizer = self.strategy.get_bridges(device)[1]
+            else:
+                bridge_model, bridge_optimizer = self.strategy.get_bridges(device)[0]
+        else:
+            bridge_model, bridge_optimizer = self.strategy.get_bridges(device)[1]
+        model, _ = self.strategy.get_flow(time_step, device)
+        model.eval()
 
-        nu_model.train()
+        bridge_model.train()
 
-        # Print nu_model weights before correction for debugging
-        print("nu_model weights before correction:")
-        for name, param in nu_model.named_parameters():
+        # Print bridge_model weights before correction for debugging
+        print("bridge_model weights before correction:")
+        for name, param in bridge_model.named_parameters():
             print(f"  {name}: {param.mean().item()}")
             break
 
         pbar = trange(self.config.correction_epochs, desc="Correct Marginal Flow Matching")
         for epoch in pbar:
-            x0 = self.initial_coupling.sample_init(batch_size)
-            x1 = self.new_source.sample(batch_size)
+            if isinstance(self.strategy, BidirectionalStrategy):
+                if time_step % 2 == 0:
+                    # Even step: correct forward mu bridge from mu_t_with_errors → mu_1
+                    x0 = self.initial_coupling.sample_init(batch_size).to(device)
+                    x1 = self.new_source.sample(batch_size).to(device)
+                else:
+                    # Odd step: correct backward nu bridge from nu_t_with_errors → nu_1
+                    x0 = self.initial_coupling.sample_target(batch_size).to(device)
+                    x1 = self.new_target.sample(batch_size).to(device)
+            else:
+                x0 = self.initial_coupling.sample_init(batch_size)
+                x1 = self.new_source.sample(batch_size)
             x0, x1 = x0.to(device), x1.to(device)
 
             # Sample from mu_t, then use the forward model to get nu_t_with_errors samples for correction training.
             xt = self.flow_matching.interpolate(x0, x1, t_tensor, self.config.sigma)
-            yt = self.flow_matching.evolve(xt, forward_model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
+            yt = self.flow_matching.evolve(xt, model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
 
             y1 = self.new_target.sample(batch_size).to(device)
             y1 = y1.to(device)
@@ -289,29 +308,29 @@ class Trainer:
             zs = self.flow_matching.interpolate(yt, y1, s, self.config.sigma)
             s_dilate = t + s * (1 - t)
 
-            nu_optimizer.zero_grad()
+            bridge_optimizer.zero_grad()
 
             with self._autocast():
-                vt = nu_model(s_dilate, zs)
+                vt = bridge_model(s_dilate, zs)
                 # vector_field returns velocity in local-time units (dx/ds).
                 # Euler integration uses global-time dt, so scale by 1/(1-t) to get dx/d(tau).
                 vt_true = self.flow_matching.vector_field(zs, s, yt, y1, extend=False, noisy=True) / (1 - t)
-                loss_nu = loss_fn(vt, vt_true)
+                loss = loss_fn(vt, vt_true)
 
             if self._amp_enabled:
-                self._scaler.scale(loss_nu).backward()
-                self._scaler.step(nu_optimizer)
+                self._scaler.scale(loss).backward()
+                self._scaler.step(bridge_optimizer)
                 self._scaler.update()
             else:
-                loss_nu.backward()
-                nu_optimizer.step()
+                loss.backward()
+                bridge_optimizer.step()
 
-            pbar.set_postfix({"Correction Loss nu": loss_nu.item()})
+            pbar.set_postfix({"Correction Loss": loss.item()})
 
         self.last_correction_time = t
 
-        print("nu_model weights after correction:")
-        for name, param in nu_model.named_parameters():
+        print("bridge_model weights after correction:")
+        for name, param in bridge_model.named_parameters():
             print(f"  {name}: {param.mean().item()}")
             break
 
@@ -322,14 +341,14 @@ class Trainer:
 
         # Sample from mu_t, then use the forward model to get nu_t_with_errors samples for correction training.
         xt = self.flow_matching.interpolate(x0, x1, t_tensor, self.config.sigma)
-        y = self.flow_matching.evolve(xt, forward_model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
+        y = self.flow_matching.evolve(xt, model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
 
         y_target = self.new_target.sample(2000)
         y, y_target = y.to(self.device), y_target.to(self.device)
         _num_steps = 100
         y1 = self.flow_matching.evolve(
             y,
-            nu_model,
+            bridge_model,
             num_steps=_num_steps,
             extend=False,
             start_index=int(t * _num_steps),
@@ -338,6 +357,7 @@ class Trainer:
         )
         print(y1.mean(dim=0), y_target.mean(dim=0))
         self.visualizer._display_evolution(y.cpu(), y1.cpu(), y_target.cpu())
+        plt.show()
 
     def train_marginal_flows(self, retrain: bool = False, save: str = None):
         sigma = self.config.sigma
@@ -506,10 +526,30 @@ class Trainer:
         nu_model.eval()
         forward_model.eval()
 
-        pbar = trange(self.config.dual_epochs, desc="Dual Training")
+        # If not after a correction step, train for the full number of epochs.  If after a correction step, train 5 times more epochs to allow duals to fit the corrected coupling.
+        # if self.last_correction_time > 0 and time_step > self.last_correction_time * self.config.iterations:
+
+        # If the previous step is a correction step, train for more epochs to allow duals to fit the corrected coupling.
+        if self.config.correction_each > 0 and time_step % self.config.correction_each == 0 and self.last_correction_time > 0:
+            print("Increasing dual training epochs for correction fitting.")
+            num_epochs = 5 * self.config.dual_epochs
+        else:
+            num_epochs = self.config.dual_epochs
+
+        pbar = trange(num_epochs, desc="Dual Training")
 
         print("Last correction time:", self.last_correction_time)
         print("Current time:", time_step / self.config.iterations)
+
+        x0_test, x1_test = self.current_coupling.coupling_sample(batch_size)
+        x0_test, x1_test = x0_test.to(self.config.device), x1_test.to(self.config.device)
+        f_dual, g_dual, _ = self.strategy.get_duals(self.device)
+        with torch.no_grad():
+            a, b = f_dual(x0_test), g_dual(x1_test)
+            print(f"   f_dual(x0) mean: {a.mean().item():.4f}, std: {a.std().item():.4f}")
+            print(f"   g_dual(x1) mean: {b.mean().item():.4f}, std: {b.std().item():.4f}")
+            print(f"   sum mean: {(a+b).mean().item():.4f}, std:{(a+b).std().item():.4f}, ex: {(a+b)[:5]}")
+
 
         for epoch in pbar:
             x, y = self.current_coupling.coupling_sample(self.config.batch_size)
@@ -594,9 +634,15 @@ class Trainer:
             # mean_a_mu = torch.mean(a_mu)
             # loss_mean_a = torch.mean((a - mean_a) ** 2)  # Force a to have low variance around its mean
             # loss_mean_b = torch.mean((b + mean_a) ** 2)  # Force b to be close to -a to prevent trivial solutions
-            mean_loss = self.config.mean_reg * (torch.mean(a + b))**2
+            # mean_loss = self.config.mean_reg * (torch.mean(a + b))**2
 
-            loss = 0.5 * coupling_term - a_term - b_term + l2_reg + lip_reg + mean_loss
+            mean_a = torch.mean(a)
+            mean_b = torch.mean(b)
+            drift_penalty = self.config.mean_reg * (mean_a**2 + mean_b**2)
+            mean_sum_constraint = self.config.mean_reg * (mean_a + mean_b)**2
+            # l2_reg_centered = self.config.l2_reg * (torch.mean((a - mean_a)**2) + torch.mean((b - mean_b)**2))
+
+            loss = 0.5 * coupling_term - a_term - b_term + l2_reg + lip_reg + drift_penalty + mean_sum_constraint
             # loss += 0.1 * mean_a_loss + 0.1 * mean_b_loss + 0.1 * mean_a_mu_loss + 0.1 * mean_b_nu_loss
 
             dual_optimizer.zero_grad()
@@ -605,16 +651,37 @@ class Trainer:
 
             pbar.set_postfix({"Dual Loss": loss.item()})
 
+        x0_test, x1_test = self.current_coupling.coupling_sample(batch_size)
+        x0_test, x1_test = x0_test.to(self.config.device), x1_test.to(self.config.device)
+        f_dual, g_dual, _ = self.strategy.get_duals(self.device)
+        with torch.no_grad():
+            a, b = f_dual(x0_test), g_dual(x1_test)
+            print(f"   f_dual(x0) mean: {a.mean().item():.4f}, std: {a.std().item():.4f}")
+            print(f"   g_dual(x1) mean: {b.mean().item():.4f}, std: {b.std().item():.4f}")
+            print(f"   sum mean: {(a+b).mean().item():.4f}, std:{(a+b).std().item():.4f}, ex: {(a+b)[:5]}")
+
     def train_cfm_step(self, time_step: int):
         batch_size = self.config.batch_size
 
-        pbar = trange(self.config.cfm_epochs, desc="CFM Training")
+        if self.config.correction_each > 0 and time_step % self.config.correction_each == 0 and self.last_correction_time > 0:
+            print("Increasing dual training epochs for correction fitting.")
+            num_epochs = 5 * self.config.cfm_epochs
+        else:
+            num_epochs = self.config.cfm_epochs
+
+        pbar = trange(num_epochs, desc="CFM Training")
 
         model, _ = self.strategy.get_flow(time_step, self.config.device)
         previous_model = self.strategy.get_previous_flow(time_step, self.config.device)
         previous_model.load_state_dict(model.state_dict())
         previous_model.eval()
         model.train()
+
+        x0_test, x1_test = self.current_coupling.coupling_sample(batch_size)
+        x0_test, x1_test = x0_test.to(self.config.device), x1_test.to(self.config.device)
+        with torch.no_grad():
+            u = model(0.5 * torch.ones((batch_size, 1), device=self.config.device), (x0_test + x1_test) / 2, x0_test)
+            print(f"   Flow model output mean: {u.mean().item():.4f}, std: {u.std().item():.4f}")
 
         for epoch in pbar:
             x0, x1 = self.current_coupling.coupling_sample(batch_size)
@@ -635,6 +702,11 @@ class Trainer:
                 optimizer.step()
 
             pbar.set_postfix({"CFM Loss": loss.item()})
+
+        with torch.no_grad():
+            u = model(0.5 * torch.ones((batch_size, 1), device=self.config.device), (x0_test + x1_test) / 2, x0_test)
+            print(f"   Flow model output mean: {u.mean().item():.4f}, std: {u.std().item():.4f}")
+
 
         self.visualizer.display(time_step, self)
 
