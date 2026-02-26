@@ -109,7 +109,7 @@ class ImplicitCFMLoss(CFMLoss):
 
         with torch.no_grad():
             b_ta = previous_model(s, xs, x0)
-            u_t = flow_matching.vector_field(x0, None, x0, x1, noisy=True)
+            u_t = flow_matching.vector_field(xs, s, x0, x1, noisy=True)
 
         # Single forward pass -- use detach() for the target instead of running model twice
         u_s = model(s, xs, x0)

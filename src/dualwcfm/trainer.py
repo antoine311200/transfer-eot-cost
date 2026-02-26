@@ -206,7 +206,7 @@ class Trainer:
         # General training loop
         for iteration in range(self.config.iterations):
             print(f"Iteration {iteration+1}/{self.config.iterations}")
-            self.plot_distributions_after_advance(iteration)
+            # self.plot_distributions_after_advance(iteration)
             self.train_duals_step(iteration)
             self.train_cfm_step(iteration)
             self.advance_step(iteration, backward=isinstance(self.strategy, BidirectionalStrategy))
@@ -525,16 +525,23 @@ class Trainer:
                     t_tensor, sigma=self.config.sigma,
                 )
 
-                x0 = self.initial_coupling.sample_init(batch_size)
-                x1 = self.new_source.sample(batch_size)
-                x0, x1 = x0.to(device), x1.to(device)
-                t_correction_tensor = torch.full((batch_size, 1), self.last_correction_time, device=device)
-                xt_corr = self.flow_matching.interpolate(x0, x1, t_correction_tensor, self.config.sigma)
-                yt_corr = self.flow_matching.evolve(xt_corr, forward_model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
-                y1 = self.new_target.sample(batch_size).to(device)
+                if self.config.correction_each > 0:
+                    x0 = self.initial_coupling.sample_init(batch_size)
+                    x1 = self.new_source.sample(batch_size)
+                    x0, x1 = x0.to(device), x1.to(device)
+                    t_correction_tensor = torch.full((batch_size, 1), self.last_correction_time, device=device)
+                    xt_corr = self.flow_matching.interpolate(x0, x1, t_correction_tensor, self.config.sigma)
+                    yt_corr = self.flow_matching.evolve(xt_corr, forward_model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
+                    y1 = self.new_target.sample(batch_size).to(device)
 
-                t_dilate_tensor = (t_tensor - self.last_correction_time) / (1 - self.last_correction_time) if self.config.correction_each > 0 else t_tensor
-                y_nu = self.flow_matching.interpolate(yt_corr, y1, t_dilate_tensor, self.config.sigma)
+                    t_dilate_tensor = (t_tensor - self.last_correction_time) / (1 - self.last_correction_time) if self.config.correction_each > 0 else t_tensor
+                    y_nu = self.flow_matching.interpolate(yt_corr, y1, t_dilate_tensor, self.config.sigma)
+                else:
+                    y_nu = self.flow_matching.interpolate(
+                        self.initial_coupling.sample_target(batch_size).to(device),
+                        self.new_target.sample(batch_size).to(device),
+                        t_tensor, sigma=self.config.sigma,
+                    )
                 # TODO: Change sampling from nu_t to sampling from nu_t_with_errors for correction training
                 # y_nu = self.flow_matching.interpolate(
                 #     self.initial_coupling.sample_target(batch_size).to(device),
@@ -631,8 +638,13 @@ class Trainer:
 
         self.visualizer.display(time_step, self)
 
-        x0, _ = self.current_coupling.coupling_sample(10000)
+        x0, x0_back = self.current_coupling.coupling_sample(10000)
         x0 = x0.clone()
+        x0_back = x0_back.clone()
+        # If bidirectional and step is odd, swap x0 and x0_back to get correct source samples for transport cost calculation
+        if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
+            x0, x0_back = x0_back, x0
+        model.eval()
         x1 = self.flow_matching.evolve(x0.to(self.config.device), model, num_steps=100, sigma=self.config.sigma, extend=True)[:, :self.strategy.config.dimension]
         transport_cost = self.visualizer.transport_cost(x0.cpu(), x1.cpu())
         print(torch.norm(transport_cost, dim=1).mean().item())
