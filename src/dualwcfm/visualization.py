@@ -7,6 +7,7 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+from matplotlib.ticker import MultipleLocator
 
 from dualwcfm.config import VisualizeConfig
 from dualwcfm.utils import is_image_tensor
@@ -34,7 +35,10 @@ class Visualizer:
                 extend=True,
             )
             y = y[:, : self.dim]
-            self._display_evolution(x.cpu(), y.cpu(), y_target.cpu())
+            s = trainer.scale
+            self._display_evolution(
+                (x * s).cpu(), (y * s).cpu(), (y_target * s).cpu()
+            )
             plt.show()
 
     def transport_cost(self, x: torch.Tensor, y: torch.Tensor):
@@ -186,6 +190,8 @@ class Visualizer:
         ax.scatter(end_points[:, 0], end_points[:, 1], c="green", s=5, alpha=0.5, zorder=4, label="End")
         mid_points = (start_points + end_points) / 2
         ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=5, alpha=0.5, zorder=4, label="Mid")
+        ax.xaxis.set_major_locator(MultipleLocator(0.25))
+        ax.yaxis.set_major_locator(MultipleLocator(0.25))
         ax.grid(True, alpha=0.2)
 
         lc = LineCollection(segments, colors="black", alpha=0.75, linewidths=0.8, zorder=10)
@@ -221,7 +227,10 @@ class Visualizer:
 
         target_points = target_dist.sample(n_samples).to(trainer.device)
 
-        self._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
+        s = trainer.scale
+        self._display_evolution(
+            (start_points * s).cpu(), (end_points * s).cpu(), (target_points * s).cpu()
+        )
         plt.suptitle(f"{title} - Epoch {epoch}")
         plt.show()
 
@@ -251,8 +260,11 @@ class Visualizer:
             # Extract first half of output (evolved part)
             end_points = end_points[:, :self.dim]
 
+        s = trainer.scale
         direction = "Backward" if backward else "Forward"
-        self._display_evolution(x0.cpu(), end_points.cpu(), x1.cpu())
+        self._display_evolution(
+            (x0 * s).cpu(), (end_points * s).cpu(), (x1 * s).cpu()
+        )
         plt.suptitle(f"Pretrain {direction} Flow - Epoch {epoch}")
         plt.show()
 
@@ -302,6 +314,9 @@ class Visualizer3D(Visualizer):
         ax.scatter(
             mid_points[:, 0], mid_points[:, 1], mid_points[:, 2], c="blue", s=3, alpha=0.5, zorder=4, label="Mid"
         )
+        ax.xaxis.set_major_locator(MultipleLocator(0.25))
+        ax.yaxis.set_major_locator(MultipleLocator(0.25))
+        ax.zaxis.set_major_locator(MultipleLocator(0.25))
         ax.grid(True, alpha=0.2)
 
         L = 3  # length of the axis lines
@@ -350,7 +365,10 @@ class VisualizerImage(Visualizer):
             # For images, extract first half of channels (the evolved part)
             if is_image_tensor(y):
                 y = y[:, :self.img_shape[0], :, :]
-            self._display_evolution(x.cpu(), y.cpu(), y_target.cpu())
+            s = trainer.scale
+            self._display_evolution(
+                (x * s).cpu(), (y * s).cpu(), (y_target * s).cpu()
+            )
             plt.show()
 
     def _display_evolution(
@@ -416,7 +434,10 @@ class VisualizerImage(Visualizer):
 
         target_points = target_dist.sample(n_samples).to(trainer.device)
 
-        self._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
+        s = trainer.scale
+        self._display_evolution(
+            (start_points * s).cpu(), (end_points * s).cpu(), (target_points * s).cpu()
+        )
         plt.suptitle(f"{title} - Epoch {epoch}")
         plt.show()
 
@@ -440,8 +461,11 @@ class VisualizerImage(Visualizer):
             if is_image_tensor(end_points):
                 end_points = end_points[:, :self.img_shape[0], :, :]
 
+        s = trainer.scale
         direction = "Backward" if backward else "Forward"
-        self._display_evolution(x0.cpu(), end_points.cpu(), x1.cpu())
+        self._display_evolution(
+            (x0 * s).cpu(), (end_points * s).cpu(), (x1 * s).cpu()
+        )
         plt.suptitle(f"Pretrain {direction} Flow - Epoch {epoch}")
         plt.show()
 

@@ -19,6 +19,7 @@ from dualwcfm.distributions.coupling import (
     DiskCouplingDistribution,
 )
 from dualwcfm.distributions.distribution import Distribution, FixedSizeDistribution
+from dualwcfm.distributions.scaled import ScaledCouplingDistribution, ScaledDistribution
 
 
 class Trainer:
@@ -34,24 +35,54 @@ class Trainer:
         config: TrainingConfig,
         device: torch.device = torch.device("cpu"),
     ):
-        self.initial_coupling = initial_coupling
-        self.new_source = new_source
-        self.new_target = new_target
+
+        self.config = config
+        self.device = device
+
+        # Compute normalization scale: max absolute value across a probe batch
+        # of all four marginals so every sample lies in [-1, 1] after scaling.
+        if self.config.scale_factor > 0:
+            self.scale = self.config.scale_factor
+            print(f"Using provided normalization scale: {self.scale:.4f}")
+        else:
+            with torch.no_grad():
+                _probe_n = 1000
+                _x0, _x1 = initial_coupling.coupling_sample(_probe_n)
+                _s = new_source.sample(_probe_n)
+                _t = new_target.sample(_probe_n)
+                self.scale = max(
+                    _x0.abs().max().item(),
+                    _x1.abs().max().item(),
+                    _s.abs().max().item(),
+                    _t.abs().max().item(),
+                )
+
+            print(f"Normalization scale set to {self.scale:.4f} based on probe samples.")
+        self.initial_coupling = ScaledCouplingDistribution(initial_coupling, self.scale)
+        self.new_source = ScaledDistribution(new_source, self.scale)
+        self.new_target = ScaledDistribution(new_target, self.scale)
+        # self.initial_coupling = initial_coupling
+        # self.new_source = new_source
+        # self.new_target = new_target
+        print(f"Initial coupling: {self.initial_coupling}")
+        print(f"New source: {self.new_source}")
+        print(f"New target: {self.new_target}")
+
+        # Scale noises
+        self.config.sigma = config.sigma / self.scale
+        self.config.sigma2 = config.sigma2 / self.scale
 
         self.visualizer = visualizer
         self.strategy = strategy
         self.flow_matching = flow_matching
         self.loss_cfm = CFMLoss.get_loss(config.loss)
 
-        self.config = config
-        self.device = device
-
         # AMP scaler for mixed precision
         self._amp_enabled = config.use_amp and device.type == "cuda"
         self._scaler = torch.cuda.amp.GradScaler(enabled=self._amp_enabled)
 
         # Fixed sized mu_t, nu_t and coupling distributions
-        self._init_distributions(initial_coupling)
+        self._init_distributions(self.initial_coupling)
         self.last_correction_time = 0.0
 
     def _autocast(self):
@@ -84,6 +115,8 @@ class Trainer:
             self.current_coupling = FixedSizeCouplingDistribution(initial_coupling, size=self.config.dataset_size)
 
         # Copy to Initial distribution for later use (clone so training mutations don't affect the template)
+        print(self.mu_distribution)
+        print(hasattr(self.mu_distribution, 'clone'))
         self.initial_mu_distribution = self.mu_distribution.clone()
         self.initial_nu_distribution = self.nu_distribution.clone()
         self.initial_coupling_distribution = self.current_coupling
@@ -192,7 +225,11 @@ class Trainer:
             end_points = end_points[:, : self.strategy.config.dimension]
         target_points = self.nu_distribution.sample(n_vis)
         target_points = target_points.to(self.device)
-        self.visualizer._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
+        self.visualizer._display_evolution(
+            (start_points * self.scale).cpu(),
+            (end_points * self.scale).cpu(),
+            (target_points * self.scale).cpu(),
+        )
         plt.show()
 
         # Divide by 10 learning rates for cfm
@@ -360,7 +397,11 @@ class Trainer:
             verbose=True
         )
         # print(y1.mean(dim=0), y_target.mean(dim=0))
-        self.visualizer._display_evolution(y.cpu(), y1.cpu(), y_target.cpu())
+        self.visualizer._display_evolution(
+            (y * self.scale).cpu(),
+            (y1 * self.scale).cpu(),
+            (y_target * self.scale).cpu(),
+        )
         plt.show()
 
     def train_marginal_flows(self, retrain: bool = False, save: str = None):
@@ -462,7 +503,11 @@ class Trainer:
         )
         target_points = self.new_source.sample(samples)
         target_points = target_points.to(self.device)
-        self.visualizer._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
+        self.visualizer._display_evolution(
+            (start_points * self.scale).cpu(),
+            (end_points * self.scale).cpu(),
+            (target_points * self.scale).cpu(),
+        )
         plt.show()
 
         start_points = self.nu_distribution.sample(samples)
@@ -474,7 +519,11 @@ class Trainer:
         )
         target_points = self.new_target.sample(samples)
         target_points = target_points.to(self.device)
-        self.visualizer._display_evolution(start_points.cpu(), end_points.cpu(), target_points.cpu())
+        self.visualizer._display_evolution(
+            (start_points * self.scale).cpu(),
+            (end_points * self.scale).cpu(),
+            (target_points * self.scale).cpu(),
+        )
         plt.show()
 
     def pretrain(self, model, optimizer, backward: bool = False):
@@ -687,7 +736,7 @@ class Trainer:
             x0_plot = x0_test.cpu().numpy()
             x1_plot = x1_test.cpu().numpy()
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
         cmap = 'viridis'
         sc0 = axes[0].scatter(x0_plot[:, 0], x0_plot[:, 1], c=sm.detach().cpu().numpy(), cmap=cmap, edgecolors='k', alpha=0.7)
         axes[0].set_title(r"Source $x_0$ colored by $\exp((a+b)/\epsilon)$")
@@ -802,15 +851,15 @@ class Trainer:
                         self.initial_coupling.sample_init(actual_chunk_size).to(device),
                         self.new_source.sample(actual_chunk_size).to(device),
                         t_tensor,
-                        0.0,
-                        # sigma=self.config.sigma
+                        # 0.0,
+                        sigma=self.config.sigma
                     )
                     y_nu_next = self.flow_matching.interpolate(
                         self.initial_coupling.sample_target(actual_chunk_size).to(device),
                         self.new_target.sample(actual_chunk_size).to(device),
                         t_tensor,
-                        0.0,
-                        # sigma=self.config.sigma
+                        # 0.0,
+                        sigma=self.config.sigma
                     )
 
                 num_steps = self.config.advance_steps

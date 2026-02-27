@@ -109,25 +109,25 @@ class MLP(torch.nn.Module):
         layers.append(torch.nn.Linear(w, out_dim))
         self.net = torch.nn.Sequential(*layers)
 
-        # self._init_weights()
+        self._init_weights()
 
-    # def _init_weights(self):
-    #     for m in self.modules():
-    #         if isinstance(m, nn.Linear):
-    #             # LeCun Normal is preferred for SELU
-    #             # std = 1 / sqrt(fan_in)
-    #             nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='linear')
-    #             if m.bias is not None:
-    #                 nn.init.zeros_(m.bias)
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                # LeCun Normal is preferred for SELU
+                # std = 1 / sqrt(fan_in)
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='linear')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
         # Special handling for the final layer in Flow Matching:
         # Initializing the output layer with a smaller scale helps 
-        # # prevent wild trajectories early in training.
-        # final_layer = self.net[-1]
-        # if isinstance(final_layer, nn.Linear):
-        #     nn.init.xavier_uniform_(final_layer.weight, gain=0.01)
-        #     if final_layer.bias is not None:
-        #         nn.init.zeros_(final_layer.bias)
+        # prevent wild trajectories early in training.
+        final_layer = self.net[-1]
+        if isinstance(final_layer, nn.Linear):
+            nn.init.xavier_uniform_(final_layer.weight, gain=0.01)
+            if final_layer.bias is not None:
+                nn.init.zeros_(final_layer.bias)
 
     def forward(self, x):
         return self.net(x)

@@ -24,6 +24,7 @@ class TrainingConfig:
     l2_reg: float = 1e-3
     lip_reg: float = 1e-3
     mean_reg: float = 0.1
+    scale_factor: float = -1  # Overall scale factor for normalization (tune based on data scale)
 
     batch_size: int = 4096
 
