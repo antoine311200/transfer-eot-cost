@@ -588,8 +588,8 @@ class Trainer:
                     # "W1_nu": self._sliced_wasserstein(nu_t_flat, y_flat, n_proj=n_proj, p=1),
                     # "W2_nu": self._sliced_wasserstein(nu_t_flat, y_flat, n_proj=n_proj, p=2),
                     if epoch == 0:
-                        print("W1 (nu_err vs p1(pi)):", self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=100, p=1))
-                        print("W2 (nu_err vs p1(pi)):", self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=100, p=2))
+                        print("W1 (nu_err vs p1(pi)):", self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=1))
+                        print("W2 (nu_err vs p1(pi)):", self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=2))
 
                 else:# elif isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
                     y_nu = self.flow_matching.interpolate(
@@ -802,15 +802,15 @@ class Trainer:
                         self.initial_coupling.sample_init(actual_chunk_size).to(device),
                         self.new_source.sample(actual_chunk_size).to(device),
                         t_tensor,
-                        # 0.0,
-                        sigma=self.config.sigma
+                        0.0,
+                        # sigma=self.config.sigma
                     )
                     y_nu_next = self.flow_matching.interpolate(
                         self.initial_coupling.sample_target(actual_chunk_size).to(device),
                         self.new_target.sample(actual_chunk_size).to(device),
                         t_tensor,
-                        # 0.0,
-                        sigma=self.config.sigma
+                        0.0,
+                        # sigma=self.config.sigma
                     )
 
                 num_steps = self.config.advance_steps
@@ -822,16 +822,17 @@ class Trainer:
                     x_next = x_mu_next.clone()
                     xt = x_next.clone()
 
-                    for j in range(num_steps):
-                        t = torch.full((x_next.shape[0], 1), j * dt, device=device)
-                        if is_image_tensor(xt):
-                            x_concat = torch.cat([xt, x_next], dim=1)
-                            vt = flow_model_mu(t, x_concat)
-                            vt = vt[:, :xt.shape[1], :, :]
-                        else:
-                            vt = flow_model_mu(t, xt, x_next)[:, : self.strategy.config.dimension]
-                        xt = xt + vt * dt
-                    y_next = xt
+                    # for j in range(num_steps):
+                    #     t = torch.full((x_next.shape[0], 1), j * dt, device=device)
+                    #     if is_image_tensor(xt):
+                    #         x_concat = torch.cat([xt, x_next], dim=1)
+                    #         vt = flow_model_mu(t, x_concat)
+                    #         vt = vt[:, :xt.shape[1], :, :]
+                    #     else:
+                    #         vt = flow_model_mu(t, xt, x_next)[:, : self.strategy.config.dimension]
+                    #     xt = xt + vt * dt
+                    # y_next = xt
+                    y_next = self.flow_matching.evolve(x_next, flow_model_mu, num_steps=num_steps, extend=True)[:, :self.strategy.config.dimension]
                 else:
                     y_next = y_nu_next.clone()
                     yt = y_next.clone()
