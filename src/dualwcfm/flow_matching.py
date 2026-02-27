@@ -68,7 +68,42 @@ class ConditionalFlowMatching:
             for i in range(num_steps - start_index):
                 t = torch.full((xt.shape[0], 1), i * dt + start_time, device=device)
                 vt = model(t, xt)
-                xt = xt + vt * dt
+
+                if extend:
+                    xt = torch.cat([xt[:, :x_init.shape[1]] + vt[:, :x_init.shape[1]] * dt, xt[:, x_init.shape[1]:]], dim=1)
+                else:
+                    xt = xt + vt * dt
+                # Set xt to be xt+vt*dt on the first half of the dimensions, and keep the second half x_init for stability:
             if verbose:
                 print(i * dt + start_time)
         return xt
+
+    def evolve_trajectory(
+        self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_index: int = 0, start_time: float = 0.0
+    ) -> torch.Tensor:
+        """Like evolve, but returns all intermediate states as (num_steps+1, N, D).
+
+        When extend=True the full doubled tensor is stored; slice [:, :, :D] to get
+        only the evolved half.
+        """
+        device = x_init.device
+        dt = 1.0 / num_steps
+
+        with torch.no_grad():
+            if extend:
+                xt = torch.cat([x_init, x_init], dim=1)
+            else:
+                xt = x_init.clone()
+
+            states = [xt.clone()]
+            for i in range(num_steps - start_index):
+                t = torch.full((xt.shape[0], 1), i * dt + start_time, device=device)
+                vt = model(t, xt)
+
+                if extend:
+                    xt = torch.cat([xt[:, :x_init.shape[1]] + vt[:, :x_init.shape[1]] * dt, xt[:, x_init.shape[1]:]], dim=1)
+                else:
+                    xt = xt + vt * dt
+                states.append(xt.clone())
+
+        return torch.stack(states, dim=0)  # (num_steps+1, N, D)

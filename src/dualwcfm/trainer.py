@@ -64,9 +64,6 @@ class Trainer:
         # self.initial_coupling = initial_coupling
         # self.new_source = new_source
         # self.new_target = new_target
-        print(f"Initial coupling: {self.initial_coupling}")
-        print(f"New source: {self.new_source}")
-        print(f"New target: {self.new_target}")
 
         # Scale noises
         self.config.sigma = config.sigma / self.scale
@@ -115,8 +112,6 @@ class Trainer:
             self.current_coupling = FixedSizeCouplingDistribution(initial_coupling, size=self.config.dataset_size)
 
         # Copy to Initial distribution for later use (clone so training mutations don't affect the template)
-        print(self.mu_distribution)
-        print(hasattr(self.mu_distribution, 'clone'))
         self.initial_mu_distribution = self.mu_distribution.clone()
         self.initial_nu_distribution = self.nu_distribution.clone()
         self.initial_coupling_distribution = self.current_coupling
@@ -148,7 +143,6 @@ class Trainer:
         self.strategy.to_device(self.device)
 
         if not retrain:
-            print(self.initial_mu_distribution)
             self.mu_distribution = self.initial_mu_distribution.clone()
             self.nu_distribution = self.initial_nu_distribution.clone()
             self.current_coupling = self.initial_coupling_distribution.clone()
@@ -413,57 +407,77 @@ class Trainer:
         (mu_model, mu_optimizer), (nu_model, nu_optimizer) = self.strategy.get_bridges(device)
         initial_mu_model, initial_nu_model = self.strategy.get_initial_bridges(device)
 
+        previous_mu_model = copy.deepcopy(mu_model)
+        previous_nu_model = copy.deepcopy(nu_model)
+
         if retrain:
             mu_model.train()
             nu_model.train()
 
-            pbar = trange(self.config.marginal_epochs, desc="Marginal Flow Matching")
-            for epoch in pbar:
-                x0, y0 = self.initial_coupling.sample_init(batch_size), self.initial_coupling.sample_target(batch_size)
-                x1, y1 = self.new_source.sample(batch_size), self.new_target.sample(batch_size)
-                x0, x1, y0, y1 = x0.to(device), x1.to(device), y0.to(device), y1.to(device)
+            for i in range(self.config.num_rectified_flow + 1):
+                print(f"Marginal flow matching phase {i + 1}/{self.config.num_rectified_flow + 1}")
 
-                t = self.flow_matching.random_time(batch_size, self.config.device)
-                xt = self.flow_matching.interpolate(x0, x1, t, sigma)
-                yt = self.flow_matching.interpolate(y0, y1, t, sigma)
+                pbar = trange(self.config.marginal_epochs if i == 0 else self.config.marginal_epochs // 10, desc="Marginal Flow Matching")
+                for epoch in pbar:
+                    if i == 0:
+                        x0, y0 = self.initial_coupling.sample_init(batch_size), self.initial_coupling.sample_target(batch_size)
+                        x1, y1 = self.new_source.sample(batch_size), self.new_target.sample(batch_size)
+                    else:
+                        x0 = self.initial_coupling.sample_init(batch_size).to(device)
+                        y0 = self.initial_coupling.sample_target(batch_size).to(device)
+                        previous_mu_model.eval()
+                        previous_nu_model.eval()
+                        x1 = self.flow_matching.evolve(x0, previous_mu_model, num_steps=50, extend=False)
+                        y1 = self.flow_matching.evolve(y0, previous_nu_model, num_steps=50, extend=False)
+                        previous_mu_model.train()
+                        previous_nu_model.train()
 
-                mu_optimizer.zero_grad()
-                nu_optimizer.zero_grad()
+                    x0, x1, y0, y1 = x0.to(device), x1.to(device), y0.to(device), y1.to(device)
 
-                with self._autocast():
-                    ut = mu_model(t, xt)
-                    ut_true = self.flow_matching.vector_field(xt, t, x0, x1, extend=False, noisy=True)
-                    loss_mu = loss_fn(ut, ut_true)
+                    t = self.flow_matching.random_time(batch_size, self.config.device)
+                    xt = self.flow_matching.interpolate(x0, x1, t, sigma)
+                    yt = self.flow_matching.interpolate(y0, y1, t, sigma)
 
-                if self._amp_enabled:
-                    self._scaler.scale(loss_mu).backward()
-                    self._scaler.step(mu_optimizer)
-                else:
-                    loss_mu.backward()
-                    mu_optimizer.step()
+                    mu_optimizer.zero_grad()
+                    nu_optimizer.zero_grad()
 
-                with self._autocast():
-                    vt = nu_model(t, yt)
-                    vt_true = self.flow_matching.vector_field(yt, t, y0, y1, extend=False, noisy=True)
-                    loss_nu = loss_fn(vt, vt_true)
+                    with self._autocast():
+                        ut = mu_model(t, xt)
+                        ut_true = self.flow_matching.vector_field(xt, t, x0, x1, extend=False, noisy=True)
+                        loss_mu = loss_fn(ut, ut_true)
 
-                if self._amp_enabled:
-                    self._scaler.scale(loss_nu).backward()
-                    self._scaler.step(nu_optimizer)
-                    self._scaler.update()
-                else:
-                    loss_nu.backward()
-                    nu_optimizer.step()
+                    if self._amp_enabled:
+                        self._scaler.scale(loss_mu).backward()
+                        self._scaler.step(mu_optimizer)
+                    else:
+                        loss_mu.backward()
+                        mu_optimizer.step()
 
-                pbar.set_postfix({"Loss mu": loss_mu.item(), "Loss nu": loss_nu.item()})
+                    with self._autocast():
+                        vt = nu_model(t, yt)
+                        vt_true = self.flow_matching.vector_field(yt, t, y0, y1, extend=False, noisy=True)
+                        loss_nu = loss_fn(vt, vt_true)
 
-                # Visualize marginal flows during training
-                self.visualizer.display_marginal(
-                    epoch, self, mu_model, self.mu_distribution, self.new_source, title="Mu Marginal Flow"
-                )
-                self.visualizer.display_marginal(
-                    epoch, self, nu_model, self.nu_distribution, self.new_target, title="Nu Marginal Flow"
-                )
+                    if self._amp_enabled:
+                        self._scaler.scale(loss_nu).backward()
+                        self._scaler.step(nu_optimizer)
+                        self._scaler.update()
+                    else:
+                        loss_nu.backward()
+                        nu_optimizer.step()
+
+                    pbar.set_postfix({"Loss mu": loss_mu.item(), "Loss nu": loss_nu.item()})
+
+                    # Visualize marginal flows during training
+                    self.visualizer.display_marginal(
+                        epoch, self, mu_model, self.mu_distribution, self.new_source, title="Mu Marginal Flow", display=i!=0 and epoch == self.config.marginal_epochs//10 - 1
+                    )
+                    self.visualizer.display_marginal(
+                        epoch, self, nu_model, self.nu_distribution, self.new_target, title="Nu Marginal Flow", display=i!=0 and epoch == self.config.marginal_epochs//10 - 1
+                    )
+
+                previous_mu_model.load_state_dict(mu_model.state_dict())
+                previous_nu_model.load_state_dict(nu_model.state_dict())
 
             initial_mu_model.load_state_dict(mu_model.state_dict())
             initial_nu_model.load_state_dict(nu_model.state_dict())
@@ -599,9 +613,9 @@ class Trainer:
         with torch.no_grad():
             a, b = f_dual(x0_test), g_dual(x1_test)
             sm = torch.exp((a+b) / self.config.iterations)
-            print(f"   f_dual(x0) mean: {a.mean().item():.4f}, std: {a.std().item():.4f}")
-            print(f"   g_dual(x1) mean: {b.mean().item():.4f}, std: {b.std().item():.4f}")
-            print(f"   sum mean: {sm.mean().item():.4f}, std:{sm.std().item():.4f}")#, ex: {sm[:5]}")
+            print(f"   f_dual(x0) mean: {a.mean().item():.4e}, std: {a.std().item():.4e}")
+            print(f"   g_dual(x1) mean: {b.mean().item():.4e}, std: {b.std().item():.4e}")
+            print(f"   sum mean: {sm.mean().item():.4e}, std:{sm.std().item():.4e}")
 
         pbar = trange(num_epochs, desc="Dual Training")
         for epoch in pbar:
@@ -637,8 +651,7 @@ class Trainer:
                     # "W1_nu": self._sliced_wasserstein(nu_t_flat, y_flat, n_proj=n_proj, p=1),
                     # "W2_nu": self._sliced_wasserstein(nu_t_flat, y_flat, n_proj=n_proj, p=2),
                     if epoch == 0:
-                        print("W1 (nu_err vs p1(pi)):", self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=1))
-                        print("W2 (nu_err vs p1(pi)):", self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=2))
+                        print(f"W1 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=1):.4e} | W2 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=2):.4e}")
 
                 else:# elif isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
                     y_nu = self.flow_matching.interpolate(
@@ -814,7 +827,6 @@ class Trainer:
         x1 = self.flow_matching.evolve(x0.to(self.config.device), model, num_steps=100, sigma=self.config.sigma, extend=True)[:, :self.strategy.config.dimension]
         transport_cost = self.visualizer.transport_cost(x0.cpu(), x1.cpu())
         print(torch.norm(transport_cost, dim=1).mean().item())
-        print(transport_cost[:3])
 
     def advance_step(self, time_step: int, backward: bool = False):
         # Use coupling's chunk size for disk-based coupling, otherwise use defaults
@@ -905,8 +917,8 @@ class Trainer:
                     self.mu_distribution.dataset[i : i + actual_chunk_size] = x_mu_next.cpu()
                     self.nu_distribution.dataset[i : i + actual_chunk_size] = y_nu_next.cpu()
 
-        # Plot every 10 steps to avoid excessive plotting overhead
-        if (time_step + 1) % 1 == 0 or time_step == self.config.iterations - 1:
+        # Plot every N steps to avoid excessive plotting overhead
+        if (time_step + 1) % self.visualizer.config.show_each == 0 or time_step == self.config.iterations - 1:
             self.plot_distributions_after_advance(time_step)
 
     def plot_distributions_after_advance(self, time_step: int):

@@ -18,6 +18,7 @@ class TrainingConfig:
     iterations: int = 100
     loss: str = "implicit"
     advance_with_flow: bool = False
+    num_rectified_flow: int = 0
 
     sigma: float = 0.1
     sigma2: float = 0.1
@@ -82,3 +83,4 @@ class VisualizeConfig:
     # Visualization intervals for training phases (0 = disabled)
     show_each_marginal: int = 0  # During marginal flow training
     show_each_pretrain: int = 0  # During pretraining
+    trajectory_stride: int = 2  # Plot one trajectory point every N steps (0 = only start/end)

@@ -27,17 +27,21 @@ class Visualizer:
             x, _ = trainer.current_coupling.coupling_sample(self.config.n_trajectories)
             y_target = trainer.new_target.sample(self.config.n_trajectories)
             x, y_target = x.to(trainer.device), y_target.to(trainer.device)
-            y = trainer.flow_matching.evolve(
+            traj = trainer.flow_matching.evolve_trajectory(
                 x,
                 trainer.strategy.get_flow(epoch, trainer.device)[0],
                 num_steps=25,
                 sigma=trainer.config.sigma,
                 extend=True,
-            )
-            y = y[:, : self.dim]
+            )  # (26, N, 2D) — first D dims are the evolved part
+            traj = traj[:, :, : self.dim]  # (26, N, D)
+            y = traj[-1]
             s = trainer.scale
+            stride = self.config.trajectory_stride
+            traj_2d = (traj * s).cpu() if stride > 0 else None
             self._display_evolution(
-                (x * s).cpu(), (y * s).cpu(), (y_target * s).cpu()
+                (x * s).cpu(), (y * s).cpu(), (y_target * s).cpu(),
+                trajectories=traj_2d, trajectory_stride=stride,
             )
             plt.show()
 
@@ -174,21 +178,50 @@ class Visualizer:
         return results
 
     def _display_evolution(
-        self, start_points: torch.Tensor, end_points: torch.Tensor, target_points: Optional[torch.Tensor] = None
+        self,
+        start_points: torch.Tensor,
+        end_points: torch.Tensor,
+        target_points: Optional[torch.Tensor] = None,
+        trajectories: Optional[torch.Tensor] = None,
+        trajectory_stride: int = 1,
     ):
+        """Plot transport paths.
+
+        Args:
+            start_points: (N, 2) source cloud.
+            end_points: (N, 2) transported cloud.
+            target_points: Optional (N, 2) reference target cloud.
+            trajectories: Optional (T, N, 2) intermediate states from
+                ``evolve_trajectory``.  When provided the actual curved path is
+                drawn; otherwise a straight line is drawn from start to end.
+            trajectory_stride: Keep one point every this many steps along the
+                trajectory (stride=1 keeps all steps).
+        """
         fig, ax = plt.subplots(figsize=(8, 8))
 
+        n_traj = min(self.config.n_trajectories, start_points.shape[0])
         segments = []
-        for j in range(min(self.config.n_trajectories, start_points.shape[0])):
-            points = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
-            segs = np.stack([points[:-1], points[1:]], axis=1)
-            segments.extend(segs)
+
+        if trajectories is not None:
+            # Use actual curved path (subsample in time with stride)
+            traj_np = trajectories[::max(1, trajectory_stride), :n_traj, :2].numpy()  # (T', n_traj, 2)
+            for j in range(n_traj):
+                pts = traj_np[:, j, :]  # (T', 2)
+                segs = np.stack([pts[:-1], pts[1:]], axis=1)
+                segments.extend(segs)
+            mid_points = torch.from_numpy(traj_np[len(traj_np) // 2])
+        else:
+            # Fallback: straight line from start to end
+            for j in range(n_traj):
+                points = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
+                segs = np.stack([points[:-1], points[1:]], axis=1)
+                segments.extend(segs)
+            mid_points = (start_points + end_points) / 2
 
         if target_points is not None:
             ax.scatter(target_points[:, 0], target_points[:, 1], c="orange", s=5, alpha=0.5, zorder=4, label="Target")
-        ax.scatter(start_points[:, 0], start_points[:, 1], c="red", s=5, alpha=0.5, zorder=4, label="Start")
-        ax.scatter(end_points[:, 0], end_points[:, 1], c="green", s=5, alpha=0.5, zorder=4, label="End")
-        mid_points = (start_points + end_points) / 2
+        ax.scatter(start_points[:n_traj, 0], start_points[:n_traj, 1], c="red", s=5, alpha=0.5, zorder=4, label="Start")
+        ax.scatter(end_points[:n_traj, 0], end_points[:n_traj, 1], c="green", s=5, alpha=0.5, zorder=4, label="End")
         ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=5, alpha=0.5, zorder=4, label="Mid")
         ax.xaxis.set_major_locator(MultipleLocator(0.25))
         ax.yaxis.set_major_locator(MultipleLocator(0.25))
@@ -203,7 +236,7 @@ class Visualizer:
         ax.set_aspect("equal")
 
     def display_marginal(self, epoch: int, trainer: Trainer, model: nn.Module,
-                         source_dist, target_dist, title: str = "Marginal Flow"):
+                         source_dist, target_dist, title: str = "Marginal Flow", display: bool = False):
         """Display marginal flow evolution during training.
 
         Args:
@@ -214,22 +247,26 @@ class Visualizer:
             target_dist: Target distribution to compare against
             title: Title for the plot
         """
-        if self.config.show_each_marginal <= 0 or epoch % self.config.show_each_marginal != 0:
+        if self.config.show_each_marginal <= 0 or (epoch + 1) % self.config.show_each_marginal != 0 and not display:
             return
 
         n_samples = min(self.config.n_trajectories, 500)
         start_points = source_dist.sample(n_samples).to(trainer.device)
 
         with torch.no_grad():
-            end_points = trainer.flow_matching.evolve(
+            traj = trainer.flow_matching.evolve_trajectory(
                 start_points, model, num_steps=50, sigma=trainer.config.sigma, extend=False
-            )
+            )  # (51, N, D)
 
+        end_points = traj[-1]
         target_points = target_dist.sample(n_samples).to(trainer.device)
 
         s = trainer.scale
+        stride = self.config.trajectory_stride
+        traj_2d = (traj[:, :, :self.dim] * s).cpu() if stride > 0 else None
         self._display_evolution(
-            (start_points * s).cpu(), (end_points * s).cpu(), (target_points * s).cpu()
+            (start_points * s).cpu(), (end_points * s).cpu(), (target_points * s).cpu(),
+            trajectories=traj_2d, trajectory_stride=stride,
         )
         plt.suptitle(f"{title} - Epoch {epoch}")
         plt.show()
@@ -243,7 +280,7 @@ class Visualizer:
             model: The CFM model being pretrained
             backward: Whether this is backward flow (swaps source/target)
         """
-        if self.config.show_each_pretrain <= 0 or epoch % self.config.show_each_pretrain != 0:
+        if self.config.show_each_pretrain <= 0 or (epoch + 1) % self.config.show_each_pretrain != 0:
             return
 
         n_samples = min(self.config.n_trajectories, 500)
@@ -275,16 +312,30 @@ class Visualizer3D(Visualizer):
         self.dim = 3
 
     def _display_evolution(
-        self, start_points: torch.Tensor, end_points: torch.Tensor, target_points: Optional[torch.Tensor] = None
+        self,
+        start_points: torch.Tensor,
+        end_points: torch.Tensor,
+        target_points: Optional[torch.Tensor] = None,
+        trajectories: Optional[torch.Tensor] = None,
+        trajectory_stride: int = 1,
     ):
         from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
         fig = plt.figure(figsize=(8, 8))
         ax = fig.add_subplot(111, projection="3d")
 
-        for j in range(self.config.n_trajectories):
-            points = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
-            ax.plot(points[:, 0], points[:, 1], points[:, 2], c="black", alpha=0.25, linewidth=0.8, zorder=10)
+        n_traj = min(self.config.n_trajectories, start_points.shape[0])
+        if trajectories is not None:
+            traj_np = trajectories[::max(1, trajectory_stride), :n_traj, :3].numpy()  # (T', n_traj, 3)
+            for j in range(n_traj):
+                pts = traj_np[:, j, :]
+                ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], c="black", alpha=0.25, linewidth=0.8, zorder=10)
+            mid_points = torch.from_numpy(traj_np[len(traj_np) // 2])
+        else:
+            for j in range(n_traj):
+                points = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
+                ax.plot(points[:, 0], points[:, 1], points[:, 2], c="black", alpha=0.25, linewidth=0.8, zorder=10)
+            mid_points = (start_points + end_points) / 2
 
         if target_points is not None:
             ax.scatter(
@@ -310,7 +361,6 @@ class Visualizer3D(Visualizer):
         ax.scatter(
             end_points[:, 0], end_points[:, 1], end_points[:, 2], c="green", s=3, alpha=0.5, zorder=4, label="End"
         )
-        mid_points = (start_points + end_points) / 2
         ax.scatter(
             mid_points[:, 0], mid_points[:, 1], mid_points[:, 2], c="blue", s=3, alpha=0.5, zorder=4, label="Mid"
         )
