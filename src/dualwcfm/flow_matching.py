@@ -44,6 +44,11 @@ class ConditionalFlowMatching:
 
         return (1 - t) * x0 + t * x1 + noise * torch.sqrt(t * (1 - t))
 
+    def interpolate_from_correction(self, x1: torch.Tensor, y_corr: torch.Tensor, t_corr: torch.Tensor, t: torch.Tensor, model: nn.Module, sigma: float, config) -> torch.Tensor:
+        x_corr = self.evolve(y_corr, model, num_steps=25, sigma=sigma, extend=True)[..., :x1.shape[1]]
+        t_shrink = (t - t_corr) / (1 - t_corr) if config.correction_each > 0 else t
+        return self.interpolate(x_corr, x1, t_shrink, sigma)
+
     def evolve(
         self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_index: int = 0, start_time: float = 0.0, verbose: bool = False
     ) -> torch.Tensor:
