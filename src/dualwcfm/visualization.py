@@ -205,6 +205,9 @@ class Visualizer:
         if trajectories is not None:
             # Use actual curved path (subsample in time with stride)
             traj_np = trajectories[::max(1, trajectory_stride), :n_traj, :2].numpy()  # (T', n_traj, 2)
+            # Add last point if not included due to stride
+            if traj_np.shape[0] == 0 or not np.array_equal(traj_np[-1], end_points[:n_traj].cpu().numpy()):
+                traj_np = np.concatenate([traj_np, end_points[:n_traj].cpu().numpy()[None, :, :2]], axis=0)
             for j in range(n_traj):
                 pts = traj_np[:, j, :]  # (T', 2)
                 segs = np.stack([pts[:-1], pts[1:]], axis=1)

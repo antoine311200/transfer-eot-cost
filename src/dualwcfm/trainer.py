@@ -228,10 +228,10 @@ class Trainer:
 
         # Divide by 10 learning rates for cfm
         # for param_group in self.strategy.get_flow(0, self.device)[1].param_groups:
-        #     param_group["lr"] = param_group["lr"] / 3.0
+        #     param_group["lr"] = param_group["lr"] / 5.0
         # if isinstance(self.strategy, BidirectionalStrategy):
         #     for param_group in self.strategy.get_flow(1, self.device)[1].param_groups:
-        #         param_group["lr"] = param_group["lr"] / 3.0
+        #         param_group["lr"] = param_group["lr"] / 5.0
 
         print("Is bidirectional?", isinstance(self.strategy, BidirectionalStrategy))
         # General training loop
@@ -349,7 +349,7 @@ class Trainer:
                 vt = bridge_model(s_dilate, zs)
                 # vector_field returns velocity in local-time units (dx/ds).
                 # Euler integration uses global-time dt, so scale by 1/(1-t) to get dx/d(tau).
-                vt_true = self.flow_matching.vector_field(zs, s, yt, y1, extend=False, noisy=True) / (1 - t)
+                vt_true = self.flow_matching.vector_field(zs, s, yt, y1, extend=False, noisy=self.config.use_noisy_field) / (1 - t)
                 loss = loss_fn(vt, vt_true)
 
             if self._amp_enabled:
@@ -443,7 +443,7 @@ class Trainer:
 
                     with self._autocast():
                         ut = mu_model(t, xt)
-                        ut_true = self.flow_matching.vector_field(xt, t, x0, x1, extend=False, noisy=True)
+                        ut_true = self.flow_matching.vector_field(xt, t, x0, x1, extend=False, noisy=self.config.use_noisy_field)
                         loss_mu = loss_fn(ut, ut_true)
 
                     if self._amp_enabled:
@@ -455,7 +455,7 @@ class Trainer:
 
                     with self._autocast():
                         vt = nu_model(t, yt)
-                        vt_true = self.flow_matching.vector_field(yt, t, y0, y1, extend=False, noisy=True)
+                        vt_true = self.flow_matching.vector_field(yt, t, y0, y1, extend=False, noisy=self.config.use_noisy_field)
                         loss_nu = loss_fn(vt, vt_true)
 
                     if self._amp_enabled:
@@ -562,7 +562,7 @@ class Trainer:
 
             with self._autocast():
                 u_s = model(s, x_s, x0)
-                u_s_true = self.flow_matching.vector_field(x_s, s, x0, x1, noisy=True)
+                u_s_true = self.flow_matching.vector_field(x_s, s, x0, x1, noisy=self.config.use_noisy_field)
                 loss = loss_fn(u_s, u_s_true)
 
             if self._amp_enabled:
@@ -725,7 +725,7 @@ class Trainer:
             l2_reg_centered = self.config.mean_reg * (torch.mean((a - mean_a)**2) + torch.mean((b - mean_b)**2))
 
             loss = 0.5 * coupling_term - a_term - b_term
-            loss += drift_penalty + l2_reg_centered
+            loss += drift_penalty + l2_reg_centered + lip_reg + l2_reg
             # + l2_reg + lip_reg + drift_penalty + mean_sum_constraint #+ l2_reg_centered
             # loss += 0.1 * mean_a_loss + 0.1 * mean_b_loss + 0.1 * mean_a_mu_loss + 0.1 * mean_b_nu_loss
 

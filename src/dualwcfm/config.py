@@ -19,6 +19,7 @@ class TrainingConfig:
     loss: str = "implicit"
     advance_with_flow: bool = False
     num_rectified_flow: int = 0
+    use_noisy_field: bool = False
 
     sigma: float = 0.1
     sigma2: float = 0.1
