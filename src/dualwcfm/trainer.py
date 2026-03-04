@@ -314,53 +314,69 @@ class Trainer:
         #     print(f"  {name}: {param.mean().item()}")
         #     break
 
-        pbar = trange(self.config.correction_epochs, desc="Correct Marginal Flow Matching")
-        for epoch in pbar:
-            if isinstance(self.strategy, BidirectionalStrategy):
-                if time_step % 2 == 0:
-                    # Even step: correct forward mu bridge from mu_t_with_errors → mu_1
-                    x0 = self.initial_coupling.sample_init(batch_size).to(device)
-                    x1 = self.new_source.sample(batch_size).to(device)
+        previous_bridge_model = copy.deepcopy(bridge_model)
+
+        for i in range(self.config.num_rectified_flow + 1):
+            print(f"Correction flow matching phase {i + 1}/{self.config.num_rectified_flow + 1}")
+
+            pbar = trange(self.config.correction_epochs if i == 0 else self.config.correction_epochs // 10, desc="Correct Marginal Flow Matching")
+            for epoch in pbar:
+                if isinstance(self.strategy, BidirectionalStrategy):
+                    if time_step % 2 == 0:
+                        # Even step: correct forward mu bridge from mu_t_with_errors → mu_1
+                        x0 = self.initial_coupling.sample_init(batch_size).to(device)
+                        x1 = self.new_source.sample(batch_size).to(device)
+                    else:
+                        # Odd step: correct backward nu bridge from nu_t_with_errors → nu_1
+                        x0 = self.initial_coupling.sample_target(batch_size).to(device)
+                        x1 = self.new_target.sample(batch_size).to(device)
                 else:
-                    # Odd step: correct backward nu bridge from nu_t_with_errors → nu_1
-                    x0 = self.initial_coupling.sample_target(batch_size).to(device)
-                    x1 = self.new_target.sample(batch_size).to(device)
-            else:
-                x0 = self.initial_coupling.sample_init(batch_size)
-                x1 = self.new_source.sample(batch_size)
-            x0, x1 = x0.to(device), x1.to(device)
+                    x0 = self.initial_coupling.sample_init(batch_size)
+                    x1 = self.new_source.sample(batch_size)
+                x0, x1 = x0.to(device), x1.to(device)
 
-            # Sample from mu_t, then use the forward model to get nu_t_with_errors samples for correction training.
-            xt = self.flow_matching.interpolate(x0, x1, t_tensor, self.config.sigma)
-            yt = self.flow_matching.evolve(xt, model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
+                # Sample from mu_t, then use the forward model to get nu_t_with_errors samples for correction training.
+                xt = self.flow_matching.interpolate(x0, x1, t_tensor, self.config.sigma)
+                yt = self.flow_matching.evolve(xt, model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
 
-            y1 = self.new_target.sample(batch_size).to(device)
-            y1 = y1.to(device)
+                if i == 0:
+                    y1 = self.new_target.sample(batch_size).to(device)
+                else:
+                    # Rectified flow: use the previous bridge model to generate paired endpoints.
+                    _num_steps = 50
+                    previous_bridge_model.eval()
+                    y1 = self.flow_matching.evolve(
+                        yt, previous_bridge_model, num_steps=_num_steps, extend=False,
+                        start_index=int(t * _num_steps), start_time=t,
+                    )
+                    previous_bridge_model.train()
 
-            # Interpolate between nu_t_with_errors and nu_1 to get training samples for the correction bridge.
-            # s is local time in [0, 1]; s_dilate is global time in [t, 1].
-            s = self.flow_matching.random_time(batch_size, self.config.device)
-            zs = self.flow_matching.interpolate(yt, y1, s, self.config.sigma)
-            s_dilate = t + s * (1 - t)
+                # Interpolate between nu_t_with_errors and nu_1 to get training samples for the correction bridge.
+                # s is local time in [0, 1]; s_dilate is global time in [t, 1].
+                s = self.flow_matching.random_time(batch_size, self.config.device)
+                zs = self.flow_matching.interpolate(yt, y1, s, self.config.sigma)
+                s_dilate = t + s * (1 - t)
 
-            bridge_optimizer.zero_grad()
+                bridge_optimizer.zero_grad()
 
-            with self._autocast():
-                vt = bridge_model(s_dilate, zs)
-                # vector_field returns velocity in local-time units (dx/ds).
-                # Euler integration uses global-time dt, so scale by 1/(1-t) to get dx/d(tau).
-                vt_true = self.flow_matching.vector_field(zs, s, yt, y1, extend=False, noisy=self.config.use_noisy_field) / (1 - t)
-                loss = loss_fn(vt, vt_true)
+                with self._autocast():
+                    vt = bridge_model(s_dilate, zs)
+                    # vector_field returns velocity in local-time units (dx/ds).
+                    # Euler integration uses global-time dt, so scale by 1/(1-t) to get dx/d(tau).
+                    vt_true = self.flow_matching.vector_field(zs, s, yt, y1, extend=False, noisy=self.config.use_noisy_field) / (1 - t)
+                    loss = loss_fn(vt, vt_true)
 
-            if self._amp_enabled:
-                self._scaler.scale(loss).backward()
-                self._scaler.step(bridge_optimizer)
-                self._scaler.update()
-            else:
-                loss.backward()
-                bridge_optimizer.step()
+                if self._amp_enabled:
+                    self._scaler.scale(loss).backward()
+                    self._scaler.step(bridge_optimizer)
+                    self._scaler.update()
+                else:
+                    loss.backward()
+                    bridge_optimizer.step()
 
-            pbar.set_postfix({"Correction Loss": loss.item()})
+                pbar.set_postfix({"Correction Loss": loss.item()})
+
+            previous_bridge_model.load_state_dict(bridge_model.state_dict())
 
         self.last_correction_time = t
 
