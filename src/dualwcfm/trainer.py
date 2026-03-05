@@ -340,7 +340,10 @@ class Trainer:
                 yt = self.flow_matching.evolve(xt, model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
 
                 if i == 0:
-                    y1 = self.new_target.sample(batch_size).to(device)
+                    if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
+                        y1 = self.new_source.sample(batch_size).to(device)
+                    else:
+                        y1 = self.new_target.sample(batch_size).to(device)
                 else:
                     # Rectified flow: use the previous bridge model to generate paired endpoints.
                     _num_steps = 50
@@ -385,32 +388,39 @@ class Trainer:
         #     print(f"  {name}: {param.mean().item()}")
         #     break
 
-        # x, y = self.current_coupling.coupling_sample(2000)
-        x0 = self.initial_coupling.sample_init(batch_size)
-        x1 = self.new_source.sample(batch_size)
-        x0, x1 = x0.to(device), x1.to(device)
-
-        # Sample from mu_t, then use the forward model to get nu_t_with_errors samples for correction training.
-        xt = self.flow_matching.interpolate(x0, x1, t_tensor, self.config.sigma)
-        y = self.flow_matching.evolve(xt, model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
-
-        y_target = self.new_target.sample(2000)
-        y, y_target = y.to(self.device), y_target.to(self.device)
+        # Visualize: show how the corrected bridge transports the erroneous marginal to the true target.
+        # For even step / unidirectional: mu_t → forward_model → nu_t_err → nu_bridge → nu_1
+        # For odd step (bidirectional):   nu_t → backward_model → mu_t_err → mu_bridge → mu_1
+        _vis_n = batch_size
         _num_steps = 100
-        y1 = self.flow_matching.evolve(
-            y,
+        if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
+            # Odd step: backward direction
+            p0 = self.initial_coupling.sample_target(_vis_n).to(device)
+            p1_samples = self.new_target.sample(_vis_n).to(device)
+            pt = self.flow_matching.interpolate(p0, p1_samples, t_tensor, self.config.sigma)
+            start = self.flow_matching.evolve(pt, model, num_steps=50, extend=True)[:, :self.strategy.config.dimension]
+            ref_target = self.new_source.sample(_vis_n).to(device)
+        else:
+            # Even step / unidirectional: forward direction
+            p0 = self.initial_coupling.sample_init(_vis_n).to(device)
+            p1_samples = self.new_source.sample(_vis_n).to(device)
+            pt = self.flow_matching.interpolate(p0, p1_samples, t_tensor, self.config.sigma)
+            start = self.flow_matching.evolve(pt, model, num_steps=50, extend=True)[:, :self.strategy.config.dimension]
+            ref_target = self.new_target.sample(_vis_n).to(device)
+
+        end = self.flow_matching.evolve(
+            start,
             bridge_model,
             num_steps=_num_steps,
             extend=False,
             start_index=int(t * _num_steps),
             start_time=t,
-            verbose=True
+            verbose=True,
         )
-        # print(y1.mean(dim=0), y_target.mean(dim=0))
         self.visualizer._display_evolution(
-            (y * self.scale).cpu(),
-            (y1 * self.scale).cpu(),
-            (y_target * self.scale).cpu(),
+            (start * self.scale).cpu(),
+            (end * self.scale).cpu(),
+            (ref_target * self.scale).cpu(),
         )
         plt.show()
 
@@ -644,49 +654,24 @@ class Trainer:
             else:
                 # Check if the strategy is bidirectional
                 if (isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 0) or (not isinstance(self.strategy, BidirectionalStrategy)):
-                    x_mu = self.flow_matching.interpolate(
-                        self.initial_coupling.sample_init(batch_size).to(device),
-                        self.new_source.sample(batch_size).to(device),
-                        t_tensor, sigma=self.config.sigma,
-                    )
+                    x0 = self.initial_coupling.sample_init(batch_size).to(device)
+                    x1 = self.new_source.sample(batch_size).to(device)
+                    x_mu = self.flow_matching.interpolate(x0, x1, t_tensor, sigma=self.config.sigma)
 
-                    # Get xt_corr, evolve into yt_corr, then do the interpolation from yt_corr to y1 using the shrinked time
-                    x0 = self.initial_coupling.sample_init(batch_size)
-                    x1 = self.new_source.sample(batch_size)
-                    x0, x1 = x0.to(device), x1.to(device)
+                    # y_nu: forward model applied to mu_t — same distribution as the y-side of current_coupling
+                    y_nu = self.flow_matching.evolve(x_mu, forward_model, num_steps=50, extend=True)[:, :self.strategy.config.dimension]
 
-                    t_correction_tensor = torch.full((batch_size, 1), self.last_correction_time, device=device)
-                    xt_corr = self.flow_matching.interpolate(x0, x1, t_correction_tensor, self.config.sigma)
-                    yt_corr = self.flow_matching.evolve(xt_corr, forward_model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
-                    y1 = self.new_target.sample(batch_size).to(device)
-
-                    t_dilate_tensor = (t_tensor - self.last_correction_time) / (1 - self.last_correction_time) if self.config.correction_each > 0 else t_tensor
-                    y_nu = self.flow_matching.interpolate(yt_corr, y1, t_dilate_tensor, self.config.sigma)
-
-                    # Print Wasserstein distance using
-                    # "W1_nu": self._sliced_wasserstein(nu_t_flat, y_flat, n_proj=n_proj, p=1),
-                    # "W2_nu": self._sliced_wasserstein(nu_t_flat, y_flat, n_proj=n_proj, p=2),
                     if epoch == 0:
                         print(f"W1 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=1):.4e} | W2 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=2):.4e}")
 
                 else:# elif isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
-                    y_nu = self.flow_matching.interpolate(
-                        self.initial_coupling.sample_target(batch_size).to(device),
-                        self.new_target.sample(batch_size).to(device),
-                        t_tensor, sigma=self.config.sigma,
-                    )
+                    y0 = self.initial_coupling.sample_target(batch_size).to(device)
+                    y1 = self.new_target.sample(batch_size).to(device)
+                    y_nu = self.flow_matching.interpolate(y0, y1, t_tensor, sigma=self.config.sigma)
 
-                    y0 = self.initial_coupling.sample_target(batch_size)
-                    y1 = self.new_target.sample(batch_size)
-                    y0, y1 = y0.to(device), y1.to(device)
-
-                    t_correction_tensor = torch.full((batch_size, 1), self.last_correction_time, device=device)
-                    yt_corr = self.flow_matching.interpolate(y0, y1, t_correction_tensor, self.config.sigma)
-                    xt_corr = self.flow_matching.evolve(yt_corr, forward_model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
-                    x1 = self.new_source.sample(batch_size).to(device)
-
-                    t_dilate_tensor = (t_tensor - self.last_correction_time) / (1 - self.last_correction_time) if self.config.correction_each > 0 else t_tensor
-                    x_mu = self.flow_matching.interpolate(xt_corr, x1, t_dilate_tensor, self.config.sigma)
+                    # x_mu: backward model applied to nu_t — same distribution as the x-side of current_coupling (odd step)
+                    backward_model, _ = self.strategy.get_flow(1, self.device)
+                    x_mu = self.flow_matching.evolve(y_nu, backward_model, num_steps=50, extend=True)[:, :self.strategy.config.dimension]
 
             with torch.no_grad():
                 u_t = mu_model(t_tensor, x_mu)
