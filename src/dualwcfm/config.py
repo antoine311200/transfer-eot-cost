@@ -20,6 +20,7 @@ class TrainingConfig:
     advance_with_flow: bool = False
     num_rectified_flow: int = 0
     use_noisy_field: bool = False
+    correction_epoch_multiplier: int = 5
 
     sigma: float = 0.1
     sigma2: float = 0.1

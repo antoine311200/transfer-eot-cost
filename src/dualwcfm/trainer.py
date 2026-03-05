@@ -297,7 +297,7 @@ class Trainer:
         # nu_model, nu_optimizer = self.strategy.get_bridges(device)[1]
         # if bidirectional and even step take nu bridge for backward correction, else take forward nu bridge
         if isinstance(self.strategy, BidirectionalStrategy):
-            if time_step % 2 == 0:
+            if time_step % 2 == 1:
                 bridge_model, bridge_optimizer = self.strategy.get_bridges(device)[1]
             else:
                 bridge_model, bridge_optimizer = self.strategy.get_bridges(device)[0]
@@ -383,14 +383,6 @@ class Trainer:
 
         self.last_correction_time = t
 
-        # print("bridge_model weights after correction:")
-        # for name, param in bridge_model.named_parameters():
-        #     print(f"  {name}: {param.mean().item()}")
-        #     break
-
-        # Visualize: show how the corrected bridge transports the erroneous marginal to the true target.
-        # For even step / unidirectional: mu_t → forward_model → nu_t_err → nu_bridge → nu_1
-        # For odd step (bidirectional):   nu_t → backward_model → mu_t_err → mu_bridge → mu_1
         _vis_n = batch_size
         _num_steps = 100
         if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
@@ -630,8 +622,8 @@ class Trainer:
             num_epochs = self.config.dual_epochs
 
 
-        print("Last correction time:", self.last_correction_time)
-        print("Current time:", time_step / self.config.iterations)
+        # print("Last correction time:", self.last_correction_time)
+        # print("Current time:", time_step / self.config.iterations)
 
         x0_test, x1_test = self.current_coupling.coupling_sample(batch_size)
         x0_test, x1_test = x0_test.to(self.config.device), x1_test.to(self.config.device)
@@ -639,8 +631,8 @@ class Trainer:
         with torch.no_grad():
             a, b = f_dual(x0_test), g_dual(x1_test)
             sm = torch.exp((a+b) / self.config.iterations)
-            print(f"   f_dual(x0) mean: {a.mean().item():.4e}, std: {a.std().item():.4e}")
-            print(f"   g_dual(x1) mean: {b.mean().item():.4e}, std: {b.std().item():.4e}")
+            # print(f"   f_dual(x0) mean: {a.mean().item():.4e}, std: {a.std().item():.4e}")
+            # print(f"   g_dual(x1) mean: {b.mean().item():.4e}, std: {b.std().item():.4e}")
             print(f"   sum mean: {sm.mean().item():.4e}, std:{sm.std().item():.4e}")
 
         pbar = trange(num_epochs, desc="Dual Training")
@@ -652,26 +644,62 @@ class Trainer:
                 x_mu = self.mu_distribution.sample(batch_size).to(device)
                 y_nu = self.nu_distribution.sample(batch_size).to(device)
             else:
-                # Check if the strategy is bidirectional
-                if (isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 0) or (not isinstance(self.strategy, BidirectionalStrategy)):
-                    x0 = self.initial_coupling.sample_init(batch_size).to(device)
-                    x1 = self.new_source.sample(batch_size).to(device)
-                    x_mu = self.flow_matching.interpolate(x0, x1, t_tensor, sigma=self.config.sigma)
+                # x_mu, y_nu = self.current_coupling.coupling_sample(batch_size)
+                # x_mu, y_nu = x_mu.to(device), y_nu.to(device)
+                # x0 = self.initial_coupling.sample_init(batch_size).to(device)
+                # x1 = self.new_source.sample(batch_size).to(device)
+                # x_mu = self.flow_matching.interpolate(x0, x1, t_tensor, sigma=self.config.sigma)
 
-                    # y_nu: forward model applied to mu_t — same distribution as the y-side of current_coupling
-                    y_nu = self.flow_matching.evolve(x_mu, forward_model, num_steps=50, extend=True)[:, :self.strategy.config.dimension]
+                # y0 = self.initial_coupling.sample_target(batch_size).to(device)
+                # y1 = self.new_target.sample(batch_size).to(device)
+                # y_nu = self.flow_matching.interpolate(y0, y1, t_tensor, sigma=self.config.sigma)
 
-                    if epoch == 0:
-                        print(f"W1 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=1):.4e} | W2 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=2):.4e}")
+                if (isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1) or (not isinstance(self.strategy, BidirectionalStrategy)):
+                    x_mu = self.flow_matching.interpolate(
+                        self.initial_coupling.sample_init(batch_size).to(device),
+                        self.new_source.sample(batch_size).to(device),
+                        t_tensor, sigma=self.config.sigma,
+                    )
 
-                else:# elif isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
-                    y0 = self.initial_coupling.sample_target(batch_size).to(device)
+                    # Get xt_corr, evolve into yt_corr, then do the interpolation from yt_corr to y1 using the shrinked time
+                    x0 = self.initial_coupling.sample_init(batch_size)
+                    x1 = self.new_source.sample(batch_size)
+                    x0, x1 = x0.to(device), x1.to(device)
+
+                    t_correction_tensor = torch.full((batch_size, 1), self.last_correction_time, device=device)
+                    xt_corr = self.flow_matching.interpolate(x0, x1, t_correction_tensor, self.config.sigma)
+                    yt_corr = self.flow_matching.evolve(xt_corr, forward_model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
                     y1 = self.new_target.sample(batch_size).to(device)
-                    y_nu = self.flow_matching.interpolate(y0, y1, t_tensor, sigma=self.config.sigma)
 
-                    # x_mu: backward model applied to nu_t — same distribution as the x-side of current_coupling (odd step)
-                    backward_model, _ = self.strategy.get_flow(1, self.device)
-                    x_mu = self.flow_matching.evolve(y_nu, backward_model, num_steps=50, extend=True)[:, :self.strategy.config.dimension]
+                    t_dilate_tensor = (t_tensor - self.last_correction_time) / (1 - self.last_correction_time) if self.config.correction_each > 0 else t_tensor
+                    y_nu = self.flow_matching.interpolate(yt_corr, y1, t_dilate_tensor, self.config.sigma)
+
+                else:
+                    y_nu = self.flow_matching.interpolate(
+                        self.initial_coupling.sample_target(batch_size).to(device),
+                        self.new_target.sample(batch_size).to(device),
+                        t_tensor, sigma=self.config.sigma,
+                    )
+
+                    y0 = self.initial_coupling.sample_target(batch_size)
+                    y1 = self.new_target.sample(batch_size)
+                    y0, y1 = y0.to(device), y1.to(device)
+
+                    t_correction_tensor = torch.full((batch_size, 1), self.last_correction_time, device=device)
+                    yt_corr = self.flow_matching.interpolate(y0, y1, t_correction_tensor, self.config.sigma)
+                    xt_corr = self.flow_matching.evolve(yt_corr, forward_model, num_steps=50, extend=True)[:, : self.strategy.config.dimension]
+                    x1 = self.new_source.sample(batch_size).to(device)
+
+                    t_dilate_tensor = (t_tensor - self.last_correction_time) / (1 - self.last_correction_time) if self.config.correction_each > 0 else t_tensor
+                    x_mu = self.flow_matching.interpolate(xt_corr, x1, t_dilate_tensor, self.config.sigma)
+
+
+            if epoch == 0:
+                # print mean of x_mu vs x, y_nu vs y
+                print(isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 0, t_dilate_tensor.mean().item())
+                print(f"x ({x[:, 0].mean():.3e}, {x[:, 1].mean():.3e}), x_mu ({x_mu[:, 0].mean():.3e}, {x_mu[:, 1].mean():.3e})")
+                print(f"y ({y[:, 0].mean():.3e}, {y[:, 1].mean():.3e}), y_nu ({y_nu[:, 0].mean():.3e}, {y_nu[:, 1].mean():.3e})")
+                print(f"W1 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=1):.4e} | W2 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=2):.4e}")
 
             with torch.no_grad():
                 u_t = mu_model(t_tensor, x_mu)
@@ -744,8 +772,8 @@ class Trainer:
         with torch.no_grad():
             a, b = f_dual(x0_test), g_dual(x1_test)
             sm = torch.exp((a+b) / self.config.iterations)
-            print(f"   f_dual(x0) mean: {a.mean().item():.4f}, std: {a.std().item():.4f}")
-            print(f"   g_dual(x1) mean: {b.mean().item():.4f}, std: {b.std().item():.4f}")
+            # print(f"   f_dual(x0) mean: {a.mean().item():.4f}, std: {a.std().item():.4f}")
+            # print(f"   g_dual(x1) mean: {b.mean().item():.4f}, std: {b.std().item():.4f}")
             print(f"   sum mean: {sm.mean().item():.4f}, std:{sm.std().item():.4f}")#, ex: {sm[:5]}")
             x0_plot = x0_test.cpu().numpy()
             x1_plot = x1_test.cpu().numpy()
@@ -773,7 +801,7 @@ class Trainer:
 
         if self.config.correction_each > 0 and (time_step + 1) % self.config.correction_each == 0 and self.last_correction_time > 0:
             print("Increasing dual training epochs for correction fitting.")
-            num_epochs = 5 * self.config.cfm_epochs
+            num_epochs = self.config.correction_epoch_multiplier * self.config.cfm_epochs
         else:
             num_epochs = self.config.cfm_epochs
 
@@ -816,18 +844,29 @@ class Trainer:
             print(f"   Flow model output mean: {u.mean().item():.4f}, std: {u.std().item():.4f}")
 
 
-        self.visualizer.display(time_step, self)
+        # self.visualizer.display(time_step, self)
 
-        x0, x0_back = self.current_coupling.coupling_sample(10000)
-        x0 = x0.clone()
-        x0_back = x0_back.clone()
-        # If bidirectional and step is odd, swap x0 and x0_back to get correct source samples for transport cost calculation
+        # x0, x0_back = self.current_coupling.coupling_sample(10000)
+        # x0 = x0.clone()
+        # x0_back = x0_back.clone()
+        # # If bidirectional and step is odd, swap x0 and x0_back to get correct source samples for transport cost calculation
+        # if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
+        #     x0, x0_back = x0_back, x0
+        n_samples = 10000
+        t = torch.full((n_samples, 1), time_step / self.config.iterations, device=self.config.device)
         if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
-            x0, x0_back = x0_back, x0
+            x0 = self.initial_coupling.sample_target(n_samples).to(self.config.device)
+            x1 = self.new_target.sample(n_samples).to(self.config.device)
+            xt = self.flow_matching.interpolate(x0, x1, t, self.config.sigma)
+        else:
+            x0 = self.initial_coupling.sample_init(n_samples).to(self.config.device)
+            x1 = self.new_source.sample(n_samples).to(self.config.device)
+            xt = self.flow_matching.interpolate(x0, x1, t, self.config.sigma)
+
         model.eval()
-        x1 = self.flow_matching.evolve(x0.to(self.config.device), model, num_steps=100, sigma=self.config.sigma, extend=True)[:, :self.strategy.config.dimension]
-        transport_cost = self.visualizer.transport_cost(x0.cpu(), x1.cpu())
-        print(torch.norm(transport_cost, dim=1).mean().item())
+        yt = self.flow_matching.evolve(xt.to(self.config.device), model, num_steps=100, sigma=self.config.sigma, extend=True)[:, :self.strategy.config.dimension]
+        transport_cost = self.visualizer.transport_cost(xt.cpu(), yt.cpu())
+        print("Cost error", torch.norm(transport_cost, dim=1).mean().item())
 
     def advance_step(self, time_step: int, backward: bool = False):
         # Use coupling's chunk size for disk-based coupling, otherwise use defaults
@@ -864,52 +903,25 @@ class Trainer:
                         self.initial_coupling.sample_init(actual_chunk_size).to(device),
                         self.new_source.sample(actual_chunk_size).to(device),
                         t_tensor,
-                        # 0.0,
                         sigma=self.config.sigma
                     )
                     y_nu_next = self.flow_matching.interpolate(
                         self.initial_coupling.sample_target(actual_chunk_size).to(device),
                         self.new_target.sample(actual_chunk_size).to(device),
                         t_tensor,
-                        # 0.0,
                         sigma=self.config.sigma
                     )
 
                 num_steps = self.config.advance_steps
                 flow_model_mu, _ = self.strategy.get_flow(0, device=self.device)
                 flow_model_nu, _ = self.strategy.get_flow(1, device=self.device)
-                dt = 1.0 / num_steps
 
                 if not backward or time_step % 2 == 0:
                     x_next = x_mu_next.clone()
-                    xt = x_next.clone()
-
-                    # for j in range(num_steps):
-                    #     t = torch.full((x_next.shape[0], 1), j * dt, device=device)
-                    #     if is_image_tensor(xt):
-                    #         x_concat = torch.cat([xt, x_next], dim=1)
-                    #         vt = flow_model_mu(t, x_concat)
-                    #         vt = vt[:, :xt.shape[1], :, :]
-                    #     else:
-                    #         vt = flow_model_mu(t, xt, x_next)[:, : self.strategy.config.dimension]
-                    #     xt = xt + vt * dt
-                    # y_next = xt
                     y_next = self.flow_matching.evolve(x_next, flow_model_mu, num_steps=num_steps, extend=True)[:, :self.strategy.config.dimension]
                 else:
                     y_next = y_nu_next.clone()
-                    yt = y_next.clone()
-
-                    for j in range(num_steps):
-                        t = torch.full((y_next.shape[0], 1), j * dt, device=device)
-                        if is_image_tensor(yt):
-                            y_concat = torch.cat([yt, y_next], dim=1)
-                            vt = flow_model_nu(t, y_concat)
-                            vt = vt[:, :yt.shape[1], :, :]
-                        else:
-                            # vt = flow_model_nu(torch.cat([yt, y_next, t], dim=1))[:, : self.strategy.config.dimension]
-                            vt = flow_model_nu(t, yt, y_next)[:, : self.strategy.config.dimension]
-                        yt = yt + vt * dt
-                    x_next = yt
+                    x_next = self.flow_matching.evolve(y_next, flow_model_nu, num_steps=num_steps, extend=True)[:, :self.strategy.config.dimension]
 
                 # Update coupling dataset
                 self.current_coupling.update_chunk(i, x_next.detach().cpu(), y_next.detach().cpu())

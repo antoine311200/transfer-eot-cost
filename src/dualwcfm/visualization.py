@@ -221,17 +221,18 @@ class Visualizer:
                 segments.extend(segs)
             mid_points = (start_points + end_points) / 2
 
+        lc = LineCollection(segments, colors="black", alpha=0.2, linewidths=0.8)
+        ax.add_collection(lc)
+
         if target_points is not None:
-            ax.scatter(target_points[:, 0], target_points[:, 1], c="orange", s=5, alpha=0.5, zorder=4, label="Target")
-        ax.scatter(start_points[:n_traj, 0], start_points[:n_traj, 1], c="red", s=5, alpha=0.5, zorder=4, label="Start")
-        ax.scatter(end_points[:n_traj, 0], end_points[:n_traj, 1], c="green", s=5, alpha=0.5, zorder=4, label="End")
-        ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=5, alpha=0.5, zorder=4, label="Mid")
+            ax.scatter(target_points[:, 0], target_points[:, 1], c="orange", s=20, alpha=0.5, zorder=4, label="Target", edgecolors='k')
+        ax.scatter(start_points[:n_traj, 0], start_points[:n_traj, 1], c="red", s=20, alpha=0.5, zorder=4, label="Start", edgecolors='k')
+        ax.scatter(end_points[:n_traj, 0], end_points[:n_traj, 1], c="green", s=20, alpha=0.5, zorder=4, label="End", edgecolors='k')
+        ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
         ax.xaxis.set_major_locator(MultipleLocator(0.25))
         ax.yaxis.set_major_locator(MultipleLocator(0.25))
         ax.grid(True, alpha=0.2)
 
-        lc = LineCollection(segments, colors="black", alpha=0.75, linewidths=0.8, zorder=10)
-        ax.add_collection(lc)
 
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
