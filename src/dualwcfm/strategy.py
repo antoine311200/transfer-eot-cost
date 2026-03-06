@@ -32,6 +32,7 @@ class Strategy:
         self.nu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
         self.f_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, time_varying=False))
         self.g_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, time_varying=False))
+        self.h_dual = wrapper(MLP(dim=2*dim, out_dim=1, w=hidden_size, time_varying=False))
         self.forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
         self.previous_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
 
@@ -51,7 +52,7 @@ class Strategy:
     def _model_attrs(self):
         """Return names of all model attributes."""
         return [
-            "mu_bridge", "nu_bridge", "f_dual", "g_dual",
+            "mu_bridge", "nu_bridge", "f_dual", "g_dual", "h_dual",
             "forward_model", "previous_forward_model",
             "initial_mu_bridge", "initial_nu_bridge", "initial_forward_model",
         ]
@@ -67,11 +68,16 @@ class Strategy:
         self.mu_optimizer = optim.Adam(self.mu_bridge.parameters(), lr=config.mu_learning_rate)
         self.nu_optimizer = optim.Adam(self.nu_bridge.parameters(), lr=config.nu_learning_rate)
         self.dual_optimizer = optim.Adam(dual_params, lr=config.dual_learning_rate)
+        self.dual_mismatch_optimizer = optim.Adam(self.h_dual.parameters(), lr=config.dual_learning_rate)
         self.forward_optimizer = optim.Adam(self.forward_model.parameters(), lr=config.flow_learning_rate)
 
     def get_duals(self, device):
         self.to_device(device)
         return self.f_dual, self.g_dual, self.dual_optimizer
+
+    def get_dual_mismatch(self, device):
+        self.to_device(device)
+        return self.h_dual, self.dual_mismatch_optimizer
 
     def get_bridges(self, device):
         self.to_device(device)

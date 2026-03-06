@@ -226,12 +226,14 @@ class Visualizer:
 
         if target_points is not None:
             ax.scatter(target_points[:, 0], target_points[:, 1], c="orange", s=20, alpha=0.5, zorder=4, label="Target", edgecolors='k')
+        ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
         ax.scatter(start_points[:n_traj, 0], start_points[:n_traj, 1], c="red", s=20, alpha=0.5, zorder=4, label="Start", edgecolors='k')
         ax.scatter(end_points[:n_traj, 0], end_points[:n_traj, 1], c="green", s=20, alpha=0.5, zorder=4, label="End", edgecolors='k')
-        ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
         ax.xaxis.set_major_locator(MultipleLocator(0.25))
         ax.yaxis.set_major_locator(MultipleLocator(0.25))
         ax.grid(True, alpha=0.2)
+        # Reduce axis text size for better visibility
+        ax.tick_params(axis='both', which='major', labelsize=5)
 
 
         ax.set_xlabel("X")

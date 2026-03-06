@@ -4,6 +4,7 @@ import os
 import torch
 import torch.nn as nn
 
+import numpy as np
 from tqdm import trange
 import matplotlib.pyplot as plt
 
@@ -236,14 +237,11 @@ class Trainer:
         print("Is bidirectional?", isinstance(self.strategy, BidirectionalStrategy))
         # General training loop
         for iteration in range(self.config.iterations):
-            print(f"Iteration {iteration+1}/{self.config.iterations}")
-            # self.plot_distributions_after_advance(iteration)
-            # Error-accumulation correction: retrain bridges from nu_t_errors → nu_1,
-            # then use corrected bridges to refine dual networks f and g.
+            print(f"################# Iteration {iteration+1}/{self.config.iterations} #################")
+
             if self.config.correction_each > 0 and (iteration + 1) % self.config.correction_each == 0 and iteration > 0:
                 print(f"\n################# Correction step at iteration {iteration + 1} #################")
                 self.correction_step(iteration)
-            # Add a correction after the previous one if bidirectional to correct both forward and backward models
             if isinstance(self.strategy, BidirectionalStrategy) and self.config.correction_each > 0 and iteration % self.config.correction_each == 0 and iteration > 0:
                 print(f"\n################# Second correction step for bidirectional strategy at iteration {iteration + 1} #################")
                 self.correction_step(iteration)
@@ -266,27 +264,6 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def correction_step(self, time_step: int):
-        """Correct for error accumulated in the current coupling.
-
-        Due to first-order exponential-weight approximations the forward model
-        maps mu_t → nu_t_with_errors rather than the ideal nu_t.  This method:
-
-        1. Generates a buffer of *nu_t_with_errors* samples by evolving mu_t
-           through the current forward model.
-        2. Creates *separate* correction bridges (deep-copies of the originals)
-           and retrains them from nu_t_with_errors → nu_1 (and mu_t_with_errors
-           → mu_1 if bidirectional).  The original bridges used by advance_step
-           are **never modified**.
-        3. Stores the correction bridges and the error buffers as instance
-           variables so that every subsequent call to :meth:`train_duals_step`
-           uses local correction time until the next correction point replaces
-           them.
-        4. Runs :meth:`_correction_dual_step` for an immediate boundary update
-           of f and g at correction time s = eps.
-
-        The correction is triggered from the main loop every
-        ``config.correction_each`` iterations.
-        """
         batch_size = self.config.batch_size
         device = self.config.device
         loss_fn = nn.MSELoss()
@@ -294,10 +271,8 @@ class Trainer:
         t = time_step / self.config.iterations
         t_tensor = torch.full((batch_size, 1), t, device=device)
 
-        # nu_model, nu_optimizer = self.strategy.get_bridges(device)[1]
-        # if bidirectional and even step take nu bridge for backward correction, else take forward nu bridge
         if isinstance(self.strategy, BidirectionalStrategy):
-            if time_step % 2 == 1:
+            if time_step % 2 == self.config.correction_each % 2:
                 bridge_model, bridge_optimizer = self.strategy.get_bridges(device)[1]
             else:
                 bridge_model, bridge_optimizer = self.strategy.get_bridges(device)[0]
@@ -307,13 +282,6 @@ class Trainer:
         model.eval()
 
         bridge_model.train()
-
-        # Print bridge_model weights before correction for debugging
-        # print("bridge_model weights before correction:")
-        # for name, param in bridge_model.named_parameters():
-        #     print(f"  {name}: {param.mean().item()}")
-        #     break
-
         previous_bridge_model = copy.deepcopy(bridge_model)
 
         for i in range(self.config.num_rectified_flow + 1):
@@ -322,7 +290,7 @@ class Trainer:
             pbar = trange(self.config.correction_epochs if i == 0 else self.config.correction_epochs // 10, desc="Correct Marginal Flow Matching")
             for epoch in pbar:
                 if isinstance(self.strategy, BidirectionalStrategy):
-                    if time_step % 2 == 0:
+                    if time_step % 2 == self.config.correction_each % 2:
                         # Even step: correct forward mu bridge from mu_t_with_errors → mu_1
                         x0 = self.initial_coupling.sample_init(batch_size).to(device)
                         x1 = self.new_source.sample(batch_size).to(device)
@@ -385,7 +353,7 @@ class Trainer:
 
         _vis_n = batch_size
         _num_steps = 100
-        if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
+        if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 != self.config.correction_each % 2:
             # Odd step: backward direction
             p0 = self.initial_coupling.sample_target(_vis_n).to(device)
             p1_samples = self.new_target.sample(_vis_n).to(device)
@@ -604,6 +572,7 @@ class Trainer:
 
         (mu_model, _), (nu_model, _) = self.strategy.get_bridges(self.device)
         f_dual, g_dual, dual_optimizer = self.strategy.get_duals(self.device)
+        h_dual, h_optimizer = self.strategy.get_dual_mismatch(self.device)
         forward_model, _ = self.strategy.get_flow(0, self.device)
         f_dual.train()
         g_dual.train()
@@ -627,13 +596,12 @@ class Trainer:
 
         x0_test, x1_test = self.current_coupling.coupling_sample(batch_size)
         x0_test, x1_test = x0_test.to(self.config.device), x1_test.to(self.config.device)
-        f_dual, g_dual, _ = self.strategy.get_duals(self.device)
         with torch.no_grad():
             a, b = f_dual(x0_test), g_dual(x1_test)
-            sm = torch.exp((a+b) / self.config.iterations)
-            # print(f"   f_dual(x0) mean: {a.mean().item():.4e}, std: {a.std().item():.4e}")
-            # print(f"   g_dual(x1) mean: {b.mean().item():.4e}, std: {b.std().item():.4e}")
-            print(f"   sum mean: {sm.mean().item():.4e}, std:{sm.std().item():.4e}")
+            d = h_dual(torch.cat([x0_test, x1_test], dim=1)) if self.config.dual_mismatch_reg > 0 else torch.zeros_like(a)
+            sm = ((a+b+d) / self.config.iterations)
+            print(f"((a+b+d)/iter) => mean: {sm.mean().item():.4f}, std:{sm.std().item():.4f}")
+            print(f"mismatch => mean: {d.mean().item():.4f}, std: {d.std().item():.4f}") if self.config.dual_mismatch_reg > 0 else None
 
         pbar = trange(num_epochs, desc="Dual Training")
         for epoch in pbar:
@@ -643,6 +611,7 @@ class Trainer:
             if self.config.advance_with_flow:
                 x_mu = self.mu_distribution.sample(batch_size).to(device)
                 y_nu = self.nu_distribution.sample(batch_size).to(device)
+                t_dilate_tensor = t_tensor
             else:
                 # x_mu, y_nu = self.current_coupling.coupling_sample(batch_size)
                 # x_mu, y_nu = x_mu.to(device), y_nu.to(device)
@@ -654,7 +623,7 @@ class Trainer:
                 # y1 = self.new_target.sample(batch_size).to(device)
                 # y_nu = self.flow_matching.interpolate(y0, y1, t_tensor, sigma=self.config.sigma)
 
-                if (isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1) or (not isinstance(self.strategy, BidirectionalStrategy)):
+                if (isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == self.config.correction_each % 2) or (not isinstance(self.strategy, BidirectionalStrategy)):
                     x_mu = self.flow_matching.interpolate(
                         self.initial_coupling.sample_init(batch_size).to(device),
                         self.new_source.sample(batch_size).to(device),
@@ -696,7 +665,7 @@ class Trainer:
 
             if epoch == 0:
                 # print mean of x_mu vs x, y_nu vs y
-                print(isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 0, t_dilate_tensor.mean().item())
+                # print(isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 0, t_dilate_tensor.mean().item())
                 print(f"x ({x[:, 0].mean():.3e}, {x[:, 1].mean():.3e}), x_mu ({x_mu[:, 0].mean():.3e}, {x_mu[:, 1].mean():.3e})")
                 print(f"y ({y[:, 0].mean():.3e}, {y[:, 1].mean():.3e}), y_nu ({y_nu[:, 0].mean():.3e}, {y_nu[:, 1].mean():.3e})")
                 print(f"W1 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=1):.4e} | W2 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=2):.4e}")
@@ -712,8 +681,12 @@ class Trainer:
             b, b_nu = g_dual(y), g_dual(y_nu)
 
             # Coupling term
-            # coupling_term = torch.mean((a - a.mean() + b - b.mean()) ** 2)
-            coupling_term = torch.mean((a + b) ** 2)
+
+            if self.config.dual_mismatch_reg > 0:
+                d = h_dual(torch.cat([x, y], dim=1))
+                coupling_term = torch.mean((a + b + d) ** 2) + self.config.dual_mismatch_reg * torch.mean(d**2)
+            else:
+                coupling_term = torch.mean((a + b) ** 2)
 
             # Divergence terms
             grad_a = torch.autograd.grad(a_mu.sum(), x_mu, create_graph=True, retain_graph=True, only_inputs=True)[0]
@@ -740,29 +713,24 @@ class Trainer:
 
             lip_reg = self.config.lip_reg * (gp_f + gp_g)
 
-            # # Penalize a-E(a) and b-E(q) to avoid trivial solutions where a and b go to infinity but their sum remains constant
-            # mean_a = torch.mean(a)
-            # mean_a_mu = torch.mean(a_mu)
-            # loss_mean_a = torch.mean((a - mean_a) ** 2)  # Force a to have low variance around its mean
-            # loss_mean_b = torch.mean((b + mean_a) ** 2)  # Force b to be close to -a to prevent trivial solutions
-            # mean_loss = self.config.mean_reg * (torch.mean(a + b))**2
-
             mean_a = torch.mean(a)
             mean_b = torch.mean(b)
             drift_penalty = self.config.mean_reg * (mean_a**2 + mean_b**2)
             mean_sum_constraint = self.config.mean_reg * (mean_a + mean_b)**2
             l2_reg_centered = self.config.mean_reg * (torch.mean((a - mean_a)**2) + torch.mean((b - mean_b)**2))
 
-            loss = 0.5 * coupling_term - a_term - b_term
+            loss = coupling_term - 2*a_term - 2*b_term
             loss += drift_penalty + l2_reg_centered + lip_reg + l2_reg
-            # + l2_reg + lip_reg + drift_penalty + mean_sum_constraint #+ l2_reg_centered
-            # loss += 0.1 * mean_a_loss + 0.1 * mean_b_loss + 0.1 * mean_a_mu_loss + 0.1 * mean_b_nu_loss
 
             dual_optimizer.zero_grad()
+            if self.config.dual_mismatch_reg > 0:
+                h_optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(f_dual.parameters(), max_norm=10.0)
-            torch.nn.utils.clip_grad_norm_(g_dual.parameters(), max_norm=10.0)
+            # torch.nn.utils.clip_grad_norm_(f_dual.parameters(), max_norm=10.0)
+            # torch.nn.utils.clip_grad_norm_(g_dual.parameters(), max_norm=10.0)
             dual_optimizer.step()
+            if self.config.dual_mismatch_reg > 0:
+                h_optimizer.step()
 
             pbar.set_postfix({"Dual Loss": loss.item()})
 
@@ -771,27 +739,29 @@ class Trainer:
         f_dual, g_dual, _ = self.strategy.get_duals(self.device)
         with torch.no_grad():
             a, b = f_dual(x0_test), g_dual(x1_test)
-            sm = torch.exp((a+b) / self.config.iterations)
-            # print(f"   f_dual(x0) mean: {a.mean().item():.4f}, std: {a.std().item():.4f}")
-            # print(f"   g_dual(x1) mean: {b.mean().item():.4f}, std: {b.std().item():.4f}")
-            print(f"   sum mean: {sm.mean().item():.4f}, std:{sm.std().item():.4f}")#, ex: {sm[:5]}")
+            d = h_dual(torch.cat([x0_test, x1_test], dim=1)) if self.config.dual_mismatch_reg > 0 else torch.zeros_like(a)
+            sm = ((a+b+d) / self.config.iterations)
+            print(f"((a+b+d)/iter) => mean: {sm.mean().item():.4f}, std:{sm.std().item():.4f}")
+            print(f"mismatch => mean: {d.mean().item():.4f}, std: {d.std().item():.4f}") if self.config.dual_mismatch_reg > 0 else None
             x0_plot = x0_test.cpu().numpy()
             x1_plot = x1_test.cpu().numpy()
 
         fig, axes = plt.subplots(1, 2, figsize=(10, 5))
         cmap = 'viridis'
         sc0 = axes[0].scatter(x0_plot[:, 0], x0_plot[:, 1], c=sm.detach().cpu().numpy(), cmap=cmap, edgecolors='k', alpha=0.7)
-        axes[0].set_title(r"Source $x_0$ colored by $\exp((a+b)/\epsilon)$")
+        axes[0].set_title(r"Source $x_0$ colored by $\exp((a+b+d)/\epsilon)$")
         axes[0].set_xlabel("Dim 1")
         axes[0].set_ylabel("Dim 2")
+        axes[0].set_aspect('equal', adjustable='box')
         sc1 = axes[1].scatter(x1_plot[:, 0], x1_plot[:, 1], c=sm.detach().cpu().numpy(), cmap=cmap, edgecolors='k', alpha=0.7)
-        axes[1].set_title(r"Target $x_1$ colored by $\exp((a+b)/\epsilon)$")
+        axes[1].set_title(r"Target $x_1$ colored by $\exp((a+b+d)/\epsilon)$")
         axes[1].set_xlabel("Dim 1")
         axes[1].set_ylabel("Dim 2")
+        axes[1].set_aspect('equal', adjustable='box')
         # cbar = fig.colorbar(sc1, ax=axes.ravel().tolist())
         # Set the colorbar to the right of the second plot
         cbar = fig.colorbar(sc1, ax=axes[1], fraction=0.046, pad=0.04)
-        cbar.set_label(r'$\exp(\frac{a+b}{iter})$ magnitude')
+        cbar.set_label(r'$\exp(\frac{a+b+d}{\epsilon})$ magnitude')
 
         plt.tight_layout()
         plt.show()
@@ -805,18 +775,54 @@ class Trainer:
         else:
             num_epochs = self.config.cfm_epochs
 
-
         model, _ = self.strategy.get_flow(time_step, self.config.device)
         previous_model = self.strategy.get_previous_flow(time_step, self.config.device)
         previous_model.load_state_dict(model.state_dict())
         previous_model.eval()
         model.train()
 
-        x0_test, x1_test = self.current_coupling.coupling_sample(batch_size)
-        x0_test, x1_test = x0_test.to(self.config.device), x1_test.to(self.config.device)
+        # Sample from current coupling for diagnostic stats and visualization
+        x0_samp, x1_samp = self.current_coupling.coupling_sample(batch_size)
+        x1_target = self.flow_matching.interpolate(
+            self.initial_coupling.sample_target(batch_size).to(self.config.device),
+            self.new_target.sample(batch_size).to(self.config.device),
+            torch.full((batch_size, 1), time_step / self.config.iterations, device=self.config.device),
+            0,
+        )
+        x0_samp, x1_samp = x0_samp.to(self.config.device), x1_samp.to(self.config.device)
+        xt_mid = (x0_samp + x1_samp) / 2
         with torch.no_grad():
-            u = model(0.5 * torch.ones((batch_size, 1), device=self.config.device), (x0_test + x1_test) / 2, x0_test)
+            u = model(0.5 * torch.ones((batch_size, 1), device=self.config.device), xt_mid, x0_samp)
             print(f"   Flow model output mean: {u.mean().item():.4f}, std: {u.std().item():.4f}")
+
+        # --- Build quiver evaluated at actual mu_t sample points (CFM internal tau=0) ---
+        # At tau=0: xt = x0 ~ mu_t, so model(0, x0, x0) gives the initial push velocity.
+        # We use actual mu_t samples so arrows live exactly in the support of mu_t.
+        n_vis = min(2000, batch_size)
+        n_quiver = min(400, n_vis)   # fewer points so arrows remain readable
+        x0_vis = x0_samp[:n_vis]
+        x1_vis = x1_samp[:n_vis]
+        x0_quiver = x0_samp[:n_quiver]
+        t_zero = torch.zeros((n_quiver, 1), device=self.config.device)
+
+        def _plot_cfm_quiver(ax, mdl, title):
+            with torch.no_grad():
+                # tau=0: xt=x0=x0_quiver; condition=x0_quiver
+                vecs = mdl(t_zero, x0_quiver, x0_quiver).cpu().numpy()
+            qx = x0_quiver[:, 0].cpu().numpy()
+            qy = x0_quiver[:, 1].cpu().numpy()
+            mag = np.sqrt(vecs[:, 0] ** 2 + vecs[:, 1] ** 2) + 1e-8
+            ax.scatter(x1_target[:, 0].cpu(), x1_target[:, 1].cpu(), s=6, alpha=0.8, c='greenyellow', label=r'$\nu_{t,\mathrm{target}}$', zorder=2)
+            ax.scatter(x0_vis[:, 0].cpu(), x0_vis[:, 1].cpu(), s=6, alpha=0.3, c='steelblue', label=r'$\mu_t$', zorder=2)
+            ax.scatter(x1_vis[:, 0].cpu(), x1_vis[:, 1].cpu(), s=6, alpha=0.3, c='tomato', label=r'$\nu_t$', zorder=2)
+            q = ax.quiver(qx, qy, vecs[:, 0], vecs[:, 1], mag, cmap='plasma', alpha=0.9, zorder=3)
+            plt.colorbar(q, ax=ax, label='|v|', shrink=0.8)
+            ax.set_title(title, fontsize=10)
+            ax.legend(loc='upper right', markerscale=2, fontsize=8)
+            ax.set_aspect('equal')
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        _plot_cfm_quiver(axes[0], model, f"t=0 vector field — before training (step {time_step})")
 
         pbar = trange(num_epochs, desc="CFM Training")
         for epoch in pbar:
@@ -840,21 +846,17 @@ class Trainer:
             pbar.set_postfix({"CFM Loss": loss.item()})
 
         with torch.no_grad():
-            u = model(0.5 * torch.ones((batch_size, 1), device=self.config.device), (x0_test + x1_test) / 2, x0_test)
+            u = model(0.5 * torch.ones((batch_size, 1), device=self.config.device), xt_mid, x0_samp)
             print(f"   Flow model output mean: {u.mean().item():.4f}, std: {u.std().item():.4f}")
 
+        _plot_cfm_quiver(axes[1], model, f"t=0 vector field — after training (step {time_step})")
+        fig.suptitle(rf"CFM vector field $\mu_t \to \nu_t$ at $t=0$ (step {time_step})", fontsize=12)
+        plt.tight_layout()
+        plt.show()
 
-        # self.visualizer.display(time_step, self)
-
-        # x0, x0_back = self.current_coupling.coupling_sample(10000)
-        # x0 = x0.clone()
-        # x0_back = x0_back.clone()
-        # # If bidirectional and step is odd, swap x0 and x0_back to get correct source samples for transport cost calculation
-        # if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
-        #     x0, x0_back = x0_back, x0
         n_samples = 10000
         t = torch.full((n_samples, 1), time_step / self.config.iterations, device=self.config.device)
-        if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 1:
+        if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 != self.config.correction_each % 2:
             x0 = self.initial_coupling.sample_target(n_samples).to(self.config.device)
             x1 = self.new_target.sample(n_samples).to(self.config.device)
             xt = self.flow_matching.interpolate(x0, x1, t, self.config.sigma)
@@ -911,6 +913,13 @@ class Trainer:
                         t_tensor,
                         sigma=self.config.sigma
                     )
+                    # x_mu = self.current_coupling.dataset[0, i : i + actual_chunk_size, :].to(device)
+                    # y_nu = self.current_coupling.dataset[1, i : i + actual_chunk_size, :].to(device)
+
+                    # t_tensor = torch.full((x_mu.shape[0], 1), time_step / self.config.iterations, device=device)
+
+                    # x_mu_next = x_mu + mu_model(t_tensor, x_mu) * (1 / self.config.iterations)
+                    # y_nu_next = y_nu + nu_model(t_tensor, y_nu) * (1 / self.config.iterations)
 
                 num_steps = self.config.advance_steps
                 flow_model_mu, _ = self.strategy.get_flow(0, device=self.device)

@@ -53,14 +53,16 @@ class WeightedCFMLoss(CFMLoss):
         backward: bool = False,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         f_dual, g_dual, _ = strategy.get_duals(config.device)
+        h_dual, _ = strategy.get_dual_mismatch(config.device)
         model, optimizer = strategy.get_flow(step, config.device)
 
         with torch.no_grad():
             a, b = f_dual(x0), g_dual(x1)
-            log_w = (a + b) / config.iterations
+            d = h_dual(torch.cat([x0, x1], dim=1)) if config.dual_mismatch_reg > 0 else 0.0
+            log_w = (a + b + d) / config.iterations
             weight = _expand_weight(torch.exp(log_w), x0)
 
-            # Network a and b take non-permuted inputss
+            # Network a and b take non-permuted inputs
 
             if backward and step % 2 != 0:
                 x0, x1 = x1, x0
@@ -92,12 +94,14 @@ class ImplicitCFMLoss(CFMLoss):
         backward: bool = False,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         f_dual, g_dual, _ = strategy.get_duals(config.device)
+        h_dual, _ = strategy.get_dual_mismatch(config.device)
         model, optimizer = strategy.get_flow(step, config.device)
         previous_model = strategy.get_previous_flow(step, config.device)
 
         with torch.no_grad():
             a, b = f_dual(x0), g_dual(x1)
-            log_w = (a + b) / config.iterations
+            d = h_dual(torch.cat([x0, x1], dim=1)) if config.dual_mismatch_reg > 0 else 0.0
+            log_w = (a + b + d) / config.iterations
             weight = _expand_weight(torch.exp(log_w), x0)
 
         if backward and step % 2 != 0:
