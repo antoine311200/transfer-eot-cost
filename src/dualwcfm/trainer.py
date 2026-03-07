@@ -925,12 +925,44 @@ class Trainer:
                 flow_model_mu, _ = self.strategy.get_flow(0, device=self.device)
                 flow_model_nu, _ = self.strategy.get_flow(1, device=self.device)
 
+                # Split chunk into particle pairs and flow pairs.
+                # Particle pairs: Euler-step (x_prev, y_prev) from the stored coupling via
+                # the marginal bridges — breaks the self-referential y=flow(x) loop.
+                # Flow pairs: standard forward-model transport with coupling noise.
+                can_do_particles = (
+                    self.config.coupling_particle_ratio > 0.0
+                    and not isinstance(self.current_coupling, DiskCouplingDistribution)
+                )
+                n_particle = int(actual_chunk_size * self.config.coupling_particle_ratio) if can_do_particles else 0
+                n_flow = actual_chunk_size - n_particle
+
+                t_step_tensor = torch.full((actual_chunk_size, 1), time_step / self.config.iterations, device=device)
+
+                if n_particle > 0:
+                    x_prev = self.current_coupling.dataset[0][i:i + n_particle].to(device)
+                    y_prev = self.current_coupling.dataset[1][i:i + n_particle].to(device)
+                    t_par = t_step_tensor[:n_particle]
+                    x_par = x_prev + mu_model(t_par, x_prev) * (1 / self.config.iterations)
+                    y_par = y_prev + nu_model(t_par, y_prev) * (1 / self.config.iterations)
+
                 if not backward or time_step % 2 == 0:
-                    x_next = x_mu_next.clone()
-                    y_next = self.flow_matching.evolve(x_next, flow_model_mu, num_steps=num_steps, extend=True)[:, :self.strategy.config.dimension]
+                    x_flow = x_mu_next[n_particle:].clone()
+                    y_flow = self.flow_matching.evolve(x_flow, flow_model_mu, num_steps=num_steps, extend=True)[:, :self.strategy.config.dimension]
+                    y_flow = y_flow + self.config.sigma2 * torch.randn_like(y_flow)
+                    if n_particle > 0:
+                        x_next = torch.cat([x_par, x_flow], dim=0)
+                        y_next = torch.cat([y_par, y_flow], dim=0)
+                    else:
+                        x_next, y_next = x_flow, y_flow
                 else:
-                    y_next = y_nu_next.clone()
-                    x_next = self.flow_matching.evolve(y_next, flow_model_nu, num_steps=num_steps, extend=True)[:, :self.strategy.config.dimension]
+                    y_flow = y_nu_next[n_particle:].clone()
+                    x_flow = self.flow_matching.evolve(y_flow, flow_model_nu, num_steps=num_steps, extend=True)[:, :self.strategy.config.dimension]
+                    x_flow = x_flow + self.config.sigma2 * torch.randn_like(x_flow)
+                    if n_particle > 0:
+                        x_next = torch.cat([x_par, x_flow], dim=0)
+                        y_next = torch.cat([y_par, y_flow], dim=0)
+                    else:
+                        x_next, y_next = x_flow, y_flow
 
                 # Update coupling dataset
                 self.current_coupling.update_chunk(i, x_next.detach().cpu(), y_next.detach().cpu())

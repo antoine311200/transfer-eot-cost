@@ -51,6 +51,11 @@ class TrainingConfig:
     correction_each: int = 0    # 0 = disabled
     correction_epochs: int = 100
 
+    # Fraction of coupling pairs built by Euler-stepping the previous (x,y) via the
+    # marginal bridges rather than running the forward flow model.  Range [0, 1].
+    # 0 = pure flow (default), 1 = pure particle, 0.5 = half-and-half.
+    coupling_particle_ratio: float = 0.0
+
 
 @dataclass
 class ModelConfig:
