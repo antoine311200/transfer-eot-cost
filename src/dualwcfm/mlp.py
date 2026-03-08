@@ -16,6 +16,32 @@ class node_wrapper(nn.Module):
         return self.model(torch.cat([x, t], dim=1))
 
 
+class torch_wrapper(nn.Module):
+    """Wrapper for MLP-based models used in 2D/3D experiments.
+
+    Handles three calling conventions:
+      - model(x)          → model(x)              [dual potentials, time-invariant]
+      - model(t, x)       → model(cat([x, t]))    [bridges]
+      - model(t, x, x0)   → model(cat([x, x0, t]))[CFM / pretrain, conditioned on x0]
+    """
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, inp1, inp2=None, inp3=None, *args, **kwargs):
+        if inp3 is not None and inp2 is not None:
+            # CFM call: model(t, x, x0) → cat([x, x0, t])
+            inp1 = inp1.to(inp2.device)
+            return self.model(torch.cat([inp2, inp3, inp1], dim=1))
+        if inp2 is not None:
+            # Bridge call: model(t, x) → cat([x, t])
+            inp1 = inp1.to(inp2.device)
+            return self.model(torch.cat([inp2, inp1], dim=1))
+        # Dual call: model(x) → model(x)
+        return self.model(inp1)
+
+
 class TimeEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -109,7 +135,7 @@ class MLP(torch.nn.Module):
         layers.append(torch.nn.Linear(w, out_dim))
         self.net = torch.nn.Sequential(*layers)
 
-        # self._init_weights()
+        self._init_weights()
 
     def _init_weights(self):
         for m in self.modules():

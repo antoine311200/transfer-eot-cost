@@ -18,12 +18,17 @@ class TrainingConfig:
     iterations: int = 100
     loss: str = "implicit"
     advance_with_flow: bool = False
+    num_rectified_flow: int = 0
+    use_noisy_field: bool = False
+    correction_epoch_multiplier: int = 5
+    dual_mismatch_reg: float = 0.0
 
     sigma: float = 0.1
     sigma2: float = 0.1
     l2_reg: float = 1e-3
     lip_reg: float = 1e-3
     mean_reg: float = 0.1
+    scale_factor: float = -1  # Overall scale factor for normalization (tune based on data scale)
 
     batch_size: int = 4096
 
@@ -45,6 +50,11 @@ class TrainingConfig:
     # these corrected bridges to retrain the dual networks f and g.
     correction_each: int = 0    # 0 = disabled
     correction_epochs: int = 100
+
+    # Fraction of coupling pairs built by Euler-stepping the previous (x,y) via the
+    # marginal bridges rather than running the forward flow model.  Range [0, 1].
+    # 0 = pure flow (default), 1 = pure particle, 0.5 = half-and-half.
+    coupling_particle_ratio: float = 0.0
 
 
 @dataclass
@@ -81,3 +91,4 @@ class VisualizeConfig:
     # Visualization intervals for training phases (0 = disabled)
     show_each_marginal: int = 0  # During marginal flow training
     show_each_pretrain: int = 0  # During pretraining
+    trajectory_stride: int = 2  # Plot one trajectory point every N steps (0 = only start/end)
