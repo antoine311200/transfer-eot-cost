@@ -58,7 +58,7 @@ class WeightedCFMLoss(CFMLoss):
 
         with torch.no_grad():
             a, b = f_dual(x0), g_dual(x1)
-            d = h_dual(torch.cat([x0, x1], dim=1)) if config.dual_mismatch_reg > 0 else 0.0
+            d = h_dual(torch.cat([x0.view(x0.shape[0], -1), x1.view(x1.shape[0], -1)], dim=1)) if config.dual_mismatch_reg > 0 else 0.0
             log_w = (a + b + d) / config.iterations
             weight = _expand_weight(torch.exp(log_w), x0)
 
@@ -100,7 +100,7 @@ class ImplicitCFMLoss(CFMLoss):
 
         with torch.no_grad():
             a, b = f_dual(x0), g_dual(x1)
-            d = h_dual(torch.cat([x0, x1], dim=1)) if config.dual_mismatch_reg > 0 else 0.0
+            d = h_dual(torch.cat([x0.view(x0.shape[0], -1), x1.view(x1.shape[0], -1)], dim=1)) if config.dual_mismatch_reg > 0 else 0.0
             log_w = (a + b + d) / config.iterations
             weight = _expand_weight(torch.exp(log_w), x0)
 

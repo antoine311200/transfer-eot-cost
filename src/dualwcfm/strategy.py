@@ -27,12 +27,13 @@ class Strategy:
 
     def _create_models(self, dim: int, hidden_size: int):
         """Create all models. Override this method for custom architectures."""
+        self._device = None  # Reset so next to_device() call actually moves models
         wrapper = self.wrapper
         self.mu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
         self.nu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
         self.f_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, time_varying=False))
         self.g_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, time_varying=False))
-        self.h_dual = wrapper(MLP(dim=2*dim, out_dim=1, w=hidden_size, time_varying=False))
+        self.h_dual = MLP(dim=2*dim, out_dim=1, w=hidden_size, time_varying=False)
         self.forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
         self.previous_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
 

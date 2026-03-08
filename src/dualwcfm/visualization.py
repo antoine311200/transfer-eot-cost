@@ -45,6 +45,11 @@ class Visualizer:
             )
             plt.show()
 
+    def save_fig(self, fig: plt.Figure, subfolder: str, name: str):
+        """Save or display a figure. Override in logging visualizers to save to disk."""
+        plt.show()
+        plt.close(fig)
+
     def transport_cost(self, x: torch.Tensor, y: torch.Tensor):
         if self.transport_map is None:
             return None
@@ -313,8 +318,8 @@ class Visualizer:
 
 
 class Visualizer3D(Visualizer):
-    def __init__(self, config: VisualizeConfig):
-        super().__init__(config)
+    def __init__(self, config: VisualizeConfig, transport_map: Callable = None):
+        super().__init__(config, transport_map)
         self.dim = 3
 
     def _display_evolution(
@@ -475,9 +480,10 @@ class VisualizerImage(Visualizer):
         plt.tight_layout()
 
     def display_marginal(self, epoch: int, trainer: Trainer, model: nn.Module,
-                         source_dist, target_dist, title: str = "Marginal Flow"):
+                         source_dist, target_dist, title: str = "Marginal Flow",
+                         display: bool = False):
         """Display marginal flow evolution during training for images."""
-        if self.config.show_each_marginal <= 0 or epoch % self.config.show_each_marginal != 0:
+        if self.config.show_each_marginal <= 0 or ((epoch + 1) % self.config.show_each_marginal != 0 and not display):
             return
 
         n_samples = min(self.config.n_trajectories, 6)

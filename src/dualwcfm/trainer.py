@@ -250,6 +250,8 @@ class Trainer:
             self.train_cfm_step(iteration)
             self.advance_step(iteration, backward=isinstance(self.strategy, BidirectionalStrategy))
 
+            # Save coupling trajectories and marginals plots
+            self.visualizer.display(iteration, self)
             # Analyse marginal drift after each iteration
             distances = self.visualizer.analyse(iteration, self)
             print(
@@ -598,7 +600,7 @@ class Trainer:
         x0_test, x1_test = x0_test.to(self.config.device), x1_test.to(self.config.device)
         with torch.no_grad():
             a, b = f_dual(x0_test), g_dual(x1_test)
-            d = h_dual(torch.cat([x0_test, x1_test], dim=1)) if self.config.dual_mismatch_reg > 0 else torch.zeros_like(a)
+            d = h_dual(torch.cat([x0_test.view(x0_test.shape[0], -1), x1_test.view(x1_test.shape[0], -1)], dim=1)) if self.config.dual_mismatch_reg > 0 else torch.zeros_like(a)
             sm = ((a+b+d) / self.config.iterations)
             print(f"((a+b+d)/iter) => mean: {sm.mean().item():.4f}, std:{sm.std().item():.4f}")
             print(f"mismatch => mean: {d.mean().item():.4f}, std: {d.std().item():.4f}") if self.config.dual_mismatch_reg > 0 else None
@@ -683,7 +685,7 @@ class Trainer:
             # Coupling term
 
             if self.config.dual_mismatch_reg > 0:
-                d = h_dual(torch.cat([x, y], dim=1))
+                d = h_dual(torch.cat([x.view(x.shape[0], -1), y.view(y.shape[0], -1)], dim=1))
                 coupling_term = torch.mean((a + b + d) ** 2) + self.config.dual_mismatch_reg * torch.mean(d**2)
             else:
                 coupling_term = torch.mean((a + b) ** 2)
@@ -739,32 +741,30 @@ class Trainer:
         f_dual, g_dual, _ = self.strategy.get_duals(self.device)
         with torch.no_grad():
             a, b = f_dual(x0_test), g_dual(x1_test)
-            d = h_dual(torch.cat([x0_test, x1_test], dim=1)) if self.config.dual_mismatch_reg > 0 else torch.zeros_like(a)
+            d = h_dual(torch.cat([x0_test.view(x0_test.shape[0], -1), x1_test.view(x1_test.shape[0], -1)], dim=1)) if self.config.dual_mismatch_reg > 0 else torch.zeros_like(a)
             sm = ((a+b+d) / self.config.iterations)
             print(f"((a+b+d)/iter) => mean: {sm.mean().item():.4f}, std:{sm.std().item():.4f}")
             print(f"mismatch => mean: {d.mean().item():.4f}, std: {d.std().item():.4f}") if self.config.dual_mismatch_reg > 0 else None
             x0_plot = x0_test.cpu().numpy()
             x1_plot = x1_test.cpu().numpy()
 
-        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-        cmap = 'viridis'
-        sc0 = axes[0].scatter(x0_plot[:, 0], x0_plot[:, 1], c=sm.detach().cpu().numpy(), cmap=cmap, edgecolors='k', alpha=0.7)
-        axes[0].set_title(r"Source $x_0$ colored by $\exp((a+b+d)/\epsilon)$")
-        axes[0].set_xlabel("Dim 1")
-        axes[0].set_ylabel("Dim 2")
-        axes[0].set_aspect('equal', adjustable='box')
-        sc1 = axes[1].scatter(x1_plot[:, 0], x1_plot[:, 1], c=sm.detach().cpu().numpy(), cmap=cmap, edgecolors='k', alpha=0.7)
-        axes[1].set_title(r"Target $x_1$ colored by $\exp((a+b+d)/\epsilon)$")
-        axes[1].set_xlabel("Dim 1")
-        axes[1].set_ylabel("Dim 2")
-        axes[1].set_aspect('equal', adjustable='box')
-        # cbar = fig.colorbar(sc1, ax=axes.ravel().tolist())
-        # Set the colorbar to the right of the second plot
-        cbar = fig.colorbar(sc1, ax=axes[1], fraction=0.046, pad=0.04)
-        cbar.set_label(r'$\exp(\frac{a+b+d}{\epsilon})$ magnitude')
-
-        plt.tight_layout()
-        plt.show()
+        if not is_image:
+            fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+            cmap = 'viridis'
+            sc0 = axes[0].scatter(x0_plot[:, 0], x0_plot[:, 1], c=sm.detach().cpu().numpy(), cmap=cmap, edgecolors='k', alpha=0.7)
+            axes[0].set_title(r"Source $x_0$ colored by $\exp((a+b+d)/\epsilon)$")
+            axes[0].set_xlabel("Dim 1")
+            axes[0].set_ylabel("Dim 2")
+            axes[0].set_aspect('equal', adjustable='box')
+            sc1 = axes[1].scatter(x1_plot[:, 0], x1_plot[:, 1], c=sm.detach().cpu().numpy(), cmap=cmap, edgecolors='k', alpha=0.7)
+            axes[1].set_title(r"Target $x_1$ colored by $\exp((a+b+d)/\epsilon)$")
+            axes[1].set_xlabel("Dim 1")
+            axes[1].set_ylabel("Dim 2")
+            axes[1].set_aspect('equal', adjustable='box')
+            cbar = fig.colorbar(sc1, ax=axes[1], fraction=0.046, pad=0.04)
+            cbar.set_label(r'$\exp(\frac{a+b+d}{\epsilon})$ magnitude')
+            plt.tight_layout()
+            self.visualizer.save_fig(fig, "marginals", f"duals_{time_step:04d}.png")
 
     def train_cfm_step(self, time_step: int):
         batch_size = self.config.batch_size
@@ -795,34 +795,34 @@ class Trainer:
             u = model(0.5 * torch.ones((batch_size, 1), device=self.config.device), xt_mid, x0_samp)
             print(f"   Flow model output mean: {u.mean().item():.4f}, std: {u.std().item():.4f}")
 
-        # --- Build quiver evaluated at actual mu_t sample points (CFM internal tau=0) ---
-        # At tau=0: xt = x0 ~ mu_t, so model(0, x0, x0) gives the initial push velocity.
-        # We use actual mu_t samples so arrows live exactly in the support of mu_t.
-        n_vis = min(2000, batch_size)
-        n_quiver = min(400, n_vis)   # fewer points so arrows remain readable
-        x0_vis = x0_samp[:n_vis]
-        x1_vis = x1_samp[:n_vis]
-        x0_quiver = x0_samp[:n_quiver]
-        t_zero = torch.zeros((n_quiver, 1), device=self.config.device)
+        is_image = self.config.image_shape is not None
 
-        def _plot_cfm_quiver(ax, mdl, title):
-            with torch.no_grad():
-                # tau=0: xt=x0=x0_quiver; condition=x0_quiver
-                vecs = mdl(t_zero, x0_quiver, x0_quiver).cpu().numpy()
-            qx = x0_quiver[:, 0].cpu().numpy()
-            qy = x0_quiver[:, 1].cpu().numpy()
-            mag = np.sqrt(vecs[:, 0] ** 2 + vecs[:, 1] ** 2) + 1e-8
-            ax.scatter(x1_target[:, 0].cpu(), x1_target[:, 1].cpu(), s=6, alpha=0.8, c='greenyellow', label=r'$\nu_{t,\mathrm{target}}$', zorder=2)
-            ax.scatter(x0_vis[:, 0].cpu(), x0_vis[:, 1].cpu(), s=6, alpha=0.3, c='steelblue', label=r'$\mu_t$', zorder=2)
-            ax.scatter(x1_vis[:, 0].cpu(), x1_vis[:, 1].cpu(), s=6, alpha=0.3, c='tomato', label=r'$\nu_t$', zorder=2)
-            q = ax.quiver(qx, qy, vecs[:, 0], vecs[:, 1], mag, cmap='plasma', alpha=0.9, zorder=3)
-            plt.colorbar(q, ax=ax, label='|v|', shrink=0.8)
-            ax.set_title(title, fontsize=10)
-            ax.legend(loc='upper right', markerscale=2, fontsize=8)
-            ax.set_aspect('equal')
+        if not is_image:
+            # --- Build quiver evaluated at actual mu_t sample points (CFM internal tau=0) ---
+            n_vis = min(2000, batch_size)
+            n_quiver = min(400, n_vis)
+            x0_vis = x0_samp[:n_vis]
+            x1_vis = x1_samp[:n_vis]
+            x0_quiver = x0_samp[:n_quiver]
+            t_zero = torch.zeros((n_quiver, 1), device=self.config.device)
 
-        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-        _plot_cfm_quiver(axes[0], model, f"t=0 vector field — before training (step {time_step})")
+            def _plot_cfm_quiver(ax, mdl, title):
+                with torch.no_grad():
+                    vecs = mdl(t_zero, x0_quiver, x0_quiver).cpu().numpy()
+                qx = x0_quiver[:, 0].cpu().numpy()
+                qy = x0_quiver[:, 1].cpu().numpy()
+                mag = np.sqrt(vecs[:, 0] ** 2 + vecs[:, 1] ** 2) + 1e-8
+                ax.scatter(x1_target[:, 0].cpu(), x1_target[:, 1].cpu(), s=6, alpha=0.8, c='greenyellow', label=r'$\nu_{t,\mathrm{target}}$', zorder=2)
+                ax.scatter(x0_vis[:, 0].cpu(), x0_vis[:, 1].cpu(), s=6, alpha=0.3, c='steelblue', label=r'$\mu_t$', zorder=2)
+                ax.scatter(x1_vis[:, 0].cpu(), x1_vis[:, 1].cpu(), s=6, alpha=0.3, c='tomato', label=r'$\nu_t$', zorder=2)
+                q = ax.quiver(qx, qy, vecs[:, 0], vecs[:, 1], mag, cmap='plasma', alpha=0.9, zorder=3)
+                plt.colorbar(q, ax=ax, label='|v|', shrink=0.8)
+                ax.set_title(title, fontsize=10)
+                ax.legend(loc='upper right', markerscale=2, fontsize=8)
+                ax.set_aspect('equal')
+
+            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            _plot_cfm_quiver(axes[0], model, f"t=0 vector field — before training (step {time_step})")
 
         pbar = trange(num_epochs, desc="CFM Training")
         for epoch in pbar:
@@ -849,12 +849,13 @@ class Trainer:
             u = model(0.5 * torch.ones((batch_size, 1), device=self.config.device), xt_mid, x0_samp)
             print(f"   Flow model output mean: {u.mean().item():.4f}, std: {u.std().item():.4f}")
 
-        _plot_cfm_quiver(axes[1], model, f"t=0 vector field — after training (step {time_step})")
-        fig.suptitle(rf"CFM vector field $\mu_t \to \nu_t$ at $t=0$ (step {time_step})", fontsize=12)
-        plt.tight_layout()
-        plt.show()
+            if not is_image:
+                _plot_cfm_quiver(axes[1], model, f"t=0 vector field — after training (step {time_step})")
+                fig.suptitle(rf"CFM vector field $\mu_t \to \nu_t$ at $t=0$ (step {time_step})", fontsize=12)
+                plt.tight_layout()
+                self.visualizer.save_fig(fig, "cfm", f"cfm_{time_step:04d}.png")
 
-        n_samples = 10000
+        n_samples = 10000 if not is_image else min(256, batch_size)
         t = torch.full((n_samples, 1), time_step / self.config.iterations, device=self.config.device)
         if isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 != self.config.correction_each % 2:
             x0 = self.initial_coupling.sample_target(n_samples).to(self.config.device)
@@ -866,9 +867,12 @@ class Trainer:
             xt = self.flow_matching.interpolate(x0, x1, t, self.config.sigma)
 
         model.eval()
-        yt = self.flow_matching.evolve(xt.to(self.config.device), model, num_steps=100, sigma=self.config.sigma, extend=True)[:, :self.strategy.config.dimension]
+        _evolved = self.flow_matching.evolve(xt.to(self.config.device), model, num_steps=100, sigma=self.config.sigma, extend=True)
+        yt = _evolved[:, :xt.shape[1], :, :] if is_image_tensor(xt) else _evolved[:, :self.strategy.config.dimension]
         transport_cost = self.visualizer.transport_cost(xt.cpu(), yt.cpu())
-        print("Cost error", torch.norm(transport_cost, dim=1).mean().item())
+        if transport_cost is not None:
+            cost_flat = transport_cost.view(transport_cost.shape[0], -1)
+            print("Cost error", torch.norm(cost_flat, dim=1).mean().item())
 
     def advance_step(self, time_step: int, backward: bool = False):
         # Use coupling's chunk size for disk-based coupling, otherwise use defaults
@@ -929,25 +933,28 @@ class Trainer:
                 # Particle pairs: Euler-step (x_prev, y_prev) from the stored coupling via
                 # the marginal bridges — breaks the self-referential y=flow(x) loop.
                 # Flow pairs: standard forward-model transport with coupling noise.
-                can_do_particles = (
-                    self.config.coupling_particle_ratio > 0.0
-                    and not isinstance(self.current_coupling, DiskCouplingDistribution)
-                )
+                can_do_particles = self.config.coupling_particle_ratio > 0.0
                 n_particle = int(actual_chunk_size * self.config.coupling_particle_ratio) if can_do_particles else 0
                 n_flow = actual_chunk_size - n_particle
 
                 t_step_tensor = torch.full((actual_chunk_size, 1), time_step / self.config.iterations, device=device)
 
                 if n_particle > 0:
-                    x_prev = self.current_coupling.dataset[0][i:i + n_particle].to(device)
-                    y_prev = self.current_coupling.dataset[1][i:i + n_particle].to(device)
+                    if isinstance(self.current_coupling, DiskCouplingDistribution):
+                        _chunk_data = self.current_coupling._load_chunk(chunk_idx)
+                        x_prev = _chunk_data[0][:n_particle].to(device)
+                        y_prev = _chunk_data[1][:n_particle].to(device)
+                    else:
+                        x_prev = self.current_coupling.dataset[0][i:i + n_particle].to(device)
+                        y_prev = self.current_coupling.dataset[1][i:i + n_particle].to(device)
                     t_par = t_step_tensor[:n_particle]
                     x_par = x_prev + mu_model(t_par, x_prev) * (1 / self.config.iterations)
                     y_par = y_prev + nu_model(t_par, y_prev) * (1 / self.config.iterations)
 
                 if not backward or time_step % 2 == 0:
                     x_flow = x_mu_next[n_particle:].clone()
-                    y_flow = self.flow_matching.evolve(x_flow, flow_model_mu, num_steps=num_steps, extend=True)[:, :self.strategy.config.dimension]
+                    _evolved = self.flow_matching.evolve(x_flow, flow_model_mu, num_steps=num_steps, extend=True)
+                    y_flow = _evolved[:, :x_flow.shape[1], :, :] if is_image_tensor(x_flow) else _evolved[:, :self.strategy.config.dimension]
                     y_flow = y_flow + self.config.sigma2 * torch.randn_like(y_flow)
                     if n_particle > 0:
                         x_next = torch.cat([x_par, x_flow], dim=0)
@@ -956,7 +963,8 @@ class Trainer:
                         x_next, y_next = x_flow, y_flow
                 else:
                     y_flow = y_nu_next[n_particle:].clone()
-                    x_flow = self.flow_matching.evolve(y_flow, flow_model_nu, num_steps=num_steps, extend=True)[:, :self.strategy.config.dimension]
+                    _evolved = self.flow_matching.evolve(y_flow, flow_model_nu, num_steps=num_steps, extend=True)
+                    x_flow = _evolved[:, :y_flow.shape[1], :, :] if is_image_tensor(y_flow) else _evolved[:, :self.strategy.config.dimension]
                     x_flow = x_flow + self.config.sigma2 * torch.randn_like(x_flow)
                     if n_particle > 0:
                         x_next = torch.cat([x_par, x_flow], dim=0)
