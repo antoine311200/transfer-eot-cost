@@ -56,6 +56,11 @@ class TrainingConfig:
     # 0 = pure flow (default), 1 = pure particle, 0.5 = half-and-half.
     coupling_particle_ratio: float = 0.0
 
+    # Checkpointing: save state at every iteration for later visualization / analysis.
+    # Files land in <model_dir>/checkpoints/coupling/  and  <model_dir>/checkpoints/models/
+    save_coupling_checkpoints: bool = False  # Save coupling dataset after each advance step
+    save_model_checkpoints: bool = False     # Save CFM forward/backward weights after each iteration
+
 
 @dataclass
 class ModelConfig:

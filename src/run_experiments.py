@@ -595,7 +595,7 @@ def _base_image_train_cfg(device, perturbed=False) -> TrainingConfig:
         dataset_size=2_000,
         marginal_epochs=5000,
         pretrain_epochs=10000,
-        dual_epochs=100,
+        dual_epochs=25,
         cfm_epochs=200,
         advance_steps=50,
         iterations=100,
@@ -612,6 +612,8 @@ def _base_image_train_cfg(device, perturbed=False) -> TrainingConfig:
         use_disk_coupling=True,
         coupling_chunk_size=2048,
         correction_each=0,
+        save_coupling_checkpoints=True,
+        save_model_checkpoints=True,
     )
 
 class BidirectionalUnetStrategy(BidirectionalStrategy):

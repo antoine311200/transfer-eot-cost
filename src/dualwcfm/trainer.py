@@ -1,5 +1,6 @@
 import copy
 import os
+import shutil
 
 import torch
 import torch.nn as nn
@@ -137,6 +138,47 @@ class Trainer:
         self.strategy.initial_nu_bridge.load_state_dict(nu_state_dict)
         print("Pretrained models loaded.")
 
+    def _save_iteration_checkpoint(self, iteration: int, save: str):
+        """Persist coupling dataset and/or CFM weights for this iteration.
+
+        Files are written to:
+          <save>/checkpoints/coupling/iter_XXXX/   (DiskCouplingDistribution)
+          <save>/checkpoints/coupling/iter_XXXX.pt (FixedSizeCouplingDistribution)
+          <save>/checkpoints/models/iter_XXXX_forward.pth
+          <save>/checkpoints/models/iter_XXXX_backward.pth  (bidirectional only)
+        """
+        checkpoint_root = os.path.join(save, "checkpoints")
+
+        if self.config.save_coupling_checkpoints:
+            coup_dir = os.path.join(checkpoint_root, "coupling")
+            os.makedirs(coup_dir, exist_ok=True)
+            coup = self.current_coupling
+            if isinstance(coup, DiskCouplingDistribution):
+                iter_dir = os.path.join(coup_dir, f"iter_{iteration:04d}")
+                os.makedirs(iter_dir, exist_ok=True)
+                for chunk_idx in range(coup.n_chunks):
+                    src = coup._chunk_path(chunk_idx)
+                    if os.path.exists(src):
+                        shutil.copy2(src, os.path.join(iter_dir, f"chunk_{chunk_idx:06d}.pt"))
+                print(f"  [ckpt] coupling saved → {iter_dir}")
+            elif isinstance(coup, FixedSizeCouplingDistribution):
+                path = os.path.join(coup_dir, f"iter_{iteration:04d}.pt")
+                torch.save({"x": coup.dataset[0].cpu(), "y": coup.dataset[1].cpu()}, path)
+                print(f"  [ckpt] coupling saved → {path}")
+
+        if self.config.save_model_checkpoints:
+            mdl_dir = os.path.join(checkpoint_root, "models")
+            os.makedirs(mdl_dir, exist_ok=True)
+            fwd, _ = self.strategy.get_flow(0, self.device)
+            path_fwd = os.path.join(mdl_dir, f"iter_{iteration:04d}_forward.pth")
+            torch.save(fwd.state_dict(), path_fwd)
+            print(f"  [ckpt] forward model saved → {path_fwd}")
+            if isinstance(self.strategy, BidirectionalStrategy):
+                bwd, _ = self.strategy.get_flow(1, self.device)
+                path_bwd = os.path.join(mdl_dir, f"iter_{iteration:04d}_backward.pth")
+                torch.save(bwd.state_dict(), path_bwd)
+                print(f"  [ckpt] backward model saved → {path_bwd}")
+
     def train(self, retrain: bool = False, save: str = None):
         self.strategy._create_models(self.strategy.config.dimension, self.strategy.config.hidden_size)
         self.strategy._create_optimizers(self.strategy.config)
@@ -250,6 +292,9 @@ class Trainer:
             self.train_duals_step(iteration)
             self.train_cfm_step(iteration)
             self.advance_step(iteration, backward=isinstance(self.strategy, BidirectionalStrategy))
+
+            if save and (self.config.save_coupling_checkpoints or self.config.save_model_checkpoints):
+                self._save_iteration_checkpoint(iteration, save)
 
             # Save coupling trajectories and marginals plots
             self.visualizer.display(iteration, self)
