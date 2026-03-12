@@ -72,3 +72,14 @@ data/
 
 experiments/
 .claude
+*.gif
+*.csv
+*.log
+*.aux
+*.out
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.toc
+
+misc/
