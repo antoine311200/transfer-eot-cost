@@ -225,7 +225,8 @@ class Trainer:
             (end_points * self.scale).cpu(),
             (target_points * self.scale).cpu(),
         )
-        plt.show()
+        plt.suptitle("Initial flow (source → target)")
+        self.visualizer.save_fig(plt.gcf(), "marginals", "initial_flow.png")
 
         # Divide by 10 learning rates for cfm
         # for param_group in self.strategy.get_flow(0, self.device)[1].param_groups:
@@ -384,7 +385,7 @@ class Trainer:
             (end * self.scale).cpu(),
             (ref_target * self.scale).cpu(),
         )
-        plt.show()
+        self.visualizer.save_fig(plt.gcf(), "marginals", f"correction_{time_step:04d}.png")
 
     def train_marginal_flows(self, retrain: bool = False, save: str = None):
         sigma = self.config.sigma
@@ -510,7 +511,8 @@ class Trainer:
             (end_points * self.scale).cpu(),
             (target_points * self.scale).cpu(),
         )
-        plt.show()
+        plt.suptitle("Mu bridge: source distribution flow")
+        self.visualizer.save_fig(plt.gcf(), "marginals", "mu_bridge_final.png")
 
         start_points = self.nu_distribution.sample(samples)
         start_points = start_points.to(self.device)
@@ -526,7 +528,8 @@ class Trainer:
             (end_points * self.scale).cpu(),
             (target_points * self.scale).cpu(),
         )
-        plt.show()
+        plt.suptitle("Nu bridge: target distribution flow")
+        self.visualizer.save_fig(plt.gcf(), "marginals", "nu_bridge_final.png")
 
     def pretrain(self, model, optimizer, backward: bool = False):
         sigma2 = self.config.sigma2
@@ -665,12 +668,13 @@ class Trainer:
                     x_mu = self.flow_matching.interpolate(xt_corr, x1, t_dilate_tensor, self.config.sigma)
 
 
-            if epoch == 0:
-                # print mean of x_mu vs x, y_nu vs y
-                # print(isinstance(self.strategy, BidirectionalStrategy) and time_step % 2 == 0, t_dilate_tensor.mean().item())
+            if epoch == 0 and not is_image:
+                # print mean of x_mu vs x, y_nu vs y (2-D only — images have different channel indexing)
                 print(f"x ({x[:, 0].mean():.3e}, {x[:, 1].mean():.3e}), x_mu ({x_mu[:, 0].mean():.3e}, {x_mu[:, 1].mean():.3e})")
                 print(f"y ({y[:, 0].mean():.3e}, {y[:, 1].mean():.3e}), y_nu ({y_nu[:, 0].mean():.3e}, {y_nu[:, 1].mean():.3e})")
-                print(f"W1 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=1):.4e} | W2 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y.cpu(), y_nu.cpu(), n_proj=1000, p=2):.4e}")
+                y_flat = y.view(y.shape[0], -1).cpu()
+                y_nu_flat = y_nu.view(y_nu.shape[0], -1).cpu()
+                print(f"W1 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y_flat, y_nu_flat, n_proj=1000, p=1):.4e} | W2 (nu_err vs p1(pi)): {self.visualizer._sliced_wasserstein(y_flat, y_nu_flat, n_proj=1000, p=2):.4e}")
 
             with torch.no_grad():
                 u_t = mu_model(t_tensor, x_mu)
@@ -1060,7 +1064,7 @@ class Trainer:
             plt.colorbar(sm, ax=ax, shrink=0.6, label="Transport length")
 
             ax.set_title(f"Distributions after Advancing Step {time_step+1}")
-            plt.show()
+            self.visualizer.save_fig(plt.gcf(), "marginals", f"distributions_{time_step:04d}.png")
         else:
             mu_s_cpu = mu_samples.cpu()
             nu_s_cpu = nu_samples.cpu()
@@ -1080,7 +1084,7 @@ class Trainer:
                 )
             plt.legend()
             plt.title(f"Distributions after Advancing Step {time_step+1}")
-            plt.show()
+            self.visualizer.save_fig(plt.gcf(), "marginals", f"distributions_{time_step:04d}.png")
 
     def _plot_image_distributions_after_advance(self, time_step: int):
         """Plot image distributions after advancing step."""
@@ -1112,4 +1116,4 @@ class Trainer:
 
         plt.suptitle(f"Coupling after Step {time_step + 1}")
         plt.tight_layout()
-        plt.show()
+        self.visualizer.save_fig(plt.gcf(), "coupling", f"coupling_img_{time_step:04d}.png")

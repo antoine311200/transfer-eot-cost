@@ -314,7 +314,10 @@ class Visualizer:
             (x0 * s).cpu(), (end_points * s).cpu(), (x1 * s).cpu()
         )
         plt.suptitle(f"Pretrain {direction} Flow - Epoch {epoch}")
-        plt.show()
+        if hasattr(self, 'save_fig'):
+            self.save_fig(plt.gcf(), "pretrain", f"pretrain_{'bwd' if backward else 'fwd'}_{epoch:04d}.png")
+        else:
+            plt.show()
 
 
 class Visualizer3D(Visualizer):
@@ -399,13 +402,13 @@ class Visualizer3D(Visualizer):
 
 
 class VisualizerImage(Visualizer):
-    def __init__(self, config: VisualizeConfig, img_shape: Tuple[int, int, int]):
+    def __init__(self, config: VisualizeConfig, img_shape: Tuple[int, int, int], transport_map: Callable = None):
         """
         Args:
             config: Visualization configuration
             img_shape: Image shape as (C, H, W)
         """
-        super().__init__(config)
+        super().__init__(config, transport_map)
         self.img_shape = img_shape  # (C, H, W)
         self.dim = img_shape[0] * img_shape[1] * img_shape[2]
 
@@ -501,7 +504,11 @@ class VisualizerImage(Visualizer):
             (start_points * s).cpu(), (end_points * s).cpu(), (target_points * s).cpu()
         )
         plt.suptitle(f"{title} - Epoch {epoch}")
-        plt.show()
+        if hasattr(self, 'save_fig'):
+            safe_title = title.replace(" ", "_").lower()
+            self.save_fig(plt.gcf(), "marginals", f"marginal_{safe_title}_{epoch:04d}.png")
+        else:
+            plt.show()
 
     def display_pretrain(self, epoch: int, trainer: Trainer, model: nn.Module, backward: bool = False):
         """Display pretraining flow evolution during training for images."""
@@ -529,7 +536,10 @@ class VisualizerImage(Visualizer):
             (x0 * s).cpu(), (end_points * s).cpu(), (x1 * s).cpu()
         )
         plt.suptitle(f"Pretrain {direction} Flow - Epoch {epoch}")
-        plt.show()
+        if hasattr(self, 'save_fig'):
+            self.save_fig(plt.gcf(), "pretrain", f"pretrain_{'bwd' if backward else 'fwd'}_{epoch:04d}.png")
+        else:
+            plt.show()
 
 
 
