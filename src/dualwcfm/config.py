@@ -72,30 +72,3 @@ class VisualizeConfig:
     show_each_pretrain: int = 0  # During pretraining
     trajectory_stride: int = 2  # Plot one trajectory point every N steps (0 = only start/end)
 
-
-# ---------------------------------------------------------------------------
-# Method configs
-# ---------------------------------------------------------------------------
-
-@dataclass
-class MethodConfig:
-    """Base config for training methods."""
-    pass
-
-
-@dataclass
-class StandardConfig(MethodConfig):
-    """Config for StandardMethod: interpolation-based marginals + weighted/implicit CFM."""
-    sigma: float = 0.1
-    sigma2: float = 0.1
-    loss: str = "weighted"
-    l2_reg: float = 1e-3
-    lip_reg: float = 1e-3
-    mean_reg: float = 0.1
-    use_noisy_field: bool = False
-
-
-@dataclass
-class MixtureConfig(StandardConfig):
-    """StandardConfig + particle bridge mixing in the advance step."""
-    particle_ratio: float = 0.0

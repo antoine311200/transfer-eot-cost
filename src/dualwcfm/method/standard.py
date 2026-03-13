@@ -1,65 +1,32 @@
 from __future__ import annotations
 
-import copy
 import logging
-from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+import copy
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 from tqdm import trange
 
-from dualwcfm.config import StandardConfig, MixtureConfig
 from dualwcfm.losses import CFMLoss
 from dualwcfm.strategy import BidirectionalStrategy
 from dualwcfm.utils import is_image_tensor
 from dualwcfm.distributions.coupling import DiskCouplingDistribution
-
-if TYPE_CHECKING:
-    from dualwcfm.trainer import Trainer
+from dualwcfm.method.base import Method, MethodConfig
+from dualwcfm.trainer import Trainer
 
 logger = logging.getLogger("dualwcfm")
 
-
-class Method(ABC):
-    """Abstract training method."""
-
-    def __init__(self, config):
-        self.config = config
-
-    @abstractmethod
-    def pretrain(self, trainer: "Trainer", retrain: bool = True, save: str = None) -> None:
-        """Run the pretrain phase: marginal flows + forward/backward flow models."""
-        ...
-
-    @abstractmethod
-    def step_preprocess(self, trainer: "Trainer", iteration: int) -> dict:
-        """Build the context dict for this iteration.
-
-        Returns a dict with at least: t, t_tensor, backward, is_image.
-        """
-        ...
-
-    @abstractmethod
-    def step_duals(self, trainer: "Trainer", iteration: int, ctx: dict) -> None:
-        """Train the dual potentials f and g."""
-        ...
-
-    @abstractmethod
-    def step_flow_matching(self, trainer: "Trainer", iteration: int, ctx: dict) -> None:
-        """Train the conditional flow matching model."""
-        ...
-
-    @abstractmethod
-    def step_postprocess(self, trainer: "Trainer", iteration: int, ctx: dict) -> None:
-        """Advance the coupling dataset to the next iterate."""
-        ...
-
-    @property
-    def use_noisy_field(self) -> bool:
-        """Whether to add noise in the vector field target during marginal training."""
-        return False
-
+@dataclass
+class StandardConfig(MethodConfig):
+    """Config for StandardMethod: interpolation-based marginals + weighted/implicit CFM."""
+    sigma: float = 0.1
+    sigma2: float = 0.1
+    loss: str = "weighted"
+    l2_reg: float = 1e-3
+    lip_reg: float = 1e-3
+    mean_reg: float = 0.1
+    use_noisy_field: bool = False
 
 class StandardMethod(Method):
     """Standard DualWCFM method: interpolation-based marginals, weighted/implicit CFM.
@@ -79,7 +46,7 @@ class StandardMethod(Method):
     # Pretrain
     # ------------------------------------------------------------------
 
-    def pretrain(self, trainer: "Trainer", retrain: bool = True, save: str = None) -> None:
+    def pretrain(self, trainer: Trainer, retrain: bool = True, save: str = None) -> None:
         self._pretrain_bridges(trainer, retrain, save)
 
         if not retrain:
@@ -114,7 +81,7 @@ class StandardMethod(Method):
     # Pretrain marginal flow matching
     # ------------------------------------------------------------------
 
-    def _pretrain_bridges(self, trainer: "Trainer", retrain: bool = True, save: str = None) -> None:
+    def _pretrain_bridges(self, trainer: Trainer, retrain: bool = True, save: str = None) -> None:
         """Train (or load) mu/nu bridge models for marginal flow matching."""
         sigma = trainer._sigma
         batch_size = trainer.config.batch_size
@@ -221,7 +188,7 @@ class StandardMethod(Method):
     # Pretrain forward (and backward) flow models
     # ------------------------------------------------------------------
 
-    def _pretrain_model(self, trainer: "Trainer", model, optimizer, backward: bool = False) -> None:
+    def _pretrain_model(self, trainer: Trainer, model, optimizer, backward: bool = False) -> None:
         batch_size = trainer.config.batch_size
         device = trainer.device
         loss_fn = nn.MSELoss()
@@ -259,7 +226,7 @@ class StandardMethod(Method):
     # Step preprocess
     # ------------------------------------------------------------------
 
-    def step_preprocess(self, trainer: "Trainer", iteration: int) -> dict:
+    def step_preprocess(self, trainer: Trainer, iteration: int) -> dict:
         backward = isinstance(trainer.strategy, BidirectionalStrategy) and iteration % 2 != 0
         is_image = trainer.config.image_shape is not None
         t = iteration / trainer.config.iterations
@@ -275,7 +242,7 @@ class StandardMethod(Method):
     # Dual training step
     # ------------------------------------------------------------------
 
-    def step_duals(self, trainer: "Trainer", iteration: int, ctx: dict) -> None:
+    def step_duals(self, trainer: Trainer, iteration: int, ctx: dict) -> None:
         batch_size = trainer.config.batch_size
         device = trainer.device
         t_tensor = ctx["t_tensor"]
@@ -377,7 +344,7 @@ class StandardMethod(Method):
             },
         )
 
-    def _sample_marginals(self, trainer: "Trainer", t_tensor, backward, batch_size, device):
+    def _sample_marginals(self, trainer: Trainer, t_tensor, backward, batch_size, device):
         """Return (x_mu, y_nu) samples representing μ_t and ν_t."""
         x_mu = trainer.flow_matching.interpolate(
             trainer.initial_coupling.sample_init(batch_size).to(device),
@@ -406,7 +373,7 @@ class StandardMethod(Method):
     # CFM training step
     # ------------------------------------------------------------------
 
-    def step_flow_matching(self, trainer: "Trainer", iteration: int, ctx: dict) -> None:
+    def step_flow_matching(self, trainer: Trainer, iteration: int, ctx: dict) -> None:
         batch_size = trainer.config.batch_size
         device = trainer.device
         is_image = ctx["is_image"]
@@ -493,7 +460,7 @@ class StandardMethod(Method):
     # Advance step (postprocess)
     # ------------------------------------------------------------------
 
-    def step_postprocess(self, trainer: "Trainer", iteration: int, ctx: dict) -> None:
+    def step_postprocess(self, trainer: Trainer, iteration: int, ctx: dict) -> None:
         backward = ctx["backward"]
         device = trainer.device
 
@@ -555,7 +522,7 @@ class StandardMethod(Method):
 
     def _advance_chunk(
         self,
-        trainer: "Trainer",
+        trainer: Trainer,
         x_mu_next: torch.Tensor,
         y_nu_next: torch.Tensor,
         flow_fwd,
@@ -579,112 +546,3 @@ class StandardMethod(Method):
             x_flow = _evolved[:, : y_flow.shape[1], :, :] if is_image_tensor(y_flow) else _evolved[:, :dim]
             # x_flow = x_flow + sigma2 * torch.randn_like(x_flow)
             return x_flow, y_flow
-
-
-# ---------------------------------------------------------------------------
-# MixtureMethod: adds particle bridge mixing in step_postprocess
-# ---------------------------------------------------------------------------
-
-
-class MixtureMethod(StandardMethod):
-    """StandardMethod + particle/flow split in the advance step.
-
-    A fraction `config.particle_ratio` of each chunk is advanced by Euler-stepping
-    the stored (x, y) pair through the marginal bridges, breaking the self-referential
-    y = flow(x) loop.  The remainder uses the standard flow model transport.
-    """
-
-    def __init__(self, config: MixtureConfig):
-        super().__init__(config)
-
-    def step_postprocess(self, trainer: "Trainer", iteration: int, ctx: dict) -> None:
-        backward = ctx["backward"]
-        device = trainer.device
-        particle_ratio = self.config.particle_ratio
-
-        chunk_size = (
-            trainer.current_coupling.chunk_size
-            if isinstance(trainer.current_coupling, DiskCouplingDistribution)
-            else (100_000 if not trainer.config.image_shape else 256)
-        )
-
-        (mu_model, _), (nu_model, _) = trainer.strategy.get_bridges(device)
-        mu_model.eval()
-        nu_model.eval()
-
-        flow_fwd = trainer.strategy.get_flow(0, device)[0]
-        flow_bwd = trainer.strategy.get_flow(1, device)[0]
-
-        n_chunks = (trainer.current_coupling.size + chunk_size - 1) // chunk_size
-
-        with torch.no_grad():
-            for chunk_idx in trange(n_chunks, desc="Advancing coupling"):
-                i = chunk_idx * chunk_size
-                actual = min(chunk_size, trainer.current_coupling.size - i)
-                n_particle = int(actual * particle_ratio) if particle_ratio > 0 else 0
-                n_flow = actual - n_particle
-
-                # --- Particle pairs: Euler-step stored (x_prev, y_prev) via bridges ---
-                if n_particle > 0:
-                    t_par = torch.full(
-                        (n_particle, 1),
-                        iteration / trainer.config.iterations,
-                        device=device,
-                    )
-                    if isinstance(trainer.current_coupling, DiskCouplingDistribution):
-                        _chunk = trainer.current_coupling._load_chunk(chunk_idx)
-                        x_prev = _chunk[0][:n_particle].to(device)
-                        y_prev = _chunk[1][:n_particle].to(device)
-                    else:
-                        x_prev = trainer.current_coupling.dataset[0][i : i + n_particle].to(device)
-                        y_prev = trainer.current_coupling.dataset[1][i : i + n_particle].to(device)
-                    x_par = x_prev + mu_model(t_par, x_prev) * (1 / trainer.config.iterations)
-                    y_par = y_prev + nu_model(t_par, y_prev) * (1 / trainer.config.iterations)
-
-                # --- Flow pairs: standard transport ---
-                t_next = torch.full(
-                    (n_flow, 1),
-                    (iteration + 1) / trainer.config.iterations,
-                    device=device,
-                )
-                x_mu_flow = self._interpolate(
-                    trainer.initial_source, trainer.new_source, trainer,
-                    n_flow, t_next, trainer._sigma, device
-                )
-                y_nu_flow = self._interpolate(
-                    trainer.initial_target, trainer.new_target, trainer,
-                    n_flow, t_next, trainer._sigma, device
-                )
-                x_flow, y_flow = self._advance_chunk(
-                    trainer,
-                    x_mu_flow,
-                    y_nu_flow,
-                    flow_fwd,
-                    flow_bwd,
-                    backward,
-                )
-
-                if n_particle > 0:
-                    x_next = torch.cat([x_par, x_flow], dim=0)
-                    y_next = torch.cat([y_par, y_flow], dim=0)
-                else:
-                    x_next, y_next = x_flow, y_flow
-
-                trainer.current_coupling.update_chunk(i, x_next.detach().cpu(), y_next.detach().cpu())
-
-        trainer.visualizer.at_postprocess_end(iteration, trainer, ctx)
-
-
-# ---------------------------------------------------------------------------
-# FlowMethod stub: advance marginals by Euler-stepping through the bridge
-# ---------------------------------------------------------------------------
-
-
-class FlowMethod(StandardMethod):
-    """Variant where marginal particles are Euler-stepped each iteration.
-
-    To be implemented: overrides step_postprocess and _init_distributions
-    to maintain a FixedSizeDistribution that is Euler-stepped in-place.
-    """
-
-    pass
