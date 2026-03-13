@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from dualwcfm.config import TrainingConfig
 from dualwcfm.utils import is_image_tensor
 from dualwcfm.strategy import Strategy
 from dualwcfm.flow_matching import ConditionalFlowMatching
@@ -21,9 +20,10 @@ class CFMLoss:
         x0: torch.Tensor,
         x1: torch.Tensor,
         strategy: Strategy,
-        config: TrainingConfig,
         flow_matching: ConditionalFlowMatching,
         step: int,
+        n_iter: int,
+        sigma: float,
         backward: bool = False,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
         """Compute the CFM loss."""
@@ -47,31 +47,26 @@ class WeightedCFMLoss(CFMLoss):
         x0: torch.Tensor,
         x1: torch.Tensor,
         strategy: Strategy,
-        config: TrainingConfig,
         flow_matching: ConditionalFlowMatching,
         step: int,
+        n_iter: int,
+        sigma: float,
         backward: bool = False,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
-        f_dual, g_dual, _ = strategy.get_duals(config.device)
-        h_dual, _ = strategy.get_dual_mismatch(config.device)
-        model, optimizer = strategy.get_flow(step, config.device)
+        device = x0.device
+        model, optimizer = strategy.get_flow(step, device)
 
         with torch.no_grad():
-            a, b = f_dual(x0), g_dual(x1)
-            d = h_dual(torch.cat([x0.view(x0.shape[0], -1), x1.view(x1.shape[0], -1)], dim=1)) if config.dual_mismatch_reg > 0 else 0.0
-            log_w = (a + b + d) / config.iterations
+            # Compute log-weight before the backward swap
+            log_w = strategy.log_weight(x0, x1, n_iter)
             weight = _expand_weight(torch.exp(log_w), x0)
-
-            # Network a and b take non-permuted inputs
 
             if backward and step % 2 != 0:
                 x0, x1 = x1, x0
 
-            # target_u_s = torch.cat([x1 - x0, torch.zeros_like(x0)], dim=-1)
-
-        # s = torch.rand(config.batch_size, 1, device=config.device)
-        s = flow_matching.random_time(config.batch_size, config.device)
-        x_s = flow_matching.interpolate(x0, x1, s, config.sigma2)
+        batch_size = x0.shape[0]
+        s = flow_matching.random_time(batch_size, device)
+        x_s = flow_matching.interpolate(x0, x1, s, sigma)
         u_s = model(s, x_s, x0)
         target_u_s = flow_matching.vector_field(x_s, s, x0, x1, extend=True, noisy=True)
 
@@ -88,28 +83,27 @@ class ImplicitCFMLoss(CFMLoss):
         x0: torch.Tensor,
         x1: torch.Tensor,
         strategy: Strategy,
-        config: TrainingConfig,
         flow_matching: ConditionalFlowMatching,
         step: int,
+        n_iter: int,
+        sigma: float,
         backward: bool = False,
     ) -> tuple[torch.Tensor, nn.Module, optim.Adam]:
-        f_dual, g_dual, _ = strategy.get_duals(config.device)
-        h_dual, _ = strategy.get_dual_mismatch(config.device)
-        model, optimizer = strategy.get_flow(step, config.device)
-        previous_model = strategy.get_previous_flow(step, config.device)
+        device = x0.device
+        model, optimizer = strategy.get_flow(step, device)
+        previous_model = strategy.get_previous_flow(step, device)
 
         with torch.no_grad():
-            a, b = f_dual(x0), g_dual(x1)
-            d = h_dual(torch.cat([x0.view(x0.shape[0], -1), x1.view(x1.shape[0], -1)], dim=1)) if config.dual_mismatch_reg > 0 else 0.0
-            log_w = (a + b + d) / config.iterations
+            # Compute log-weight before the backward swap
+            log_w = strategy.log_weight(x0, x1, n_iter)
             weight = _expand_weight(torch.exp(log_w), x0)
 
         if backward and step % 2 != 0:
             x0, x1 = x1, x0
 
-        # s = torch.rand(config.batch_size, 1, device=config.device)
-        s = flow_matching.random_time(config.batch_size, config.device)
-        xs = flow_matching.interpolate(x0, x1, s, config.sigma)
+        batch_size = x0.shape[0]
+        s = flow_matching.random_time(batch_size, device)
+        xs = flow_matching.interpolate(x0, x1, s, sigma)
 
         with torch.no_grad():
             b_ta = previous_model(s, xs, x0)

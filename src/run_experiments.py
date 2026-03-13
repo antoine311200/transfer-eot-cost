@@ -19,6 +19,7 @@ Per-type GIF timelapses are created after training.
 """
 
 import argparse
+import logging
 import math
 import os
 import sys
@@ -38,7 +39,8 @@ import numpy as np
 # Make sure src/ is on the path when running as __main__
 sys.path.insert(0, os.path.dirname(__file__))
 
-from dualwcfm.config import FeedForwardConfig, TrainingConfig, VisualizeConfig
+from dualwcfm.config import FeedForwardConfig, MixtureConfig, MethodConfig, TrainingConfig, VisualizeConfig
+from dualwcfm.method import MixtureMethod
 from dualwcfm.distributions.coupling import (
     FunctionalCouplingDistribution,
     RotatedShapeCoupling,
@@ -60,6 +62,27 @@ from dualwcfm.logging_visualizer import (
 from dualwcfm.mlp import MLP, torch_wrapper
 from dualwcfm.strategy import Strategy, BidirectionalStrategy
 from dualwcfm.trainer import Trainer
+
+logger = logging.getLogger("dualwcfm")
+
+
+# =============================================================================
+# Logging setup
+# =============================================================================
+
+def setup_logging(log_dir: str = None):
+    """Configure the dualwcfm logger: StreamHandler + optional FileHandler."""
+    root = logging.getLogger("dualwcfm")
+    root.setLevel(logging.INFO)
+    if not root.handlers:
+        sh = logging.StreamHandler()
+        sh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        root.addHandler(sh)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        fh = logging.FileHandler(os.path.join(log_dir, "training.log"))
+        fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        root.addHandler(fh)
 
 
 # =============================================================================
@@ -256,6 +279,7 @@ class ExperimentSpec:
     train_cfg: TrainingConfig
     model_cfg: FeedForwardConfig
     vis_cfg: VisualizeConfig
+    method_cfg: MethodConfig = field(default_factory=MixtureConfig)
     bidirectional: bool = True
     output_root: str = "results"
 
@@ -273,7 +297,7 @@ class ExperimentSpec:
 #   - New target ν' = μ' rotated by θ (respects the same dynamic, different support)
 # =============================================================================
 
-def _base_2d_train_cfg(device, perturbed=False) -> TrainingConfig:
+def _base_2d_train_cfg(device) -> TrainingConfig:
     return TrainingConfig(
         device=device,
         dataset_size=200_000,
@@ -284,24 +308,22 @@ def _base_2d_train_cfg(device, perturbed=False) -> TrainingConfig:
         advance_steps=100,
         iterations=100,
         num_rectified_flow=1,
-        loss="weighted",
+        scale_factor=100.0,
+        batch_size=2048*4,
+        coupling_chunk_size=1000,
+    )
+
+
+def _base_2d_method_cfg() -> MixtureConfig:
+    return MixtureConfig(
         sigma=0.01,
         sigma2=0.01,
-        scale_factor=100.0,
+        loss="weighted",
         l2_reg=0,
         lip_reg=0,
         mean_reg=0,
-        batch_size=2048*4,
-        advance_with_flow=False,
         use_noisy_field=False,
-        coupling_particle_ratio=0.25,
-        dual_mismatch_reg=0,#0.5 if perturbed else 0.0,
-        correction_each=0,
-        coupling_chunk_size=1000,
-
-        # correction_epochs=500,
-        # correction_each=4,
-        # correction_epoch_multiplier=2,
+        particle_ratio=0.25,
     )
 
 
@@ -341,7 +363,8 @@ def make_2d_experiments(output_root="results") -> List[ExperimentSpec]:
             b = torch.tensor([0.0, +perturbation])
             return x @ A.T + b
 
-        cfg = _base_2d_train_cfg(dev, perturbed)
+        cfg = _base_2d_train_cfg(dev)
+        method_cfg = _base_2d_method_cfg()
         mcfg = FeedForwardConfig(dimension=2, hidden_size=64)
         vcfg = VisualizeConfig(show_each=1, n_trajectories=300, trajectory_stride=2)
         return ExperimentSpec(
@@ -350,6 +373,7 @@ def make_2d_experiments(output_root="results") -> List[ExperimentSpec]:
             new_source=new_source, new_target=new_target,
             transport_map=transport_map,
             train_cfg=cfg, model_cfg=mcfg, vis_cfg=vcfg,
+            method_cfg=method_cfg,
             output_root=output_root,
         )
     specs += [_simple_2d(False), _simple_2d(True)]
@@ -371,9 +395,9 @@ def make_2d_experiments(output_root="results") -> List[ExperimentSpec]:
         new_src = GMMShapeDistribution(new_centers, scale=0.4, device=dev)
         new_tgt = GMMShapeDistribution(new_centers, scale=0.4, rotation_degrees=60.0, device=dev)
 
-        cfg = _base_2d_train_cfg(dev, perturbed)
+        cfg = _base_2d_train_cfg(dev)
+        method_cfg = _base_2d_method_cfg()
         cfg.iterations = 100
-        # cfg.coupling_particle_ratio = 0.3 if perturbed else 0.0
         mcfg = FeedForwardConfig(dimension=2, hidden_size=128)
         vcfg = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2)
         return ExperimentSpec(
@@ -382,6 +406,7 @@ def make_2d_experiments(output_root="results") -> List[ExperimentSpec]:
             new_source=new_src, new_target=new_tgt,
             transport_map=None,
             train_cfg=cfg, model_cfg=mcfg, vis_cfg=vcfg,
+            method_cfg=method_cfg,
             output_root=output_root,
         )
     specs += [_medium_2d(False), _medium_2d(True)]
@@ -405,12 +430,11 @@ def make_2d_experiments(output_root="results") -> List[ExperimentSpec]:
         new_src = GMMShapeDistribution(new_centers, scale=0.4, device=dev)
         new_tgt = GMMShapeDistribution(new_centers, scale=0.4, rotation_degrees=45.0, device=dev)
 
-        cfg = _base_2d_train_cfg(dev, perturbed)
+        cfg = _base_2d_train_cfg(dev)
+        method_cfg = _base_2d_method_cfg()
         cfg.iterations = 150
         cfg.dual_epochs = 200
         cfg.cfm_epochs = 300
-        # cfg.coupling_particle_ratio = 0.4 if perturbed else 0.0
-        # cfg.dataset_size = 30_000
         mcfg = FeedForwardConfig(dimension=2, hidden_size=128)
         vcfg = VisualizeConfig(show_each=1, n_trajectories=400, trajectory_stride=2)
         return ExperimentSpec(
@@ -419,6 +443,7 @@ def make_2d_experiments(output_root="results") -> List[ExperimentSpec]:
             new_source=new_src, new_target=new_tgt,
             transport_map=None,
             train_cfg=cfg, model_cfg=mcfg, vis_cfg=vcfg,
+            method_cfg=method_cfg,
             output_root=output_root,
         )
     specs += [_complex_2d(False), _complex_2d(True)]
@@ -434,7 +459,7 @@ def make_2d_experiments(output_root="results") -> List[ExperimentSpec]:
 #   - New target ν' = rotate_z(θ)(S₁) — same dynamic, different support
 # =============================================================================
 
-def _base_3d_train_cfg(device, perturbed=False) -> TrainingConfig:
+def _base_3d_train_cfg(device) -> TrainingConfig:
     return TrainingConfig(
         device=device,
         dataset_size=200_000,
@@ -444,17 +469,21 @@ def _base_3d_train_cfg(device, perturbed=False) -> TrainingConfig:
         cfm_epochs=300,
         advance_steps=100,
         iterations=200,
-        loss="weighted",
+        scale_factor=100.0,
+        batch_size=2048,
+    )
+
+
+def _base_3d_method_cfg() -> MixtureConfig:
+    return MixtureConfig(
         sigma=0.05,
         sigma2=0.05,
+        loss="weighted",
         l2_reg=0,
         lip_reg=0,
         mean_reg=0,
-        scale_factor=100.0,
-        batch_size=2048,
-        coupling_particle_ratio=0.25,
-        dual_mismatch_reg=0.0,#0.5 if perturbed else 0.0,
-        correction_each=0,
+        use_noisy_field=False,
+        particle_ratio=0.25,
     )
 
 
@@ -479,7 +508,8 @@ def make_3d_experiments(output_root="results") -> List[ExperimentSpec]:
         new_src = GMM3DDistribution(new_src_c, scale=0.25, device=dev)
         new_tgt = GMM3DDistribution(new_tgt_c, scale=0.25, device=dev)
 
-        cfg = _base_3d_train_cfg(dev, perturbed)
+        cfg = _base_3d_train_cfg(dev)
+        method_cfg = _base_3d_method_cfg()
         mcfg = FeedForwardConfig(dimension=3, hidden_size=128)
         vcfg = VisualizeConfig(show_each=1, n_trajectories=200, trajectory_stride=2)
         return ExperimentSpec(
@@ -488,6 +518,7 @@ def make_3d_experiments(output_root="results") -> List[ExperimentSpec]:
             new_source=new_src, new_target=new_tgt,
             transport_map=None,
             train_cfg=cfg, model_cfg=mcfg, vis_cfg=vcfg,
+            method_cfg=method_cfg,
             output_root=output_root,
         )
     specs += [_simple_3d(False), _simple_3d(True)]
@@ -517,9 +548,8 @@ def make_3d_experiments(output_root="results") -> List[ExperimentSpec]:
         new_src = GMM3DDistribution(new_src_c, scale=0.3, device=dev)
         new_tgt = GMM3DDistribution(new_tgt_c, scale=0.3, device=dev)
 
-        cfg = _base_3d_train_cfg(dev, perturbed)
-        # cfg.iterations = 70
-        # cfg.coupling_particle_ratio = 0.3 if perturbed else 0.0
+        cfg = _base_3d_train_cfg(dev)
+        method_cfg = _base_3d_method_cfg()
         mcfg = FeedForwardConfig(dimension=3, hidden_size=128)
         vcfg = VisualizeConfig(show_each=1, n_trajectories=200, trajectory_stride=2)
         return ExperimentSpec(
@@ -528,6 +558,7 @@ def make_3d_experiments(output_root="results") -> List[ExperimentSpec]:
             new_source=new_src, new_target=new_tgt,
             transport_map=None,
             train_cfg=cfg, model_cfg=mcfg, vis_cfg=vcfg,
+            method_cfg=method_cfg,
             output_root=output_root,
         )
     specs += [_medium_3d(False), _medium_3d(True)]
@@ -558,12 +589,9 @@ def make_3d_experiments(output_root="results") -> List[ExperimentSpec]:
         new_src = GMM3DDistribution(new_src_c, scale=0.3, device=dev)
         new_tgt = GMM3DDistribution(new_tgt_c, scale=0.3, device=dev)
 
-        cfg = _base_3d_train_cfg(dev, perturbed)
+        cfg = _base_3d_train_cfg(dev)
+        method_cfg = _base_3d_method_cfg()
         cfg.iterations = 200
-        # cfg.dual_epochs = 250
-        # cfg.cfm_epochs = 350
-        # cfg.coupling_particle_ratio = 0.45 if perturbed else 0.0
-        # cfg.dataset_size = 30_000
         mcfg = FeedForwardConfig(dimension=3, hidden_size=256)
         vcfg = VisualizeConfig(show_each=1, n_trajectories=200, trajectory_stride=2)
         return ExperimentSpec(
@@ -572,6 +600,7 @@ def make_3d_experiments(output_root="results") -> List[ExperimentSpec]:
             new_source=new_src, new_target=new_tgt,
             transport_map=None,
             train_cfg=cfg, model_cfg=mcfg, vis_cfg=vcfg,
+            method_cfg=method_cfg,
             output_root=output_root,
         )
     specs += [_complex_3d(False), _complex_3d(True)]
@@ -589,7 +618,7 @@ def make_3d_experiments(output_root="results") -> List[ExperimentSpec]:
 #     The algorithm must generalise the flip dynamic to a new class
 # =============================================================================
 
-def _base_image_train_cfg(device, perturbed=False) -> TrainingConfig:
+def _base_image_train_cfg(device) -> TrainingConfig:
     return TrainingConfig(
         device=device,
         dataset_size=2_000,
@@ -599,21 +628,25 @@ def _base_image_train_cfg(device, perturbed=False) -> TrainingConfig:
         cfm_epochs=200,
         advance_steps=50,
         iterations=100,
-        loss="weighted",
+        scale_factor=1.0,
+        batch_size=64,
+        use_disk_coupling=True,
+        coupling_chunk_size=2048,
+        save_coupling_checkpoints=True,
+        save_model_checkpoints=True,
+    )
+
+
+def _base_image_method_cfg() -> MixtureConfig:
+    return MixtureConfig(
         sigma=0.05,
         sigma2=0.05,
+        loss="weighted",
         l2_reg=0,
         lip_reg=0,
         mean_reg=0,
-        scale_factor=1.0,
-        batch_size=64,
-        coupling_particle_ratio=0.25, #if perturbed else 0.0,
-        dual_mismatch_reg=0.0,#5 if perturbed else 0.0,
-        use_disk_coupling=True,
-        coupling_chunk_size=2048,
-        correction_each=0,
-        save_coupling_checkpoints=True,
-        save_model_checkpoints=True,
+        use_noisy_field=False,
+        particle_ratio=0.25,
     )
 
 class BidirectionalUnetStrategy(BidirectionalStrategy):
@@ -667,7 +700,8 @@ def make_image_experiments(output_root="results") -> List[ExperimentSpec]:
             target_extra_rotation=10.0 if perturbed else 0.0,
         )
 
-        cfg = _base_image_train_cfg(dev, perturbed)
+        cfg = _base_image_train_cfg(dev)
+        method_cfg = _base_image_method_cfg()
         cfg.image_shape = (C, H, W)
         mcfg = FeedForwardConfig(dimension=C, hidden_size=32, image_shape=(C, H, W))
         vcfg = VisualizeConfig(show_each=1, n_trajectories=6, trajectory_stride=0, show_each_marginal=1000, show_each_pretrain=1000)
@@ -677,6 +711,7 @@ def make_image_experiments(output_root="results") -> List[ExperimentSpec]:
             new_source=new_src, new_target=new_tgt,
             transport_map=None,
             train_cfg=cfg, model_cfg=mcfg, vis_cfg=vcfg,
+            method_cfg=method_cfg,
             output_root=output_root,
         )
     specs += [_mnist_simple(False), _mnist_simple(True)]
@@ -699,9 +734,9 @@ def make_image_experiments(output_root="results") -> List[ExperimentSpec]:
             target_extra_rotation=10.0 if perturbed else 0.0,
         )
 
-        cfg = _base_image_train_cfg(dev, perturbed)
+        cfg = _base_image_train_cfg(dev)
+        method_cfg = _base_image_method_cfg()
         cfg.image_shape = (C, H, W)
-        # cfg.iterations = 40
         mcfg = FeedForwardConfig(dimension=C, hidden_size=256, image_shape=(C, H, W))
         vcfg = VisualizeConfig(show_each=1, n_trajectories=6, trajectory_stride=0)
         return ExperimentSpec(
@@ -710,6 +745,7 @@ def make_image_experiments(output_root="results") -> List[ExperimentSpec]:
             new_source=new_src, new_target=new_tgt,
             transport_map=None,
             train_cfg=cfg, model_cfg=mcfg, vis_cfg=vcfg,
+            method_cfg=method_cfg,
             output_root=output_root,
         )
     specs += [_fashion_medium(False), _fashion_medium(True)]
@@ -722,19 +758,23 @@ def make_image_experiments(output_root="results") -> List[ExperimentSpec]:
 # =============================================================================
 
 def run_experiment(spec: ExperimentSpec, retrain: bool = True, save_models: bool = True):
-    print(f"\n{'='*70}")
-    print(f"  Experiment: {spec.name}")
-    print(f"{'='*70}")
+    setup_logging(spec.output_dir)
+    logger.info(f"\n{'='*70}")
+    logger.info(f"  Experiment: {spec.name}")
+    logger.info(f"{'='*70}")
 
     os.makedirs(spec.output_dir, exist_ok=True)
     model_dir = os.path.join(spec.output_dir, "models") if save_models else None
 
     dev = spec.train_cfg.device
 
+    # Method
+    method = MixtureMethod(spec.method_cfg)
+
     # Strategy
     # Check if image experiment with UNet config – if so, use BidirectionalUnetStrategy
     if spec.mode == "image" and spec.model_cfg.image_shape is not None:
-        print("  Using Bidirectional UNet strategy for image experiment.")
+        logger.info("  Using Bidirectional UNet strategy for image experiment.")
         strat = BidirectionalUnetStrategy(unet_wrapper, spec.model_cfg)
         strat.config = spec.model_cfg
         strat.to_device(dev)
@@ -767,6 +807,7 @@ def run_experiment(spec: ExperimentSpec, retrain: bool = True, save_models: bool
         strategy=strat,
         visualizer=vis,
         config=spec.train_cfg,
+        method=method,
         device=dev,
     )
 
