@@ -20,6 +20,9 @@ class ConditionalFlowMatching:
         Note: x and t are unused in this linear flow -- kept for API compatibility.
         """
         if noisy:
+            # Reshape t for proper broadcasting with images: (N, 1) -> (N, 1, 1, 1)
+            if is_image_tensor(x0):
+                t = t.view(t.shape[0], *([1] * (x0.dim() - 1)))
             field = x1 - x0 + (1 - 2*t) / (2 * t * (1 - t)) * (x - (t * x1 + (1 - t) * x0))
         else:
             field = x1 - x0

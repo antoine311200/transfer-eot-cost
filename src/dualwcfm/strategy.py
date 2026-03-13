@@ -1,3 +1,7 @@
+from typing import Optional
+import logging
+import os
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -5,6 +9,19 @@ import torch.optim as optim
 from dualwcfm.config import FeedForwardConfig
 from dualwcfm.utils import is_image_tensor
 from dualwcfm.mlp import MLP
+
+logger = logging.getLogger("dualwcfm")
+
+
+class PairwiseMLP(nn.Module):
+    """MLP accepting concatenated (x, y) → scalar. Use as change_of_measure."""
+
+    def __init__(self, dim: int, hidden_size: int):
+        super().__init__()
+        self.net = MLP(dim=2 * dim, out_dim=1, w=hidden_size, time_varying=False)
+
+    def forward(self, xy: torch.Tensor) -> torch.Tensor:
+        return self.net(xy)
 
 
 class Strategy:
@@ -14,16 +31,27 @@ class Strategy:
     For custom models (e.g., UNets for images), override _create_models().
     """
 
-    def __init__(self, wrapper, config: FeedForwardConfig):
+    def __init__(
+        self,
+        wrapper,
+        config: FeedForwardConfig,
+        change_of_measure: Optional[nn.Module] = None,
+    ):
         self.wrapper = wrapper
         self.config = config
         self._device = None
+        self.change_of_measure = change_of_measure
 
         dim = config.dimension
         hidden_size = config.hidden_size
 
         self._create_models(dim, hidden_size)
         self._create_optimizers(config)
+
+        if change_of_measure is not None:
+            self._com_optimizer = optim.Adam(change_of_measure.parameters(), lr=config.dual_learning_rate)
+        else:
+            self._com_optimizer = None
 
     def _create_models(self, dim: int, hidden_size: int):
         """Create all models. Override this method for custom architectures."""
@@ -49,6 +77,8 @@ class Strategy:
         self._device = device
         for attr in self._model_attrs():
             getattr(self, attr).to(device)
+        if self.change_of_measure is not None:
+            self.change_of_measure.to(device)
 
     def _model_attrs(self):
         """Return names of all model attributes."""
@@ -71,6 +101,24 @@ class Strategy:
         self.dual_optimizer = optim.Adam(dual_params, lr=config.dual_learning_rate)
         self.dual_mismatch_optimizer = optim.Adam(self.h_dual.parameters(), lr=config.dual_learning_rate)
         self.forward_optimizer = optim.Adam(self.forward_model.parameters(), lr=config.flow_learning_rate)
+
+    def log_weight(self, x: torch.Tensor, y: torch.Tensor, n_iter: int) -> torch.Tensor:
+        """Compute log-weight (f(x) + g(y) [+ com(x,y)]) / n_iter."""
+        f, g, _ = self.get_duals(x.device)
+        a, b = f(x), g(y)
+        if self.change_of_measure is not None:
+            xy = torch.cat([x.view(x.shape[0], -1), y.view(y.shape[0], -1)], dim=1)
+            d = self.change_of_measure(xy)
+        else:
+            d = 0.0
+        return (a + b + d) / n_iter
+
+    def weight(self, x: torch.Tensor, y: torch.Tensor, n_iter: int) -> torch.Tensor:
+        """Compute importance weight exp(log_weight(x, y, n_iter))."""
+        return torch.exp(self.log_weight(x, y, n_iter))
+
+    def get_com_optimizer(self) -> Optional[optim.Optimizer]:
+        return self._com_optimizer
 
     def get_duals(self, device):
         self.to_device(device)
@@ -116,10 +164,41 @@ class Strategy:
                 xt = xt + vt * dt
         return x_mu_next, xt.clone()
 
+    def _load_pretrained_models(self, dir, device):
+        """Load pretrained models from disk."""
+        forward_state_dict = torch.load(f"{dir}/initial_forward_model.pth", map_location=device)
+        self.forward_model.load_state_dict(forward_state_dict)
+        self.initial_forward_model.load_state_dict(forward_state_dict)
+
+        if isinstance(self, BidirectionalStrategy):
+            backward_state_dict = torch.load(f"{dir}/initial_backward_model.pth", map_location=device)
+            self.backward_model.load_state_dict(backward_state_dict)
+            self.initial_backward_model.load_state_dict(backward_state_dict)
+
+        mu_state_dict = torch.load(f"{dir}/initial_mu_model.pth", map_location=device)
+        nu_state_dict = torch.load(f"{dir}/initial_nu_model.pth", map_location=device)
+        self.mu_bridge.load_state_dict(mu_state_dict)
+        self.initial_mu_bridge.load_state_dict(mu_state_dict)
+        self.nu_bridge.load_state_dict(nu_state_dict)
+        self.initial_nu_bridge.load_state_dict(nu_state_dict)
+        logger.info("Pretrained models loaded.")
+
+    def _save_pretrained(self, save_dir: str):
+        """Save all pretrained models (flow + marginal bridges) to disk."""
+        if not save_dir:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(self.initial_forward_model.state_dict(), f"{save_dir}/initial_forward_model.pth")
+        if isinstance(self, BidirectionalStrategy):
+            torch.save(self.initial_backward_model.state_dict(), f"{save_dir}/initial_backward_model.pth")
+        torch.save(self.initial_mu_bridge.state_dict(), f"{save_dir}/initial_mu_model.pth")
+        torch.save(self.initial_nu_bridge.state_dict(), f"{save_dir}/initial_nu_model.pth")
+        logger.info("Pretrained models saved (flow + marginal bridges).")
+
 
 class BidirectionalStrategy(Strategy):
-    def __init__(self, wrapper, config: FeedForwardConfig):
-        super().__init__(wrapper, config)
+    def __init__(self, wrapper, config: FeedForwardConfig, change_of_measure: Optional[nn.Module] = None):
+        super().__init__(wrapper, config, change_of_measure)
 
     def _create_models(self, dim: int, hidden_size: int):
         super()._create_models(dim, hidden_size)
