@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from dualwcfm.trainer import Trainer
+if TYPE_CHECKING:
+    from dualwcfm.trainer import Trainer
 
 logger = logging.getLogger("dualwcfm")
 

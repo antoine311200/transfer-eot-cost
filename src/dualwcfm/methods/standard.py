@@ -8,12 +8,15 @@ import torch
 import torch.nn as nn
 from tqdm import trange
 
-from dualwcfm.losses import CFMLoss
+from dualwcfm.losses import FlowLoss
 from dualwcfm.strategy import BidirectionalStrategy
 from dualwcfm.utils import is_image_tensor
 from dualwcfm.distributions.coupling import DiskCouplingDistribution
-from dualwcfm.method.base import Method, MethodConfig
-from dualwcfm.trainer import Trainer
+from dualwcfm.methods.base import Method, MethodConfig
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dualwcfm.trainer import Trainer
 
 logger = logging.getLogger("dualwcfm")
 
@@ -36,7 +39,7 @@ class StandardMethod(Method):
 
     def __init__(self, config: StandardConfig):
         super().__init__(config)
-        self._loss_fn = CFMLoss.get_loss(config.loss)
+        self._loss_fn = FlowLoss.get_loss(config.loss)
 
     @property
     def use_noisy_field(self) -> bool:
@@ -381,7 +384,7 @@ class StandardMethod(Method):
 
         model, _ = trainer.strategy.get_flow(iteration, device)
         previous_model = trainer.strategy.get_previous_flow(iteration, device)
-        # Copy current → previous BEFORE the epoch loop (critical for ImplicitCFMLoss)
+        # Copy current → previous BEFORE the epoch loop (critical for ImplicitFlowLoss)
         previous_model.load_state_dict(model.state_dict())
         previous_model.eval()
         model.train()

@@ -7,5 +7,5 @@ from dualwcfm.flow_matching import ConditionalFlowMatching
 from dualwcfm.losses.base import FlowLoss, _expand_weight
 
 
-class ExplicitCFMLoss(FlowLoss):
+class ExplicitFlowLoss(FlowLoss):
     pass

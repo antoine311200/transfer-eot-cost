@@ -6,8 +6,11 @@ import torch
 from tqdm import trange
 
 from dualwcfm.distributions.coupling import DiskCouplingDistribution
-from dualwcfm.method.standard import StandardMethod, StandardConfig
-from dualwcfm.trainer import Trainer
+from dualwcfm.methods.standard import StandardMethod, StandardConfig
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dualwcfm.trainer import Trainer
 
 @dataclass
 class MixtureConfig(StandardConfig):

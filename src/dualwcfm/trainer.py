@@ -7,7 +7,7 @@ import torch
 from dualwcfm.config import TrainingConfig
 from dualwcfm.flow_matching import ConditionalFlowMatching
 from dualwcfm.strategy import Strategy, BidirectionalStrategy
-from dualwcfm.method import Method
+from dualwcfm.methods.base import Method
 from dualwcfm.visualization import Visualizer
 from dualwcfm.distributions.coupling import (
     CouplingDistribution,
