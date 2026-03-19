@@ -206,7 +206,7 @@ def run_experiment(
     logger.info("%s", "=" * 70)
 
     os.makedirs(spec.output_dir, exist_ok=True)
-    model_dir = os.path.join(spec.output_dir, "models") if save_models else None
+    model_dir = os.path.join(spec.output_dir, "models")
     device    = spec.train_cfg.device
 
     # --- Pre-trained weights ----------------------------------------------
@@ -273,7 +273,11 @@ def run_experiment(
         device           = device,
     )
 
-    trainer.train(retrain=retrain, save=model_dir)
+    trainer.train(
+        retrain          = retrain,
+        save             = model_dir,
+        save_checkpoints = model_dir if save_models else None,
+    )
 
     # --- Post-training ----------------------------------------------------
     visualizer.make_timelapse_all(fps=3)

@@ -144,7 +144,7 @@ class Trainer:
     # Main training entry point
     # ------------------------------------------------------------------
 
-    def train(self, retrain: bool = False, save: str = None):
+    def train(self, retrain: bool = False, save: str = None, save_checkpoints: str = None):
         self.strategy._create_models(self.strategy.config.dimension, self.strategy.config.hidden_size)
         self.strategy._create_optimizers(self.strategy.config)
         self.strategy.to_device(self.device)
@@ -166,8 +166,8 @@ class Trainer:
             self.method.step_flow_matching(self, iteration, ctx)
             self.method.step_postprocess(self, iteration, ctx)
 
-            if save and (self.config.save_coupling_checkpoints or self.config.save_model_checkpoints):
-                self._save_iteration_checkpoint(iteration, save)
+            if save_checkpoints and (self.config.save_coupling_checkpoints or self.config.save_model_checkpoints):
+                self._save_iteration_checkpoint(iteration, save_checkpoints)
 
             self.visualizer.display(iteration, self)
             distances = self.visualizer.analyse(iteration, self)
