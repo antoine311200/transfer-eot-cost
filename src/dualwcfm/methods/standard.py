@@ -31,6 +31,22 @@ class StandardConfig(MethodConfig):
     mean_reg: float = 0.1
     use_noisy_field: bool = False
 
+    # Flow LR schedule for the CFM training loop.
+    #
+    # lr_min_factor scales the base flow_learning_rate and is used by both modes:
+    #
+    #   lr_cosine_decay=True  (cosine within each iteration)
+    #       LR starts at flow_lr, decays to flow_lr * lr_min_factor over cfm_epochs,
+    #       then resets to flow_lr at the next iteration.
+    #       Useful when cfm_epochs is large enough (~1000+) to benefit from refinement.
+    #
+    #   lr_cosine_decay=False  (constant reduced LR)
+    #       LR is fixed at flow_lr * lr_min_factor for every iteration.
+    #       Simpler and more predictable; recommended when cfm_epochs is small (~500).
+    #       Set lr_min_factor=1.0 to keep the original flat flow_learning_rate.
+    lr_cosine_decay: bool = False
+    lr_min_factor: float = 1.0  # 1.0 = no change; 0.5 = half the base flow_lr
+
 class StandardMethod(Method):
     """Standard DualWCFM method: interpolation-based marginals, weighted/implicit CFM.
 
@@ -234,12 +250,41 @@ class StandardMethod(Method):
         is_image = trainer.config.image_shape is not None
         t = iteration / trainer.config.iterations
         t_tensor = torch.full((trainer.config.batch_size, 1), t, device=trainer.device)
+
+        # Apply LR policy at the start of every iteration:
+        #   cosine mode  – reset to base_lr so the within-iteration decay starts fresh.
+        #   constant mode – set to base_lr * lr_min_factor and keep it flat.
+        # No-op when lr_cosine_decay=False and lr_min_factor=1.0 (default).
+        if self.config.lr_cosine_decay or self.config.lr_min_factor != 1.0:
+            self._reset_flow_lr(trainer)
+
         return {
             "t": t,
             "t_tensor": t_tensor,
             "backward": backward,
             "is_image": is_image,
         }
+
+    def _reset_flow_lr(self, trainer: Trainer) -> None:
+        """Set the flow optimizer(s) to the iteration starting LR.
+
+        For cosine mode: resets to the full base LR so the within-iteration
+        schedule always decays from the same ceiling.
+        For constant mode: sets to base_lr * lr_min_factor directly, which then
+        stays flat throughout the cfm_epochs loop.
+        """
+        base_lr    = trainer.strategy.config.flow_learning_rate
+        start_lr   = base_lr if self.config.lr_cosine_decay else base_lr * self.config.lr_min_factor
+        for opt in self._flow_optimizers(trainer):
+            for pg in opt.param_groups:
+                pg["lr"] = start_lr
+
+    def _flow_optimizers(self, trainer: Trainer):
+        """Yield the flow optimizer(s) that participate in the within-iteration schedule."""
+        strat = trainer.strategy
+        yield strat.forward_optimizer
+        if isinstance(strat, BidirectionalStrategy) and hasattr(strat, "backward_optimizer"):
+            yield strat.backward_optimizer
 
     # ------------------------------------------------------------------
     # Dual training step
@@ -413,8 +458,24 @@ class StandardMethod(Method):
         }
         start_ctx = trainer.visualizer.at_flow_matching_start(iteration, trainer, flow_ctx)
 
-        pbar = trange(trainer.config.cfm_epochs, desc="CFM Training")
-        for _ in pbar:
+        import math
+        cfm_epochs = trainer.config.cfm_epochs
+        base_lr    = trainer.strategy.config.flow_learning_rate
+        min_factor = self.config.lr_min_factor
+        use_cosine = self.config.lr_cosine_decay and cfm_epochs > 1
+
+        pbar = trange(cfm_epochs, desc="CFM Training")
+        for epoch in pbar:
+            if use_cosine:
+                # Cosine decay from base_lr to base_lr * min_factor within this iteration.
+                cos_factor = min_factor + (1.0 - min_factor) * (
+                    0.5 * (1.0 + math.cos(math.pi * epoch / (cfm_epochs - 1)))
+                )
+                for opt in self._flow_optimizers(trainer):
+                    for pg in opt.param_groups:
+                        pg["lr"] = base_lr * cos_factor
+            # Constant-reduced mode: LR was already set in _reset_flow_lr, nothing to do.
+
             x0, x1 = trainer.current_coupling.coupling_sample(batch_size)
             x0, x1 = x0.clone().to(device), x1.clone().to(device)
 

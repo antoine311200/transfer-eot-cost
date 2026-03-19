@@ -1,0 +1,313 @@
+"""dualwcfm.experiments.run
+===========================
+Command-line interface for running DualWCFM experiments and ablation studies.
+
+Usage examples
+--------------
+Run a single experiment::
+
+    python -m dualwcfm.experiments.run --mode 2d --level simple
+    python -m dualwcfm.experiments.run --mode 3d --level medium --perturbed
+    python -m dualwcfm.experiments.run --mode image --level simple
+
+Run all experiments sequentially::
+
+    python -m dualwcfm.experiments.run --all
+
+Run an ablation study (compare methods on the 2D simple experiment)::
+
+    python -m dualwcfm.experiments.run --ablation --mode 2d --level simple
+
+Seed sweep::
+
+    python -m dualwcfm.experiments.run \\
+        --ablation --mode 2d --level simple \\
+        --methods mixture --seeds 0 1 2
+
+Load pre-trained models instead of retraining::
+
+    python -m dualwcfm.experiments.run --mode 2d --level simple --load-pretrained
+
+Control training length::
+
+    python -m dualwcfm.experiments.run --mode 2d --level simple --iterations 50
+
+Output goes to ``results/<name>/`` by default;  use ``--output`` to override.
+"""
+
+import argparse
+import sys
+import os
+
+# Ensure the src directory is on the Python path when run as a script.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog        = "python -m dualwcfm.experiments.run",
+        description = "DualWCFM experiment runner",
+        formatter_class = argparse.RawDescriptionHelpFormatter,
+        epilog      = __doc__,
+    )
+
+    # ── Experiment selection ─────────────────────────────────────────────────
+    sel = parser.add_argument_group("experiment selection")
+    sel.add_argument(
+        "--mode", choices=["2d", "3d", "image"],
+        help="Experiment dimensionality.  Required unless --all is given.",
+    )
+    sel.add_argument(
+        "--level", choices=["simple", "medium", "complex"],
+        help="Difficulty level of the experiment.",
+    )
+    sel.add_argument(
+        "--perturbed", action="store_true",
+        help="Use the perturbed variant of the experiment.",
+    )
+    sel.add_argument(
+        "--all", action="store_true", dest="run_all",
+        help="Run every experiment (2D + 3D + image) sequentially.",
+    )
+
+    # ── Method ──────────────────────────────────────────────────────────────
+    meth = parser.add_argument_group("method")
+    meth.add_argument(
+        "--method", choices=["standard", "mixture", "score"], default="mixture",
+        dest="method",
+        help="Training method to use (default: mixture).",
+    )
+    meth.add_argument(
+        "--sigma", type=float, default=None,
+        help="Override sigma hyper-parameter of the method config.",
+    )
+    meth.add_argument(
+        "--particle-ratio", type=float, default=None, dest="particle_ratio",
+        help="Override particle_ratio for MixtureMethod (default: 0.25).",
+    )
+
+    # ── Training ─────────────────────────────────────────────────────────────
+    train = parser.add_argument_group("training")
+    train.add_argument(
+        "--iterations", type=int, default=None,
+        help="Override the number of outer training iterations.",
+    )
+    train.add_argument(
+        "--batch-size", type=int, default=None, dest="batch_size",
+        help="Override the batch size.",
+    )
+    train.add_argument(
+        "--load-pretrained", action="store_true", dest="load_pretrained",
+        help=(
+            "Skip marginal flow + pretrain phases and load previously saved "
+            "models from <output>/<name>/models/."
+        ),
+    )
+    train.add_argument(
+        "--no-save-models", action="store_false", dest="save_models",
+        help="Do not write model checkpoints to disk.",
+    )
+
+    # ── Ablation ─────────────────────────────────────────────────────────────
+    abl = parser.add_argument_group("ablation study")
+    abl.add_argument(
+        "--ablation", action="store_true",
+        help="Run an ablation study comparing methods instead of a single run.",
+    )
+    abl.add_argument(
+        "--methods", nargs="+",
+        choices=["standard", "mixture", "score"],
+        default=["standard", "mixture", "score"],
+        help="Methods to compare in an ablation study (default: all three).",
+    )
+    abl.add_argument(
+        "--seeds", nargs="+", type=int, default=[0],
+        help="Random seeds for the ablation study (default: [0]).",
+    )
+    abl.add_argument(
+        "--ablation-name", default=None, dest="ablation_name",
+        help="Name for the ablation suite output directory.  Auto-generated if omitted.",
+    )
+
+    # ── Output ───────────────────────────────────────────────────────────────
+    out = parser.add_argument_group("output")
+    out.add_argument(
+        "--output", default="results",
+        help="Root directory for experiment output (default: 'results').",
+    )
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Helpers: build method config from CLI args
+# ---------------------------------------------------------------------------
+
+def _build_method_cfg(method_name: str, args: argparse.Namespace):
+    """Construct a MethodConfig from CLI arguments."""
+    from dualwcfm.methods.standard import StandardConfig
+    from dualwcfm.methods.mixture import MixtureConfig
+    from dualwcfm.methods.score import ScoreConfig
+
+    defaults = {
+        "standard": StandardConfig(sigma=0.01, sigma2=0.01, l2_reg=0, lip_reg=0, mean_reg=0),
+        "mixture":  MixtureConfig( sigma=0.01, sigma2=0.01, l2_reg=0, lip_reg=0, mean_reg=0,
+                                   particle_ratio=0.25),
+        "score":    ScoreConfig(   sigma=0.01, sigma2=0.01, l2_reg=0, lip_reg=0, mean_reg=0),
+    }
+    cfg = defaults[method_name]
+
+    if args.sigma is not None:
+        cfg.sigma  = args.sigma
+        cfg.sigma2 = args.sigma
+    if args.particle_ratio is not None and hasattr(cfg, "particle_ratio"):
+        cfg.particle_ratio = args.particle_ratio
+
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# Helpers: filter catalogue
+# ---------------------------------------------------------------------------
+
+def _filter_catalogue(catalogue, level, perturbed):
+    """Return specs matching *level* / *perturbed* filters."""
+    parts = []
+    if level:
+        parts.append(level)
+    if perturbed:
+        parts.append("perturbed")
+
+    if not parts:
+        return catalogue
+
+    matching = [s for s in catalogue if all(p in s.name for p in parts)]
+    return matching
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = _build_parser()
+    args   = parser.parse_args()
+
+    from dualwcfm.experiments.exp_2d    import make_2d_experiments
+    from dualwcfm.experiments.exp_3d    import make_3d_experiments
+    from dualwcfm.experiments.exp_image import make_image_experiments
+    from dualwcfm.experiments.base      import run_experiment
+
+    # ── Catalogue factory ────────────────────────────────────────────────────
+    catalogue_factories = {
+        "2d":    make_2d_experiments,
+        "3d":    make_3d_experiments,
+        "image": make_image_experiments,
+    }
+
+    # ── Run everything ───────────────────────────────────────────────────────
+    if args.run_all:
+        all_specs = (
+            make_2d_experiments(args.output)
+            + make_3d_experiments(args.output)
+            + make_image_experiments(args.output)
+        )
+        if args.ablation:
+            # One AblationSuite per spec, comparing all requested methods.
+            for spec in all_specs:
+                _apply_train_overrides(spec, args)
+                _run_ablation(args, [spec])
+        else:
+            for spec in all_specs:
+                _apply_train_overrides(spec, args)
+                spec.method_cfg = _build_method_cfg(args.method, args)
+                run_experiment(spec, retrain=not args.load_pretrained, save_models=args.save_models)
+        return
+
+    if args.mode is None:
+        parser.print_help()
+        sys.exit(1)
+
+    catalogue = catalogue_factories[args.mode](args.output)
+    matching  = _filter_catalogue(catalogue, args.level, args.perturbed)
+
+    if not matching:
+        print(
+            f"No experiments match: mode={args.mode!r}, level={args.level!r}, "
+            f"perturbed={args.perturbed}"
+        )
+        sys.exit(1)
+
+    # ── Ablation study ───────────────────────────────────────────────────────
+    if args.ablation:
+        _run_ablation(args, matching)
+        return
+
+    # ── Single experiment ────────────────────────────────────────────────────
+    for spec in matching:
+        _apply_train_overrides(spec, args)
+        spec.method_cfg = _build_method_cfg(args.method, args)
+        run_experiment(spec, retrain=not args.load_pretrained, save_models=args.save_models)
+
+
+def _apply_train_overrides(spec, args: argparse.Namespace) -> None:
+    """Apply CLI training overrides (iterations, batch_size) to *spec* in place."""
+    if args.iterations is not None:
+        spec.train_cfg.iterations = args.iterations
+    if args.batch_size is not None:
+        spec.train_cfg.batch_size = args.batch_size
+
+
+def _run_ablation(args: argparse.Namespace, base_specs) -> None:
+    """Build and run an AblationSuite from CLI arguments."""
+    from dualwcfm.experiments.ablation import AblationSuite, AblationVariant, AblationRunner
+    from dualwcfm.methods.standard import StandardConfig
+    from dualwcfm.methods.mixture import MixtureConfig
+    from dualwcfm.methods.score import ScoreConfig
+
+    # Use the first matching spec as the base template
+    base_spec = base_specs[0]
+    _apply_train_overrides(base_spec, args)
+
+    # Build variants: methods × seeds
+    variants = []
+    for method_name in args.methods:
+        for seed in args.seeds:
+            cfg   = _build_method_cfg(method_name, args)
+            label = method_name.capitalize()
+            name  = f"{method_name}_seed{seed}" if len(args.seeds) > 1 else method_name
+            variants.append(
+                AblationVariant(
+                    name       = name,
+                    method_cfg = cfg,
+                    seed       = seed,
+                    label      = label if len(args.seeds) == 1 else f"{label} (seed {seed})",
+                )
+            )
+
+    suite_name = args.ablation_name or f"{base_spec.name}_ablation"
+    suite = AblationSuite(
+        name      = suite_name,
+        base_spec = base_spec,
+        variants  = variants,
+    )
+
+    runner = AblationRunner(
+        suite        = suite,
+        output_root  = args.output,
+        retrain      = not args.load_pretrained,
+        save_models  = args.save_models,
+    )
+    runner.run()
+
+    # Additional plots
+    runner.plot_final_metrics_bar()
+    runner.plot_final_distributions()
+    if base_spec.mode == "2d":
+        runner.plot_checkpoint_evolution()
+    if len(args.seeds) > 1:
+        runner.plot_seed_aggregate(metric="W2_nu")
+
+
+if __name__ == "__main__":
+    main()

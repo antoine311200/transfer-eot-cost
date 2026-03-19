@@ -71,6 +71,7 @@ data/
 *.pkl
 
 experiments/
+!src/dualwcfm/experiments/
 .claude
 *.gif
 *.csv

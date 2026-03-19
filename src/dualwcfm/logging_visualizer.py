@@ -287,7 +287,7 @@ class _LoggingMixin:
         path = self.output_dir / subfolder / name
         fig.savefig(path, dpi=80, bbox_inches="tight")
         plt.close(fig)
-        logger.debug(f"  [plot] saved → {path}")
+        logger.debug(f"  [plot] saved -> {path}")
 
     @staticmethod
     def _is_backward(epoch: int, trainer: "Trainer") -> bool:
@@ -316,7 +316,7 @@ class _LoggingMixin:
             pil_frames[0].save(
                 path, save_all=True, append_images=pil_frames[1:],
                 loop=0, duration=int(1000 / fps))
-            logger.info(f"  Timelapse [{path.stem}] → {path}")
+            logger.info(f"  Timelapse [{path.stem}] -> {path}")
         except ImportError:
             logger.warning("Pillow not installed; skipping GIF timelapse.")
 
@@ -357,7 +357,7 @@ class LoggingVisualizer(_LoggingMixin, Visualizer):
         fig = plt.gcf()
         for ax in fig.axes:
             self._apply_axis_lim(ax)
-        direction = "Backward ν→μ" if backward else "Forward μ→ν"
+        direction = "Backward ν->μ" if backward else "Forward μ->ν"
         fig.suptitle(f"Iter {epoch} ({direction})")
         self._accumulate(fig, "coupling")
         self._save_fig(fig, "coupling", f"coupling_{epoch:04d}.png")
@@ -432,7 +432,7 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
             trajectories=traj_3d, trajectory_stride=stride,
         )
         fig = plt.gcf()
-        direction = "Backward ν→μ" if backward else "Forward μ→ν"
+        direction = "Backward ν->μ" if backward else "Forward μ->ν"
         fig.suptitle(f"Iter {epoch} ({direction})")
         self._accumulate(fig, "coupling")
         self._save_fig(fig, "coupling", f"coupling_{epoch:04d}.png")
@@ -533,7 +533,8 @@ class LoggingVisualizerImage(_LoggingMixin, VisualizerImage):
         x, y = trainer.current_coupling.coupling_sample(n)
         x, y = x.to(trainer.device), y.to(trainer.device)
         start = y if backward else x
-        ref_target = (trainer.new_source if backward else trainer.new_target).sample(n).to(trainer.device)
+        end = x if backward else y
+        # ref_target = (trainer.new_source if backward else trainer.new_target).sample(n).to(trainer.device)
         evolved = trainer.flow_matching.evolve(
             start, trainer.strategy.get_flow(epoch, trainer.device)[0],
             num_steps=25, sigma=trainer._sigma, extend=True,
@@ -541,9 +542,9 @@ class LoggingVisualizerImage(_LoggingMixin, VisualizerImage):
         if is_image_tensor(evolved):
             evolved = evolved[:, :self.img_shape[0], :, :]
         s = trainer.scale
-        self._display_evolution((start * s).cpu(), (evolved * s).cpu(), (ref_target * s).cpu())
+        self._display_evolution((start * s).cpu(), (evolved * s).cpu(), (end * s).cpu())
         fig = plt.gcf()
-        direction = "Backward ν→μ" if backward else "Forward μ→ν"
+        direction = "Backward ν->μ" if backward else "Forward μ->ν"
         fig.suptitle(f"Iter {epoch} ({direction})")
         self._accumulate(fig, "coupling")
         self._save_fig(fig, "coupling", f"coupling_{epoch:04d}.png")

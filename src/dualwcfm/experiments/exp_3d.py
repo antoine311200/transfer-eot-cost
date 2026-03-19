@@ -1,0 +1,337 @@
+"""dualwcfm.experiments.exp_3d
+===============================
+3-D toy-distribution experiment catalogue.
+
+Design principle
+----------------
+Same as the 2-D catalogue: the reference coupling π encodes a z-axis rotation
+by θ° applied to Gaussian blobs at positions S₀.  The new source μ' and
+new target ν' live at *different* 3-D positions S₁ and follow the **same**
+rotation dynamic.
+
+Experiments
+-----------
+simple  – 90° z-rotation of a 2-blob GMM → generalised to a 3-blob GMM
+medium  – 120° z-rotation of an equilateral-triangle GMM → 4-blob rectangle
+complex – 60° z-rotation of a 4-blob square → 6-blob hexagonal pattern
+
+Each experiment exists in a *standard* and *perturbed* variant.  The perturbed
+variant adds an extra 30° tilt around the x-axis on the new target, probing
+robustness to out-of-plane displacement.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import List
+
+import torch
+
+from dualwcfm.config import FeedForwardConfig, TrainingConfig, VisualizeConfig
+from dualwcfm.distributions.coupling import CouplingDistribution
+from dualwcfm.distributions.distribution import Distribution
+from dualwcfm.methods.mixture import MixtureConfig
+from dualwcfm.experiments.base import ExperimentSpec, get_device
+
+
+# ---------------------------------------------------------------------------
+# 3-D geometry helpers
+# ---------------------------------------------------------------------------
+
+def _rot_z(centers: List[List[float]], degrees: float) -> List[List[float]]:
+    """Rotate a list of 3-D centres by *degrees* around the z-axis."""
+    rad = math.radians(degrees)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    return [
+        [cos_a * x - sin_a * y, sin_a * x + cos_a * y, z]
+        for x, y, z in centers
+    ]
+
+
+def _rot_x(centers: List[List[float]], degrees: float) -> List[List[float]]:
+    """Rotate a list of 3-D centres by *degrees* around the x-axis."""
+    rad = math.radians(degrees)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    return [
+        [x, cos_a * y - sin_a * z, sin_a * y + cos_a * z]
+        for x, y, z in centers
+    ]
+
+
+# ---------------------------------------------------------------------------
+# 3-D distributions
+# ---------------------------------------------------------------------------
+
+class GMM3DCoupling(CouplingDistribution):
+    """Paired Gaussian blobs in R³ encoding a known point-to-point transport.
+
+    Each mode k maps src_centers[k] → tgt_centers[k] with isotropic Gaussian
+    noise of standard deviation *blob_scale*.
+
+    Parameters
+    ----------
+    src_centers, tgt_centers:
+        Lists of 3-D centres of equal length.  Each (src, tgt) pair is one
+        transport mode.
+    blob_scale:
+        Standard deviation of the Gaussian blobs (same for source and target).
+    """
+
+    def __init__(
+        self,
+        src_centers: List[List[float]],
+        tgt_centers: List[List[float]],
+        blob_scale: float = 0.2,
+        device: torch.device = None,
+    ):
+        self._dev   = device or get_device()
+        self.src    = torch.tensor(src_centers, dtype=torch.float32, device=self._dev)
+        self.tgt    = torch.tensor(tgt_centers, dtype=torch.float32, device=self._dev)
+        self.scale  = blob_scale
+        assert self.src.shape == self.tgt.shape, "src and tgt must have the same number of blobs"
+        self.K      = self.src.shape[0]
+
+    def coupling_sample(self, n: int):
+        idx  = torch.randint(self.K, (n,), device=self._dev)
+        x    = self.src[idx] + torch.randn(n, 3, device=self._dev) * self.scale
+        y    = self.tgt[idx] + torch.randn(n, 3, device=self._dev) * self.scale
+        return x, y
+
+    def sample_init(self, n: int) -> torch.Tensor:
+        return self.coupling_sample(n)[0]
+
+    def sample_target(self, n: int) -> torch.Tensor:
+        return self.coupling_sample(n)[1]
+
+    def sample(self, n: int) -> torch.Tensor:
+        x, y = self.coupling_sample(n)
+        return torch.stack([x, y], dim=0)
+
+
+class GMM3DDistribution(Distribution):
+    """Isotropic Gaussian mixture in R³.
+
+    Used for the new source μ' and new target ν' in 3-D experiments.
+
+    Parameters
+    ----------
+    centers:
+        List of 3-D blob centres.
+    blob_scale:
+        Isotropic standard deviation shared by all blobs.
+    """
+
+    def __init__(
+        self,
+        centers: List[List[float]],
+        blob_scale: float = 0.25,
+        device: torch.device = None,
+    ):
+        self._dev    = device or get_device()
+        self.centers = torch.tensor(centers, dtype=torch.float32, device=self._dev)
+        self.scale   = blob_scale
+        self.K       = self.centers.shape[0]
+
+    def sample(self, n: int) -> torch.Tensor:
+        idx = torch.randint(self.K, (n,), device=self._dev)
+        return self.centers[idx] + torch.randn(n, 3, device=self._dev) * self.scale
+
+
+# ---------------------------------------------------------------------------
+# Default hyperparameter configs
+# ---------------------------------------------------------------------------
+
+def _default_train_cfg(device: torch.device) -> TrainingConfig:
+    return TrainingConfig(
+        device                   = device,
+        dataset_size             = 200_000,
+        marginal_epochs          = 5_000,
+        pretrain_epochs          = 10_000,
+        dual_epochs              = 200,
+        cfm_epochs               = 300,
+        advance_steps            = 100,
+        iterations               = 200,
+        scale_factor             = 100.0,
+        batch_size               = 2_048,
+        save_coupling_checkpoints= True,
+        save_model_checkpoints   = True,
+    )
+
+
+def _default_method_cfg() -> MixtureConfig:
+    return MixtureConfig(
+        sigma           = 0.05,
+        sigma2          = 0.05,
+        loss            = "weighted",
+        l2_reg          = 0,
+        lip_reg         = 0,
+        mean_reg        = 0,
+        use_noisy_field = False,
+        particle_ratio  = 0.25,
+    )
+
+
+# ---------------------------------------------------------------------------
+# simple – 90° z-rotation, 2 blobs → 3 blobs
+# ---------------------------------------------------------------------------
+
+def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
+    """90° z-rotation on 2 source blobs generalised to 3 new blobs.
+
+    Reference coupling
+        2 blobs at [±1.5, 0, 0], transport = R_z(90°).
+    New marginals
+        3 blobs at different 3-D positions;  target = R_z(90°) of source
+        (+ R_x(30°) extra tilt if perturbed).
+    """
+    device   = get_device()
+    ref_src  = [[-1.5, 0.0, 0.0], [1.5, 0.0, 0.0]]
+    ref_tgt  = _rot_z(ref_src, 90.0)
+    coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.25, device=device)
+
+    new_src_c = [[3.0, 1.0, 1.0], [3.0, -1.0, 1.0], [-3.0, 0.0, 1.0]]
+    new_tgt_c = _rot_z(new_src_c, 90.0)
+    if perturbed:
+        new_tgt_c = _rot_x(new_tgt_c, 30.0)
+    new_src = GMM3DDistribution(new_src_c, blob_scale=0.25, device=device)
+    new_tgt = GMM3DDistribution(new_tgt_c, blob_scale=0.25, device=device)
+
+    train_cfg  = _default_train_cfg(device)
+    method_cfg = _default_method_cfg()
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=200, trajectory_stride=2)
+
+    return ExperimentSpec(
+        name             = f"3d_simple{'_perturbed' if perturbed else ''}",
+        mode             = "3d",
+        initial_coupling = coupling,
+        new_source       = new_src,
+        new_target       = new_tgt,
+        transport_map    = None,
+        train_cfg        = train_cfg,
+        model_cfg        = model_cfg,
+        vis_cfg          = vis_cfg,
+        method_cfg       = method_cfg,
+        output_root      = output_root,
+    )
+
+
+# ---------------------------------------------------------------------------
+# medium – 120° z-rotation, equilateral triangle → 4-blob rectangle
+# ---------------------------------------------------------------------------
+
+def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
+    """120° z-rotation on an equilateral-triangle GMM generalised to a 4-blob GMM.
+
+    Reference coupling
+        3 blobs at the vertices of an equilateral triangle (r=2), transport = R_z(120°)
+        so that each vertex maps to the next (v₀→v₁→v₂→v₀).
+    New marginals
+        4-blob rectangle at [±4, ±2, 1];  target = R_z(120°) of source
+        (+ R_x(30°) if perturbed).
+    """
+    device = get_device()
+    r      = 2.0
+    ref_src = [
+        [r, 0.0, 0.0],
+        [r * math.cos(2 * math.pi / 3), r * math.sin(2 * math.pi / 3), 0.0],
+        [r * math.cos(4 * math.pi / 3), r * math.sin(4 * math.pi / 3), 0.0],
+    ]
+    ref_tgt  = _rot_z(ref_src, 120.0)
+    coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.3, device=device)
+
+    new_src_c = [[4.0, 2.0, 1.0], [4.0, -2.0, 1.0], [-4.0, 2.0, 1.0], [-4.0, -2.0, 1.0]]
+    new_tgt_c = _rot_z(new_src_c, 120.0)
+    if perturbed:
+        new_tgt_c = _rot_x(new_tgt_c, 30.0)
+    new_src = GMM3DDistribution(new_src_c, blob_scale=0.3, device=device)
+    new_tgt = GMM3DDistribution(new_tgt_c, blob_scale=0.3, device=device)
+
+    train_cfg  = _default_train_cfg(device)
+    method_cfg = _default_method_cfg()
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=200, trajectory_stride=2)
+
+    return ExperimentSpec(
+        name             = f"3d_medium{'_perturbed' if perturbed else ''}",
+        mode             = "3d",
+        initial_coupling = coupling,
+        new_source       = new_src,
+        new_target       = new_tgt,
+        transport_map    = None,
+        train_cfg        = train_cfg,
+        model_cfg        = model_cfg,
+        vis_cfg          = vis_cfg,
+        method_cfg       = method_cfg,
+        output_root      = output_root,
+    )
+
+
+# ---------------------------------------------------------------------------
+# complex – 60° z-rotation, 4-blob square → 6-blob hexagon
+# ---------------------------------------------------------------------------
+
+def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
+    """60° z-rotation on a 4-blob square generalised to a 6-blob hexagonal pattern.
+
+    Reference coupling
+        4-blob axis-aligned square at r=2 in the z=0 plane, transport = R_z(60°).
+    New marginals
+        6-blob hexagon at r=4 in the z=2 plane;  target = R_z(60°) of source
+        (+ R_x(30°) if perturbed).
+    """
+    device = get_device()
+    r0     = 2.0
+    ref_src = [
+        [ r0,  0.0, 0.0], [0.0,  r0, 0.0],
+        [-r0,  0.0, 0.0], [0.0, -r0, 0.0],
+    ]
+    ref_tgt  = _rot_z(ref_src, 60.0)
+    coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.25, device=device)
+
+    r1, z1 = 4.0, 2.0
+    new_src_c = [
+        [r1 * math.cos(k * math.pi / 3), r1 * math.sin(k * math.pi / 3), z1]
+        for k in range(6)
+    ]
+    new_tgt_c = _rot_z(new_src_c, 60.0)
+    if perturbed:
+        new_tgt_c = _rot_x(new_tgt_c, 30.0)
+    new_src = GMM3DDistribution(new_src_c, blob_scale=0.3, device=device)
+    new_tgt = GMM3DDistribution(new_tgt_c, blob_scale=0.3, device=device)
+
+    train_cfg              = _default_train_cfg(device)
+    train_cfg.iterations   = 200
+    method_cfg             = _default_method_cfg()
+    model_cfg              = FeedForwardConfig(dimension=3, hidden_size=256)
+    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=200, trajectory_stride=2)
+
+    return ExperimentSpec(
+        name             = f"3d_complex{'_perturbed' if perturbed else ''}",
+        mode             = "3d",
+        initial_coupling = coupling,
+        new_source       = new_src,
+        new_target       = new_tgt,
+        transport_map    = None,
+        train_cfg        = train_cfg,
+        model_cfg        = model_cfg,
+        vis_cfg          = vis_cfg,
+        method_cfg       = method_cfg,
+        output_root      = output_root,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public catalogue
+# ---------------------------------------------------------------------------
+
+def make_3d_experiments(output_root: str = "results") -> List[ExperimentSpec]:
+    """Return all 3-D experiment specs (simple / medium / complex × standard / perturbed)."""
+    return [
+        _simple(False,  output_root),
+        _simple(True,   output_root),
+        _medium(False,  output_root),
+        _medium(True,   output_root),
+        _complex(False, output_root),
+        _complex(True,  output_root),
+    ]

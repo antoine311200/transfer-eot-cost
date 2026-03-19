@@ -117,12 +117,12 @@ class Trainer:
                     if os.path.exists(src):
                         shutil.copy2(src, os.path.join(iter_dir, f"chunk_{chunk_idx:06d}.pt"))
 
-                logger.info(f"  [ckpt] coupling saved → {iter_dir}")
+                logger.info(f"  [ckpt] coupling saved -> {iter_dir}")
             elif isinstance(coupling, FixedSizeCouplingDistribution):
                 path = os.path.join(coupling_dir, f"iter_{iteration:04d}.pt")
                 torch.save({"x": coupling.dataset[0].cpu(), "y": coupling.dataset[1].cpu()}, path)
 
-                logger.info(f"  [ckpt] coupling saved → {path}")
+                logger.info(f"  [ckpt] coupling saved -> {path}")
 
         if self.config.save_model_checkpoints:
             mdl_dir = os.path.join(checkpoint_root, "models")
@@ -131,14 +131,14 @@ class Trainer:
             path_fwd = os.path.join(mdl_dir, f"iter_{iteration:04d}_forward.pth")
             torch.save(fwd.state_dict(), path_fwd)
 
-            logger.info(f"  [ckpt] forward model saved → {path_fwd}")
+            logger.info(f"  [ckpt] forward model saved -> {path_fwd}")
 
             if isinstance(self.strategy, BidirectionalStrategy):
                 bwd, _ = self.strategy.get_flow(1, self.device)
                 path_bwd = os.path.join(mdl_dir, f"iter_{iteration:04d}_backward.pth")
                 torch.save(bwd.state_dict(), path_bwd)
 
-                logger.info(f"  [ckpt] backward model saved → {path_bwd}")
+                logger.info(f"  [ckpt] backward model saved -> {path_bwd}")
 
     # ------------------------------------------------------------------
     # Main training entry point
