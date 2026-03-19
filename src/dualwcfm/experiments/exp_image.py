@@ -274,8 +274,6 @@ def _default_method_cfg() -> MixtureConfig:
         mean_reg        = 0,
         use_noisy_field = False,
         particle_ratio  = 0.25,
-        # Constant reduced LR for all iterations: 2e-4 * 0.5 = 1e-4 flat.
-        # Switch to lr_cosine_decay=True if cfm_epochs is increased to ~1000+.
         lr_cosine_decay = False,
         lr_min_factor   = 0.5,
     )

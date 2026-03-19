@@ -104,6 +104,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     train.add_argument(
+        "--pretrain-dir", default=None, dest="pretrain_dir", metavar="PATH",
+        help=(
+            "Path to a directory containing pre-trained .pth weight files "
+            "(initial_forward_model.pth, initial_mu_model.pth, etc.). "
+            "The pretrain phase is skipped and these weights are used instead. "
+            "Takes precedence over --load-pretrained."
+        ),
+    )
+    train.add_argument(
         "--no-save-models", action="store_false", dest="save_models",
         help="Do not write model checkpoints to disk.",
     )
@@ -149,11 +158,21 @@ def _build_method_cfg(method_name: str, args: argparse.Namespace):
     from dualwcfm.methods.mixture import MixtureConfig
     from dualwcfm.methods.score import ScoreConfig
 
+    _shared = dict(
+        sigma           = 0.05,
+        sigma2          = 0.05,
+        loss            = "weighted",
+        l2_reg          = 0,
+        lip_reg         = 0,
+        mean_reg        = 0,
+        use_noisy_field = False,
+        lr_cosine_decay = False,
+        lr_min_factor   = 0.5,
+    )
     defaults = {
-        "standard": StandardConfig(sigma=0.01, sigma2=0.01, l2_reg=0, lip_reg=0, mean_reg=0),
-        "mixture":  MixtureConfig( sigma=0.01, sigma2=0.01, l2_reg=0, lip_reg=0, mean_reg=0,
-                                   particle_ratio=0.25),
-        "score":    ScoreConfig(   sigma=0.01, sigma2=0.01, l2_reg=0, lip_reg=0, mean_reg=0),
+        "standard": StandardConfig(**_shared),
+        "mixture":  MixtureConfig( **_shared, particle_ratio=0.25),
+        "score":    ScoreConfig(   **_shared),
     }
     cfg = defaults[method_name]
 
@@ -221,7 +240,12 @@ def main() -> None:
             for spec in all_specs:
                 _apply_train_overrides(spec, args)
                 spec.method_cfg = _build_method_cfg(args.method, args)
-                run_experiment(spec, retrain=not args.load_pretrained, save_models=args.save_models)
+                run_experiment(
+                    spec,
+                    retrain      = not args.load_pretrained,
+                    save_models  = args.save_models,
+                    pretrain_dir = args.pretrain_dir,
+                )
         return
 
     if args.mode is None:
@@ -247,7 +271,12 @@ def main() -> None:
     for spec in matching:
         _apply_train_overrides(spec, args)
         spec.method_cfg = _build_method_cfg(args.method, args)
-        run_experiment(spec, retrain=not args.load_pretrained, save_models=args.save_models)
+        run_experiment(
+            spec,
+            retrain      = not args.load_pretrained,
+            save_models  = args.save_models,
+            pretrain_dir = args.pretrain_dir,
+        )
 
 
 def _apply_train_overrides(spec, args: argparse.Namespace) -> None:

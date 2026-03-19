@@ -177,6 +177,7 @@ def run_experiment(
     spec: ExperimentSpec,
     retrain: bool = True,
     save_models: bool = True,
+    pretrain_dir: Optional[str] = None,
 ) -> None:
     """Build all objects from *spec* and run the full training loop.
 
@@ -187,8 +188,15 @@ def run_experiment(
     retrain:
         If *True* (default) run the full pretrain phase.  Set *False* to skip
         marginal training and load weights saved under ``{output_dir}/models/``.
+        Automatically set to *False* when *pretrain_dir* is provided.
     save_models:
         Whether to write model checkpoints to disk after training.
+    pretrain_dir:
+        Path to a directory containing pre-trained ``.pth`` weight files
+        (``initial_forward_model.pth``, ``initial_mu_model.pth``, etc.).
+        When supplied the pretrain phase is skipped entirely — the weights are
+        copied into the experiment's own ``models/`` directory and loaded from
+        there, so iteration checkpoints still land in the right place.
     """
     setup_logging(spec.output_dir)
     logger.info("\n%s", "=" * 70)
@@ -200,6 +208,22 @@ def run_experiment(
     os.makedirs(spec.output_dir, exist_ok=True)
     model_dir = os.path.join(spec.output_dir, "models") if save_models else None
     device    = spec.train_cfg.device
+
+    # --- Pre-trained weights ----------------------------------------------
+    if pretrain_dir is not None:
+        import shutil
+        if not os.path.isdir(pretrain_dir):
+            raise FileNotFoundError(f"pretrain_dir does not exist: {pretrain_dir}")
+        os.makedirs(model_dir, exist_ok=True)
+        copied = []
+        for fname in os.listdir(pretrain_dir):
+            if fname.endswith(".pth"):
+                shutil.copy2(os.path.join(pretrain_dir, fname), model_dir)
+                copied.append(fname)
+        if not copied:
+            raise FileNotFoundError(f"No .pth files found in pretrain_dir: {pretrain_dir}")
+        logger.info("  Loaded pretrained weights from %s (%s)", pretrain_dir, ", ".join(sorted(copied)))
+        retrain = False
 
     # --- Method -----------------------------------------------------------
     method_class = METHOD_REGISTRY.get(type(spec.method_cfg), MixtureMethod)

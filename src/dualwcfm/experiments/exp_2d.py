@@ -41,19 +41,19 @@ from dualwcfm.experiments.base import ExperimentSpec, get_device
 def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 200_000,
+        dataset_size             = 1_000_000,
         marginal_epochs          = 5_000,
         pretrain_epochs          = 10_000,
         dual_epochs              = 100,
         cfm_epochs               = 250,
         advance_steps            = 100,
-        iterations               = 100,
+        iterations               = 50,
         num_rectified_flow       = 1,
         scale_factor             = 100.0,
         batch_size               = 2_048 * 4,
         coupling_chunk_size      = 1_000,
-        save_coupling_checkpoints= True,
-        save_model_checkpoints   = True,
+        save_coupling_checkpoints= False,
+        save_model_checkpoints   = False,
     )
 
 
@@ -66,7 +66,9 @@ def _default_method_cfg() -> MixtureConfig:
         lip_reg        = 0,
         mean_reg       = 0,
         use_noisy_field= False,
-        particle_ratio = 0.25,
+        particle_ratio = 0.1,
+        lr_cosine_decay = False,
+        lr_min_factor   = 0.5,
     )
 
 
@@ -110,7 +112,7 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=2, hidden_size=64)
+    model_cfg  = FeedForwardConfig(dimension=2, hidden_size=32)
     vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=300, trajectory_stride=2)
 
     return ExperimentSpec(
@@ -158,7 +160,7 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg              = _default_train_cfg(device)
     train_cfg.iterations   = 100
     method_cfg             = _default_method_cfg()
-    model_cfg              = FeedForwardConfig(dimension=2, hidden_size=128)
+    model_cfg              = FeedForwardConfig(dimension=2, hidden_size=32)
     vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=2_000, trajectory_stride=2)
 
     return ExperimentSpec(
@@ -210,7 +212,7 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg.dual_epochs    = 200
     train_cfg.cfm_epochs     = 300
     method_cfg               = _default_method_cfg()
-    model_cfg                = FeedForwardConfig(dimension=2, hidden_size=128)
+    model_cfg                = FeedForwardConfig(dimension=2, hidden_size=32)
     vis_cfg                  = VisualizeConfig(show_each=1, n_trajectories=400, trajectory_stride=2)
 
     return ExperimentSpec(
