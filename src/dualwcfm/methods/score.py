@@ -21,6 +21,59 @@ if TYPE_CHECKING:
 logger = logging.getLogger("dualwcfm")
 
 
+# ---------------------------------------------------------------------------
+# Module-level helpers (not class methods — avoids any static-method binding
+# issues with aggressive linters/formatters)
+# ---------------------------------------------------------------------------
+
+def _compute_ksd(z: torch.Tensor, score: torch.Tensor, n_sub: int = 200) -> torch.Tensor:
+    """V-statistic estimate of the kernelised Stein discrepancy.
+
+    Uses an RBF kernel k(x,y) = exp(−‖x−y‖²/2h²) with the median heuristic
+    for bandwidth h.  KSD²(q,p) = E_{x,y~q}[k_p(x,y)] where
+
+        k_p(x,y) = s(x)ᵀs(y)·k + s(x)ᵀ∇_y k + ∇_x kᵀs(y) + tr(∇_x∇_y k)
+
+    Returns the (non-negative) scalar KSD = √max(0, mean(k_p)).
+    """
+    N = min(n_sub, z.shape[0])
+    idx = torch.randperm(z.shape[0], device=z.device)[:N]
+    z, score = z[idx], score[idx]
+    d = z.shape[1]
+
+    dists_sq = torch.cdist(z, z).pow(2)                              # (N, N)
+    h2 = (dists_sq.sqrt().median().pow(2) / (2 * math.log(N + 1))).clamp(min=1e-6)
+    K = torch.exp(-dists_sq / (2 * h2))                              # (N, N)
+
+    diff = z.unsqueeze(1) - z.unsqueeze(0)                           # (N, N, d)
+    grad_y_K = diff / h2 * K.unsqueeze(-1)                           # (N, N, d)
+
+    term1 = K * (score @ score.T)                                     # s(x)ᵀs(y)·k
+    term2 = (score.unsqueeze(1) * grad_y_K).sum(dim=-1)              # s(x)ᵀ∇_y k
+    term3 = (-grad_y_K * score.unsqueeze(0)).sum(dim=-1)             # ∇_x kᵀs(y)
+    term4 = K * (d / h2 - dists_sq / h2.pow(2))                      # tr(∇_x∇_y k)
+
+    return (term1 + term2 + term3 + term4).mean().clamp(min=0.0).sqrt()
+
+
+def _hutchinson_div(
+    model: nn.Module, t: torch.Tensor, x: torch.Tensor, n_probes: int = 1
+) -> torch.Tensor:
+    """Estimate tr(∂ model(t,x) / ∂x) via Hutchinson's trace estimator.
+
+    Returns shape (B,).
+    """
+    total = torch.zeros(x.shape[0], device=x.device)
+    for _ in range(n_probes):
+        v = torch.randn_like(x)
+        x_req = x.detach().requires_grad_(True)
+        with torch.enable_grad():
+            out = model(t.detach(), x_req)
+            vjp = torch.autograd.grad((out * v).sum(), x_req, create_graph=False)[0]
+        total = total + (vjp.detach() * v).sum(dim=1)
+    return total / n_probes
+
+
 @dataclass
 class ScoreConfig(StandardConfig):
     """StandardConfig + score matching of the initial coupling pi_0."""
@@ -98,7 +151,7 @@ class ScoreMethod(StandardMethod):
         )
         self.score_model.train()
 
-        pbar = trange(self.config.score_epochs, desc="Score Matching (π₀)")
+        pbar = trange(self.config.score_epochs, desc="Score Matching (pi_0)")
         for _ in pbar:
             x0, y0 = trainer.initial_coupling.coupling_sample(batch_size)
             x0, y0 = x0.to(device), y0.to(device)
@@ -106,7 +159,8 @@ class ScoreMethod(StandardMethod):
 
             eps = torch.randn_like(xy)
             score = self.score_model(xy + sigma * eps)
-            loss = ((score + eps / sigma) ** 2).mean()
+            # loss = ((score + eps / sigma) ** 2).mean()
+            loss = ((score * sigma + eps) ** 2).sum(dim=1).mean()
 
             self.score_optimizer.zero_grad()
             loss.backward()
@@ -232,16 +286,16 @@ class ScoreMethod(StandardMethod):
                     dot = (u_prev * s_x).sum(dim=1) + (v_prev * s_y).sum(dim=1)  # (B,)
 
                 # ∇·V_{t-Δ} = ∇_x·u_{t-Δ}(x) + ∇_y·v_{t-Δ}(y)  via Hutchinson
-                div_u = self._hutchinson_div(mu_model, t_prev_tensor, x0)  # (B,)
-                div_v = self._hutchinson_div(nu_model, t_prev_tensor, x1)  # (B,)
+                div_u = _hutchinson_div(mu_model, t_prev_tensor, x0)  # (B,)
+                div_v = _hutchinson_div(nu_model, t_prev_tensor, x1)  # (B,)
 
                 with torch.no_grad():
                     log_w = log_w + delta * (dot + div_u.detach() + div_v.detach())
 
             with torch.no_grad():
-                log_w = log_w - log_w.max()
+            #     log_w = log_w - log_w.max()
                 w = torch.exp(log_w)
-                w = w / w.sum() * batch_size  # (B,), E[w] = 1
+            #     w = w / w.sum() * batch_size  # (B,), E[w] = 1
 
             # ---- CFM loss ----
             # Backward direction swap applied only to the CFM interpolation
@@ -313,7 +367,7 @@ class ScoreMethod(StandardMethod):
         self.previous_score_model.eval()
 
     # ------------------------------------------------------------------
-    # Score diagnostics
+    # Score diagnostics  (helpers are module-level: _compute_ksd, _hutchinson_div)
     # ------------------------------------------------------------------
 
     def _log_score_diagnostics(self, trainer: Trainer, tag: str) -> None:
@@ -346,7 +400,7 @@ class ScoreMethod(StandardMethod):
             xy_probe = torch.cat([xp, yp], dim=1)
             s_probe = self.score_model(xy_probe)
 
-            ksd = self._compute_ksd(xy_probe, s_probe).item()
+            ksd = _compute_ksd(xy_probe, s_probe).item()
 
             if self.previous_score_model is not None:
                 s_prev_probe = self.previous_score_model(xy_probe)
@@ -355,66 +409,7 @@ class ScoreMethod(StandardMethod):
                 drift = float("nan")
 
         logger.info(
-            f"[Score {tag}]  ‖s‖={norm:.4f}  KSD={ksd:.6f}  drift={drift:.4f}"
+            f"[Score {tag}]  ||s||={norm:.4f}  KSD={ksd:.6f}  drift={drift:.4f}"
         )
         self.score_model.train()
 
-    @staticmethod
-    def _compute_ksd(
-        z: torch.Tensor, score: torch.Tensor, n_sub: int = 200
-    ) -> torch.Tensor:
-        """V-statistic estimate of the kernelised Stein discrepancy.
-
-        Uses an RBF kernel k(x,y) = exp(−‖x−y‖²/2h²) with the median
-        heuristic for bandwidth h.  KSD²(q,p) = E_{x,y~q}[k_p(x,y)] where
-
-            k_p(x,y) = s(x)ᵀs(y)·k + s(x)ᵀ∇_y k + ∇_x kᵀs(y) + tr(∇_x∇_y k)
-
-        Returns the (non-negative) scalar KSD = √max(0, mean(k_p)).
-        """
-        N = min(n_sub, z.shape[0])
-        idx = torch.randperm(z.shape[0], device=z.device)[:N]
-        z, score = z[idx], score[idx]
-        d = z.shape[1]
-
-        # Pairwise squared distances and RBF kernel
-        dists_sq = torch.cdist(z, z).pow(2)                          # (N, N)
-        h2 = (dists_sq.sqrt().median().pow(2) / (2 * math.log(N + 1))).clamp(min=1e-6)
-        K = torch.exp(-dists_sq / (2 * h2))                          # (N, N)
-
-        # diff[i,j] = z_i − z_j  →  ∇_y k = diff/h² · K,  ∇_x k = −diff/h² · K
-        diff = z.unsqueeze(1) - z.unsqueeze(0)                       # (N, N, d)
-        grad_y_K = diff / h2 * K.unsqueeze(-1)                       # (N, N, d)
-
-        # Four terms of the Stein kernel
-        term1 = K * (score @ score.T)                                 # (N, N)
-        term2 = (score.unsqueeze(1) * grad_y_K).sum(dim=-1)          # s(x)ᵀ ∇_y k
-        term3 = (-grad_y_K * score.unsqueeze(0)).sum(dim=-1)         # ∇_x kᵀ s(y)
-        term4 = K * (d / h2 - dists_sq / h2.pow(2))                  # tr(∇_x ∇_y k)
-
-        ksd_sq = (term1 + term2 + term3 + term4).mean()
-        return ksd_sq.clamp(min=0.0).sqrt()
-
-    # ------------------------------------------------------------------
-    # Helper: Hutchinson divergence estimator
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _hutchinson_div(
-        model: nn.Module, t: torch.Tensor, x: torch.Tensor, n_probes: int = 1
-    ) -> torch.Tensor:
-        """Estimate tr(∂ model(t,x) / ∂x) via Hutchinson's trace estimator.
-
-        Returns shape (B,).
-        """
-        total = torch.zeros(x.shape[0], device=x.device)
-        for _ in range(n_probes):
-            v = torch.randn_like(x)
-            x_req = x.detach().requires_grad_(True)
-            with torch.enable_grad():
-                out = model(t.detach(), x_req)
-                vjp = torch.autograd.grad(
-                    (out * v).sum(), x_req, create_graph=False
-                )[0]
-            total = total + (vjp.detach() * v).sum(dim=1)
-        return total / n_probes
