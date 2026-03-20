@@ -497,16 +497,13 @@ class StandardMethod(Method):
 
         trainer.visualizer.at_flow_matching_end(iteration, trainer, flow_ctx, start_ctx)
 
-        # Transport cost diagnostic
+        # Transport cost diagnostic — always evaluate on new marginal samples so
+        # that T(x) is well-defined and the metric tracks adaptation progress.
         n_diag = 10000 if not is_image else min(256, batch_size)
         if backward:
-            x0_tc = trainer.initial_coupling.sample_target(n_diag).to(device)
-            x1_tc = trainer.new_target.sample(n_diag).to(device)
+            xt_tc = trainer.new_target.sample(n_diag).to(device)
         else:
-            x0_tc = trainer.initial_coupling.sample_init(n_diag).to(device)
-            x1_tc = trainer.new_source.sample(n_diag).to(device)
-        t_full = torch.full((n_diag, 1), ctx["t"], device=device)
-        xt_tc = trainer.flow_matching.interpolate(x0_tc, x1_tc, t_full, trainer._sigma)
+            xt_tc = trainer.new_source.sample(n_diag).to(device)
 
         model.eval()
         _evolved = trainer.flow_matching.evolve(xt_tc, model, num_steps=100, sigma=trainer._sigma, extend=True)

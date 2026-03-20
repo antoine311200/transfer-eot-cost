@@ -236,10 +236,10 @@ def _default_train_cfg(device: torch.device, dim: int) -> TrainingConfig:
         dual_epochs              = 150,
         cfm_epochs               = 300,
         advance_steps            = 100,
-        iterations               = 100,
+        iterations               = 50,
         scale_factor             = -1,           # auto-detect
         batch_size               = 4_096,
-        save_coupling_checkpoints= True,
+        save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
     )
 
@@ -463,7 +463,7 @@ def _gaussian_iso_nd(dim: int, eps: float, output_root: str) -> ExperimentSpec:
     train_cfg.dataset_size   = 200_000
     train_cfg.dual_epochs    = 200
     train_cfg.cfm_epochs     = 400
-    train_cfg.iterations     = 150
+    train_cfg.iterations     = 50
     method_cfg = _default_method_cfg()
     method_cfg.sigma  = eps / 4
     method_cfg.sigma2 = eps / 4

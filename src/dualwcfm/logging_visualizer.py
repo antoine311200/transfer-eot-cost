@@ -176,11 +176,38 @@ class _LoggingMixin:
         energy_dist_nu = _ed(y, nu_ref)
         sinkhorn_div   = _sd(y, nu_ref)
 
-        # Ground-truth map errors (only when T is available)
-        map_err_fwd = _map_err(x, y, self._transport_map) \
-            if self._transport_map is not None else ""
-        map_err_bwd = _map_err(y, x, self._inverse_transport_map) \
-            if self._inverse_transport_map is not None else ""
+        # Ground-truth map errors — evolve fresh new-marginal samples through
+        # the current flow model and compare against the analytical transport T.
+        # This correctly tracks adaptation: for non-perturbed experiments the
+        # pretrained model already knows T so the error stays near 0; for
+        # perturbed experiments it starts high and decreases as the model adapts.
+        n_map = min(n, 2_000)
+        fwd_model = getattr(trainer.strategy, "forward_model",  None)
+        bwd_model = getattr(trainer.strategy, "backward_model", None)
+
+        if self._transport_map is not None and fwd_model is not None:
+            x_eval = trainer.new_source.sample(n_map).to(device)
+            with torch.no_grad():
+                evolved = trainer.flow_matching.evolve(
+                    x_eval, fwd_model, num_steps=100, sigma=0.0, extend=True)
+                y_hat = (evolved[:, : x_eval.shape[1], :, :]
+                         if is_image_tensor(x_eval)
+                         else evolved[:, : trainer.strategy.config.dimension])
+            map_err_fwd = _map_err(x_eval.cpu(), y_hat.cpu(), self._transport_map)
+        else:
+            map_err_fwd = ""
+
+        if self._inverse_transport_map is not None and bwd_model is not None:
+            y_eval = trainer.new_target.sample(n_map).to(device)
+            with torch.no_grad():
+                evolved = trainer.flow_matching.evolve(
+                    y_eval, bwd_model, num_steps=100, sigma=0.0, extend=True)
+                x_hat = (evolved[:, : y_eval.shape[1], :, :]
+                         if is_image_tensor(y_eval)
+                         else evolved[:, : trainer.strategy.config.dimension])
+            map_err_bwd = _map_err(y_eval.cpu(), x_hat.cpu(), self._inverse_transport_map)
+        else:
+            map_err_bwd = ""
 
         row = {
             "iteration":      time_step,
@@ -531,24 +558,36 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
             )[:, :trainer.strategy.config.dimension]
         nu_flow_cpu = nu_flow.cpu()
 
+        s = trainer.scale
+        # Scale all point clouds consistently with display()
+        mu_s        = mu_s        * s
+        nu_s        = nu_s        * s
+        mu_cpu      = mu_cpu      * s
+        nu_cpu      = nu_cpu      * s
+        nu_flow_cpu = nu_flow_cpu * s
+
+        # Data-adaptive axis limits with 10 % padding
+        all_pts = torch.cat([mu_s, nu_s, mu_cpu, nu_cpu, nu_flow_cpu], dim=0)
+        lo = all_pts.min().item()
+        hi = all_pts.max().item()
+        pad = (hi - lo) * 0.10 + 0.1
+        L_lo, L_hi = lo - pad, hi + pad
+
         fig = plt.figure(figsize=(8, 8))
         ax = fig.add_subplot(111, projection="3d")
-        ax.scatter(mu_s[:, 0], mu_s[:, 1], mu_s[:, 2], c="blue", alpha=0.1, depthshade=True, s=3)
-        ax.scatter(nu_s[:, 0], nu_s[:, 1], nu_s[:, 2], c="red", alpha=0.1, depthshade=True, s=3)
-        ax.scatter(mu_cpu[:, 0], mu_cpu[:, 1], mu_cpu[:, 2], c="purple", marker="x", alpha=0.75, depthshade=True)
-        ax.scatter(nu_cpu[:, 0], nu_cpu[:, 1], nu_cpu[:, 2], c="orange", marker="x", alpha=0.75, depthshade=True)
+        ax.scatter(mu_s[:, 0], mu_s[:, 1], mu_s[:, 2], c="blue", alpha=0.1, depthshade=True, s=3, label=r"$\mu_t$")
+        ax.scatter(nu_s[:, 0], nu_s[:, 1], nu_s[:, 2], c="red", alpha=0.1, depthshade=True, s=3, label=r"$\nu_t$")
+        ax.scatter(mu_cpu[:, 0], mu_cpu[:, 1], mu_cpu[:, 2], c="purple", marker="x", alpha=0.75, depthshade=True, label=r"$\pi_t^{(1)}$")
+        ax.scatter(nu_cpu[:, 0], nu_cpu[:, 1], nu_cpu[:, 2], c="orange", marker="x", alpha=0.75, depthshade=True, label=r"$\pi_t^{(2)}$")
         ax.scatter(nu_flow_cpu[:, 0], nu_flow_cpu[:, 1], nu_flow_cpu[:, 2],
-                   c="green", marker="o", alpha=0.75, depthshade=True, s=50, label="Flow Evolved")
+                   c="green", marker="o", alpha=0.75, depthshade=True, s=50, label="Flow evolved")
         dist = torch.norm(nu_cpu - mu_cpu, dim=1)
         for j in range(mu_cpu.shape[0]):
             ax.plot([mu_cpu[j, 0], nu_cpu[j, 0]], [mu_cpu[j, 1], nu_cpu[j, 1]],
                     [mu_cpu[j, 2], nu_cpu[j, 2]], color="gray", alpha=0.8)
-        L = 1.2
-        ax.plot([-L, L], [0, 0], [0, 0], color="k", linewidth=1)
-        ax.plot([0, 0], [-L, L], [0, 0], color="k", linewidth=1)
-        ax.plot([0, 0], [0, 0], [-L, L], color="k", linewidth=1)
-        ax.set_xlim([-L, L]); ax.set_ylim([-L, L]); ax.set_zlim([-L, L])
+        ax.set_xlim([L_lo, L_hi]); ax.set_ylim([L_lo, L_hi]); ax.set_zlim([L_lo, L_hi])
         ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
+        ax.legend(fontsize=7, loc="upper left")
         sm_cb = plt.cm.ScalarMappable(cmap="viridis")
         sm_cb.set_array(dist.numpy())
         plt.colorbar(sm_cb, ax=ax, shrink=0.6, label="Transport length")

@@ -153,8 +153,8 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
         iterations               = 200,
         scale_factor             = 100.0,
         batch_size               = 2_048,
-        save_coupling_checkpoints= True,
-        save_model_checkpoints   = True,
+        save_coupling_checkpoints= False,
+        save_model_checkpoints   = False,
     )
 
 

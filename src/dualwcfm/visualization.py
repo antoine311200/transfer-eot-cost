@@ -302,36 +302,59 @@ class Visualizer:
         n_traj = min(self.config.n_trajectories, start_points.shape[0])
         segments = []
 
+        # For dim > 2, project onto first two principal components for visualisation
+        dim = start_points.shape[1] if start_points.ndim == 2 else 2
+        if dim > 2:
+            all_pts = torch.cat([start_points, end_points], dim=0).numpy()
+            mean = all_pts.mean(axis=0, keepdims=True)
+            centered = all_pts - mean
+            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+            proj = Vt[:2]  # (2, dim)
+            def _project(t: torch.Tensor) -> np.ndarray:
+                return (t.numpy() - mean) @ proj.T
+            ax.set_xlabel("PC1")
+            ax.set_ylabel("PC2")
+            ax_label = " (PCA projection)"
+        else:
+            def _project(t: torch.Tensor) -> np.ndarray:
+                return t.numpy()[:, :2]
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            ax_label = ""
+
+        start_2d = _project(start_points)
+        end_2d   = _project(end_points)
+
         if trajectories is not None:
-            traj_np = trajectories[::max(1, trajectory_stride), :n_traj, :2].numpy()
-            if traj_np.shape[0] == 0 or not np.array_equal(traj_np[-1], end_points[:n_traj].cpu().numpy()):
-                traj_np = np.concatenate([traj_np, end_points[:n_traj].cpu().numpy()[None, :, :2]], axis=0)
+            traj_pts = trajectories[::max(1, trajectory_stride), :n_traj, :]  # (T, n_traj, dim)
+            T_steps, _, _ = traj_pts.shape
+            traj_2d = np.stack([_project(traj_pts[t]) for t in range(T_steps)], axis=0)  # (T, n_traj, 2)
+            if T_steps == 0 or not np.array_equal(traj_2d[-1], end_2d[:n_traj]):
+                traj_2d = np.concatenate([traj_2d, end_2d[:n_traj][None]], axis=0)
             for j in range(n_traj):
-                pts = traj_np[:, j, :]
+                pts = traj_2d[:, j, :]
                 segs = np.stack([pts[:-1], pts[1:]], axis=1)
                 segments.extend(segs)
-            mid_points = torch.from_numpy(traj_np[len(traj_np) // 2])
+            mid_points_2d = traj_2d[len(traj_2d) // 2]
         else:
             for j in range(n_traj):
-                points = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
-                segs = np.stack([points[:-1], points[1:]], axis=1)
-                segments.extend(segs)
-            mid_points = (start_points + end_points) / 2
+                seg = np.stack([start_2d[j], end_2d[j]], axis=0)  # (2, 2)
+                segments.append(seg)
+            mid_points_2d = (start_2d + end_2d) / 2
 
         lc = LineCollection(segments, colors="black", alpha=0.2, linewidths=0.8)
         ax.add_collection(lc)
 
-        if target_points is not None:
-            ax.scatter(target_points[:, 0], target_points[:, 1], c="orange", s=20, alpha=0.5, zorder=4, label="Target", edgecolors='k')
-        ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
-        ax.scatter(start_points[:n_traj, 0], start_points[:n_traj, 1], c="red", s=20, alpha=0.5, zorder=4, label="Start", edgecolors='k')
-        ax.scatter(end_points[:n_traj, 0], end_points[:n_traj, 1], c="green", s=20, alpha=0.5, zorder=4, label="End", edgecolors='k')
+        target_2d = _project(target_points) if target_points is not None else None
+        if target_2d is not None:
+            ax.scatter(target_2d[:, 0], target_2d[:, 1], c="orange", s=20, alpha=0.5, zorder=4, label="Target", edgecolors='k')
+        ax.scatter(mid_points_2d[:n_traj, 0], mid_points_2d[:n_traj, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
+        ax.scatter(start_2d[:n_traj, 0], start_2d[:n_traj, 1], c="red", s=20, alpha=0.5, zorder=4, label="Start", edgecolors='k')
+        ax.scatter(end_2d[:n_traj, 0], end_2d[:n_traj, 1], c="green", s=20, alpha=0.5, zorder=4, label="End", edgecolors='k')
         # ax.xaxis.set_major_locator(MultipleLocator(0.25))
         # ax.yaxis.set_major_locator(MultipleLocator(0.25))
         ax.grid(True, alpha=0.2)
         ax.tick_params(axis='both', which='major', labelsize=5)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
         ax.legend()
         ax.set_aspect("equal")
 
