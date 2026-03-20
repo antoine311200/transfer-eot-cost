@@ -63,12 +63,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
     bl = parser.add_argument_group("baseline")
     bl.add_argument(
-        "--baseline", choices=["otcfm", "cfm", "pretrained", "all"],
+        "--baseline",
+        choices=["otcfm", "cfm", "pretrained", "dsb", "lightsb", "metaot", "all"],
         default="otcfm",
         help=(
             "otcfm=OT-paired CFM from scratch, "
             "cfm=random-paired CFM from scratch, "
             "pretrained=DualWCFM without adaptation, "
+            "dsb=Diffusion Schrödinger Bridge (IPF), "
+            "lightsb=LightSB (dual potentials + interpolant), "
+            "metaot=Neural W2 OT via ICNN (MetaOT inner loop), "
             "all=run every applicable baseline."
         ),
     )
@@ -81,14 +85,26 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
-    tr = parser.add_argument_group("training (OT-CFM)")
-    tr.add_argument("--epochs",     type=int,   default=None,  help="Gradient steps (default: 10 000).")
+    tr = parser.add_argument_group("training (shared)")
+    tr.add_argument("--epochs",     type=int,   default=None,  help="Gradient steps (default per-method).")
     tr.add_argument("--batch-size", type=int,   default=None,  dest="batch_size")
     tr.add_argument("--hidden",     type=int,   default=256,   help="MLP hidden size.")
     tr.add_argument("--n-layers",   type=int,   default=4,     dest="n_layers")
     tr.add_argument(
         "--ot-eps", type=float, default=0.05, dest="ot_eps",
-        help="Sinkhorn epsilon for OT pairing (0 = plain random-pair CFM).",
+        help="Sinkhorn epsilon for OT pairing / LightSB entropic reg (0 = plain CFM).",
+    )
+    tr.add_argument(
+        "--dsb-iters", type=int, default=None, dest="dsb_iters",
+        help="Number of IPF iterations for DSB (default: 10).",
+    )
+    tr.add_argument(
+        "--dsb-sigma", type=float, default=0.0, dest="dsb_sigma",
+        help="SDE noise level for DSB (0 = deterministic ODE bridge).",
+    )
+    tr.add_argument(
+        "--lightsb-eps", type=float, default=None, dest="lightsb_eps",
+        help="Entropic regularisation ε for LightSB (default: 0.1).",
     )
 
     wb = parser.add_argument_group("Weights & Biases")
@@ -179,6 +195,74 @@ def _run_otcfm(args, exp_specs, use_ot: bool = True) -> None:
         logger.info("  %s | %s -> W2_nu=%.4f", exp_spec.name, label, metrics["W2_nu"])
 
 
+def _run_dsb(args, exp_specs) -> None:
+    from dualwcfm.baselines.dsb import DSBRunner, DSBConfig
+
+    for exp_spec in exp_specs:
+        bl_spec   = _baseline_spec_from_exp(exp_spec, "dsb", args.output)
+        wandb_run = _make_wandb_run(args, exp_spec.name, "dsb")
+
+        cfg = DSBConfig(
+            n_ipf_iters      = args.dsb_iters or 10,
+            n_steps_per_half = args.epochs    or 2_000,
+            batch_size       = args.batch_size or 512,
+            hidden           = args.hidden,
+            n_layers         = args.n_layers,
+            sigma            = args.dsb_sigma,
+        )
+        runner  = DSBRunner(bl_spec, config=cfg, wandb_run=wandb_run)
+        metrics = runner.run(output_root=args.output)
+        wandb_run.finish()
+        logger.info("  %s | dsb -> W2_nu=%.4f", exp_spec.name, metrics["W2_nu"])
+
+
+def _run_lightsb(args, exp_specs) -> None:
+    from dualwcfm.baselines.lightsb import LightSBRunner, LightSBConfig
+
+    eps = args.lightsb_eps if args.lightsb_eps is not None else (
+        args.ot_eps if args.ot_eps > 0 else 0.1
+    )
+    for exp_spec in exp_specs:
+        bl_spec   = _baseline_spec_from_exp(exp_spec, "lightsb", args.output)
+        wandb_run = _make_wandb_run(args, exp_spec.name, "lightsb")
+
+        n_steps = args.epochs or 5_000
+        cfg = LightSBConfig(
+            eps              = eps,
+            n_dual_steps     = n_steps,
+            n_cfm_steps      = n_steps,
+            dual_batch       = args.batch_size or 256,
+            cfm_batch        = args.batch_size or 512,
+            potential_hidden = args.hidden,
+            cfm_hidden       = args.hidden,
+            potential_layers = max(2, args.n_layers - 1),
+            cfm_layers       = args.n_layers,
+        )
+        runner  = LightSBRunner(bl_spec, config=cfg, wandb_run=wandb_run)
+        metrics = runner.run(output_root=args.output)
+        wandb_run.finish()
+        logger.info("  %s | lightsb -> W2_nu=%.4f", exp_spec.name, metrics["W2_nu"])
+
+
+def _run_metaot(args, exp_specs) -> None:
+    from dualwcfm.baselines.metaot import MetaOTRunner, MetaOTConfig
+
+    for exp_spec in exp_specs:
+        bl_spec   = _baseline_spec_from_exp(exp_spec, "metaot", args.output)
+        wandb_run = _make_wandb_run(args, exp_spec.name, "metaot")
+
+        cfg = MetaOTConfig(
+            n_steps    = args.epochs    or 10_000,
+            batch_size = args.batch_size or 512,
+            hidden     = args.hidden,
+            n_layers   = args.n_layers,
+        )
+        runner  = MetaOTRunner(bl_spec, config=cfg, wandb_run=wandb_run)
+        metrics = runner.run(output_root=args.output)
+        wandb_run.finish()
+        logger.info("  %s | metaot -> W2_nu=%.4f", exp_spec.name, metrics["W2_nu"])
+
+
 def _run_pretrained(args, exp_specs) -> None:
     from dualwcfm.baselines.pretrained import PretrainedOnlyRunner
 
@@ -261,6 +345,12 @@ def main() -> None:
         _run_otcfm(args, matching, use_ot=False)
     if args.baseline in ("pretrained", "all"):
         _run_pretrained(args, matching)
+    if args.baseline in ("dsb", "all"):
+        _run_dsb(args, matching)
+    if args.baseline in ("lightsb", "all"):
+        _run_lightsb(args, matching)
+    if args.baseline in ("metaot", "all"):
+        _run_metaot(args, matching)
 
     # Auto-generate one comparison table per available metric
     from dualwcfm.baselines.table import build_all_tables
