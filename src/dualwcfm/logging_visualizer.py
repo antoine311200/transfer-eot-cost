@@ -58,10 +58,15 @@ class _LoggingMixin:
         self._csv_path = self.output_dir / "metrics.csv"
         self._csv_fields = [
             "iteration",
+            # Sliced-Wasserstein marginal distances
             "W1_mu", "W2_mu", "W1_nu", "W2_nu",
+            # Non-parametric target-marginal divergences
+            "mmd_nu",            # Maximum Mean Discrepancy (RBF kernel, median BW)
+            "energy_dist_nu",    # Energy distance (kernel-free)
+            "sinkhorn_div",      # Debiased Sinkhorn divergence (W2 proxy, distribution-only)
+            # Importance-weight diagnostics
             "weight_mean", "weight_std", "weight_min", "weight_max",
             "weight_ess",        # Effective Sample Size (normalised to [0,1])
-            "transport_cost",    # E[||x - y||^2] in original (unscaled) space
         ]
         with open(self._csv_path, "w", newline="") as f:
             csv.DictWriter(f, fieldnames=self._csv_fields).writeheader()
@@ -153,24 +158,26 @@ class _LoggingMixin:
         w_sum2 = float((w_np ** 2).sum())
         ess_norm = (w_sum ** 2 / (w_sum2 * len(w_np))) if w_sum2 > 0 else 0.0
 
-        # Transport cost E[||x - y||²] in original (unscaled) coordinates
-        x_orig = x * s
-        y_orig = y * s
-        if is_image_tensor(x_orig):
-            diff = (x_orig - y_orig).view(x_orig.shape[0], -1)
-        else:
-            diff = x_orig - y_orig
-        transport_cost = float(diff.pow(2).sum(dim=-1).mean().item())
+        # Non-parametric distributional metrics on the target marginal
+        from dualwcfm.metrics import mmd as _mmd, energy_distance as _ed, sinkhorn_divergence as _sd
+        nu_ref = trainer.new_target.sample(n).to(device)
+        if is_image_tensor(y):
+            nu_ref = nu_ref.view_as(y)
+        mmd_nu         = _mmd(y, nu_ref)
+        energy_dist_nu = _ed(y, nu_ref)
+        sinkhorn_div   = _sd(y, nu_ref)
 
         row = {
             "iteration":      time_step,
             **distances,
+            "mmd_nu":         mmd_nu,
+            "energy_dist_nu": energy_dist_nu,
+            "sinkhorn_div":   sinkhorn_div,
             "weight_mean":    float(w_np.mean()),
             "weight_std":     float(w_np.std()),
             "weight_min":     float(w_np.min()),
             "weight_max":     float(w_np.max()),
             "weight_ess":     ess_norm,
-            "transport_cost": transport_cost,
         }
         with open(self._csv_path, "a", newline="") as f:
             csv.DictWriter(f, fieldnames=self._csv_fields).writerow(row)

@@ -4,7 +4,6 @@ from typing import Optional, Callable
 
 import torch
 from torch.distributions import Categorical, MixtureSameFamily, Independent, Normal
-from torchcfm.utils import sample_8gaussians, sample_moons, sample_single_moon
 
 
 class Distribution(ABC):
@@ -52,16 +51,19 @@ class WeightedDistribution(Distribution):
 
 class MoonDistribution(Distribution):
     def sample(self, n: int) -> torch.Tensor:
+        from torchcfm.utils import sample_moons
         return sample_moons(n).to(torch.device("cuda" if torch.cuda.is_available() else "cpu")) * 0.25
 
 
 class EightGaussiansDistribution(Distribution):
     def sample(self, n: int) -> torch.Tensor:
+        from torchcfm.utils import sample_8gaussians
         return sample_8gaussians(n).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
 
 class SingleMoonDistribution(Distribution):
     def sample(self, n: int) -> torch.Tensor:
+        from torchcfm.utils import sample_single_moon
         return sample_single_moon(n).to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
 

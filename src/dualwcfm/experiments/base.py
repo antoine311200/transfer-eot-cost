@@ -179,7 +179,9 @@ def run_experiment(
     save_models: bool = True,
     pretrain_dir: Optional[str] = None,
     wandb_project: Optional[str] = None,
+    wandb_entity: Optional[str] = None,
     wandb_run_name: Optional[str] = None,
+    wandb_group: Optional[str] = None,
 ) -> None:
     """Build all objects from *spec* and run the full training loop.
 
@@ -211,9 +213,11 @@ def run_experiment(
     model_dir = os.path.join(spec.output_dir, "models")
     device    = spec.train_cfg.device
 
-    # Resolve W&B project/name: CLI args > spec.train_cfg fields
+    # Resolve W&B fields: CLI args > spec.train_cfg fields
     _wb_project = wandb_project or spec.train_cfg.wandb_project
+    _wb_entity  = wandb_entity  or getattr(spec.train_cfg, "wandb_entity", None)
     _wb_name    = wandb_run_name or spec.train_cfg.wandb_run_name or spec.name
+    _wb_group   = wandb_group
 
     # Initialise W&B (no-op if project is None or wandb not installed)
     from dualwcfm import wandb_logger as _wl
@@ -236,7 +240,13 @@ def run_experiment(
         **_safe_asdict(spec.train_cfg),
         **_safe_asdict(spec.method_cfg),
     }
-    wandb_run = _wl.init(project=_wb_project, name=_wb_name, config=_wb_config)
+    wandb_run = _wl.init(
+        project = _wb_project,
+        name    = _wb_name,
+        entity  = _wb_entity,
+        group   = _wb_group,
+        config  = _wb_config,
+    )
 
     # --- Pre-trained weights ----------------------------------------------
     if pretrain_dir is not None:

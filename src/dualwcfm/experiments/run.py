@@ -156,7 +156,11 @@ def _build_parser() -> argparse.ArgumentParser:
     wb = parser.add_argument_group("Weights & Biases (optional)")
     wb.add_argument(
         "--wandb-project", default=None, dest="wandb_project", metavar="PROJECT",
-        help="W&B project name.  Omit to disable W&B logging.",
+        help="W&B project name (e.g. 'Data-Based EOT').  Omit to disable W&B logging.",
+    )
+    wb.add_argument(
+        "--wandb-entity", default=None, dest="wandb_entity", metavar="ENTITY",
+        help="W&B entity (username or team, e.g. 'antoine311200').  Defaults to logged-in user.",
     )
     wb.add_argument(
         "--wandb-run", default=None, dest="wandb_run_name", metavar="RUN",
@@ -275,6 +279,7 @@ def main() -> None:
                     save_models      = args.save_models,
                     pretrain_dir     = args.pretrain_dir,
                     wandb_project    = getattr(args, "wandb_project", None),
+                    wandb_entity     = getattr(args, "wandb_entity", None),
                     wandb_run_name   = getattr(args, "wandb_run_name", None),
                 )
         return
@@ -313,6 +318,7 @@ def main() -> None:
             save_models      = args.save_models,
             pretrain_dir     = args.pretrain_dir,
             wandb_project    = getattr(args, "wandb_project", None),
+            wandb_entity     = getattr(args, "wandb_entity", None),
             wandb_run_name   = getattr(args, "wandb_run_name", None),
         )
 
@@ -360,10 +366,12 @@ def _run_ablation(args: argparse.Namespace, base_specs) -> None:
     )
 
     runner = AblationRunner(
-        suite        = suite,
-        output_root  = args.output,
-        retrain      = not args.load_pretrained,
-        save_models  = args.save_models,
+        suite          = suite,
+        output_root    = args.output,
+        retrain        = not args.load_pretrained,
+        save_models    = args.save_models,
+        wandb_project  = getattr(args, "wandb_project", None),
+        wandb_entity   = getattr(args, "wandb_entity", None),
     )
     runner.run()
 
@@ -406,10 +414,12 @@ def _run_predefined_ablation(args: argparse.Namespace) -> None:
 
     for suite in suites:
         runner = AblationRunner(
-            suite       = suite,
-            output_root = out,
-            retrain     = not args.load_pretrained,
-            save_models = args.save_models,
+            suite          = suite,
+            output_root    = out,
+            retrain        = not args.load_pretrained,
+            save_models    = args.save_models,
+            wandb_project  = getattr(args, "wandb_project", None),
+            wandb_entity   = getattr(args, "wandb_entity", None),
         )
         runner.run()
         runner.plot_convergence()

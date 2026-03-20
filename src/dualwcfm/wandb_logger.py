@@ -72,6 +72,8 @@ class _WandbRun:
 def init(
     project: Optional[str] = None,
     name: Optional[str] = None,
+    entity: Optional[str] = None,
+    group: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> "_NoOpRun | _WandbRun":
     """Initialise a W&B run, or return a no-op stub if wandb is unavailable.
@@ -79,11 +81,17 @@ def init(
     Parameters
     ----------
     project:
-        W&B project name.  Pass *None* to disable logging entirely.
+        W&B project name (e.g. ``"Data-Based EOT"``).  Pass *None* to disable.
     name:
-        W&B run name.  Defaults to wandb auto-generated names.
+        Run display name — becomes the experiment name (e.g. ``"mnist_simple"``).
+    entity:
+        W&B entity (username or team, e.g. ``"antoine311200"``).  When *None*
+        wandb uses the default entity from ``wandb login``.
+    group:
+        Group name for clustering related runs in the W&B UI (useful for
+        ablation suites, e.g. ``"ablation_particle_ratio"``).
     config:
-        Flat dict of hyper-parameters to log as run configuration.
+        Flat dict of hyper-parameters logged as run configuration.
 
     Returns
     -------
@@ -97,10 +105,12 @@ def init(
         run = wandb.init(
             project = project,
             name    = name,
+            entity  = entity,
+            group   = group,
             config  = config or {},
             reinit  = True,
         )
-        logger.info("  W&B run initialised: %s / %s", project, run.name)
+        logger.info("  W&B run initialised: %s/%s — run: %s", entity or "<default>", project, run.name)
         return _WandbRun(run)
     except Exception as exc:
         logger.warning("  W&B init failed (%s) — logging disabled.", exc)
