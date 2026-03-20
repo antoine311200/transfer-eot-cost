@@ -333,18 +333,23 @@ def _mnist_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
         show_each_pretrain  = 1_000,
     )
 
+    # T = horizontal flip (self-inverse: flip(flip(x)) = x)
+    def _flip_map(x: torch.Tensor) -> torch.Tensor:
+        return torch.flip(x, dims=[-1])  # last dim = width for both 3D and 4D tensors
+
     return ExperimentSpec(
-        name             = f"mnist_simple{'_perturbed' if perturbed else ''}",
-        mode             = "image",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"mnist_simple{'_perturbed' if perturbed else ''}",
+        mode                  = "image",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        transport_map         = _flip_map,
+        inverse_transport_map = _flip_map,  # self-inverse
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 
@@ -392,18 +397,28 @@ def _fashion_medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     )
     vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=6, trajectory_stride=0)
 
+    # T = flip then rotate(10°).  T⁻¹ = rotate(-10°) then flip.
+    def _flip_rot10_map(x: torch.Tensor) -> torch.Tensor:
+        y = torch.flip(x, dims=[-1])
+        return TF.rotate(y, 10.0, fill=-1.0)
+
+    def _flip_rot10_inv(y: torch.Tensor) -> torch.Tensor:
+        x = TF.rotate(y, -10.0, fill=-1.0)
+        return torch.flip(x, dims=[-1])
+
     return ExperimentSpec(
-        name             = f"fashion_medium{'_perturbed' if perturbed else ''}",
-        mode             = "image",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"fashion_medium{'_perturbed' if perturbed else ''}",
+        mode                  = "image",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        transport_map         = _flip_rot10_map,
+        inverse_transport_map = _flip_rot10_inv,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 

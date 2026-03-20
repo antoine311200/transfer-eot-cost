@@ -47,13 +47,16 @@ class _LoggingMixin:
     """Adds disk-saving, CSV logging, per-type GIF timelapse, and locked axis
     limits (so all frames of a given plot type have identical boundaries)."""
 
-    def _init_logging(self, output_dir: str, wandb_run=None):
+    def _init_logging(self, output_dir: str, wandb_run=None,
+                      transport_map=None, inverse_transport_map=None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         for sub in ("coupling", "cfm", "weights", "marginals", "pretrain"):
             (self.output_dir / sub).mkdir(exist_ok=True)
 
         self._wandb_run = wandb_run  # may be None or a WandbRun instance
+        self._transport_map         = transport_map          # T(x) ≈ y
+        self._inverse_transport_map = inverse_transport_map  # T⁻¹(y) ≈ x
 
         self._csv_path = self.output_dir / "metrics.csv"
         self._csv_fields = [
@@ -64,6 +67,9 @@ class _LoggingMixin:
             "mmd_nu",            # Maximum Mean Discrepancy (RBF kernel, median BW)
             "energy_dist_nu",    # Energy distance (kernel-free)
             "sinkhorn_div",      # Debiased Sinkhorn divergence (W2 proxy, distribution-only)
+            # Ground-truth transport map errors (present only when T is known)
+            "map_err_fwd",       # sqrt(E[||T(x) - y||²])   forward direction
+            "map_err_bwd",       # sqrt(E[||T⁻¹(y) - x||²]) backward direction
             # Importance-weight diagnostics
             "weight_mean", "weight_std", "weight_min", "weight_max",
             "weight_ess",        # Effective Sample Size (normalised to [0,1])
@@ -159,7 +165,10 @@ class _LoggingMixin:
         ess_norm = (w_sum ** 2 / (w_sum2 * len(w_np))) if w_sum2 > 0 else 0.0
 
         # Non-parametric distributional metrics on the target marginal
-        from dualwcfm.metrics import mmd as _mmd, energy_distance as _ed, sinkhorn_divergence as _sd
+        from dualwcfm.metrics import (
+            mmd as _mmd, energy_distance as _ed,
+            sinkhorn_divergence as _sd, map_error as _map_err,
+        )
         nu_ref = trainer.new_target.sample(n).to(device)
         if is_image_tensor(y):
             nu_ref = nu_ref.view_as(y)
@@ -167,12 +176,20 @@ class _LoggingMixin:
         energy_dist_nu = _ed(y, nu_ref)
         sinkhorn_div   = _sd(y, nu_ref)
 
+        # Ground-truth map errors (only when T is available)
+        map_err_fwd = _map_err(x, y, self._transport_map) \
+            if self._transport_map is not None else ""
+        map_err_bwd = _map_err(y, x, self._inverse_transport_map) \
+            if self._inverse_transport_map is not None else ""
+
         row = {
             "iteration":      time_step,
             **distances,
             "mmd_nu":         mmd_nu,
             "energy_dist_nu": energy_dist_nu,
             "sinkhorn_div":   sinkhorn_div,
+            "map_err_fwd":    map_err_fwd,
+            "map_err_bwd":    map_err_bwd,
             "weight_mean":    float(w_np.mean()),
             "weight_std":     float(w_np.std()),
             "weight_min":     float(w_np.min()),
@@ -367,9 +384,11 @@ class _LoggingMixin:
 
 class LoggingVisualizer(_LoggingMixin, Visualizer):
     def __init__(self, config: VisualizeConfig, transport_map: Callable,
-                 output_dir: str, wandb_run=None):
+                 output_dir: str, wandb_run=None, inverse_transport_map=None):
         Visualizer.__init__(self, config, transport_map)
-        self._init_logging(output_dir, wandb_run=wandb_run)
+        self._init_logging(output_dir, wandb_run=wandb_run,
+                           transport_map=transport_map,
+                           inverse_transport_map=inverse_transport_map)
 
     def display(self, epoch: int, trainer: "Trainer"):
         if epoch % self.config.show_each != 0:
@@ -445,9 +464,11 @@ class LoggingVisualizer(_LoggingMixin, Visualizer):
 
 class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
     def __init__(self, config: VisualizeConfig, transport_map: Callable,
-                 output_dir: str, wandb_run=None):
+                 output_dir: str, wandb_run=None, inverse_transport_map=None):
         Visualizer3D.__init__(self, config, transport_map)
-        self._init_logging(output_dir, wandb_run=wandb_run)
+        self._init_logging(output_dir, wandb_run=wandb_run,
+                           transport_map=transport_map,
+                           inverse_transport_map=inverse_transport_map)
 
     def display(self, epoch: int, trainer: "Trainer"):
         if epoch % self.config.show_each != 0:
@@ -561,9 +582,12 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
 
 class LoggingVisualizerImage(_LoggingMixin, VisualizerImage):
     def __init__(self, config: VisualizeConfig, img_shape: Tuple[int, int, int],
-                 output_dir: str, wandb_run=None):
-        VisualizerImage.__init__(self, config, img_shape, transport_map=None)
-        self._init_logging(output_dir, wandb_run=wandb_run)
+                 output_dir: str, wandb_run=None,
+                 transport_map=None, inverse_transport_map=None):
+        VisualizerImage.__init__(self, config, img_shape, transport_map=transport_map)
+        self._init_logging(output_dir, wandb_run=wandb_run,
+                           transport_map=transport_map,
+                           inverse_transport_map=inverse_transport_map)
         self._fid_computed = False  # compute at most once (final iteration)
 
     def analyse(self, time_step: int, trainer: "Trainer",

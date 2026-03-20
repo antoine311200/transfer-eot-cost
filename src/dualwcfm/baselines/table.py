@@ -29,6 +29,7 @@ logger = logging.getLogger("dualwcfm")
 _ALL_METRICS = [
     "W1_mu", "W2_mu", "W1_nu", "W2_nu",
     "mmd_nu", "energy_dist_nu", "sinkhorn_div",
+    "map_err_fwd",
     "bw2", "mean_err_nu", "cov_frob_nu",
     "fid", "kid",
 ]

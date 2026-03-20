@@ -137,10 +137,14 @@ class ExperimentSpec:
     initial_coupling: CouplingDistribution
     new_source:       Distribution
     new_target:       Distribution
-    transport_map:    Optional[Callable]
     train_cfg:        TrainingConfig
     model_cfg:        FeedForwardConfig
     vis_cfg:          VisualizeConfig
+    # Ground-truth transport maps for diagnostic map-error metrics.
+    # transport_map:         T   s.t. y ≈ T(x)   (forward direction)
+    # inverse_transport_map: T⁻¹ s.t. x ≈ T⁻¹(y) (backward direction)
+    transport_map:         Optional[Callable] = None
+    inverse_transport_map: Optional[Callable] = None
     method_cfg:       MethodConfig = field(default_factory=MixtureConfig)
     bidirectional:    bool = True
     output_root:      str = "results"
@@ -290,16 +294,20 @@ def run_experiment(
     # --- Visualizer -------------------------------------------------------
     if spec.mode == "2d":
         visualizer = LoggingVisualizer(spec.vis_cfg, spec.transport_map, spec.output_dir,
-                                       wandb_run=wandb_run)
+                                       wandb_run=wandb_run,
+                                       inverse_transport_map=spec.inverse_transport_map)
     elif spec.mode == "3d":
         visualizer = LoggingVisualizer3D(spec.vis_cfg, spec.transport_map, spec.output_dir,
-                                         wandb_run=wandb_run)
+                                         wandb_run=wandb_run,
+                                         inverse_transport_map=spec.inverse_transport_map)
     else:
         if spec.train_cfg.image_shape is None:
             raise ValueError("image_shape must be set in train_cfg for image experiments.")
         visualizer = LoggingVisualizerImage(
             spec.vis_cfg, spec.train_cfg.image_shape, spec.output_dir,
             wandb_run=wandb_run,
+            transport_map=spec.transport_map,
+            inverse_transport_map=spec.inverse_transport_map,
         )
 
     # --- Trainer ----------------------------------------------------------

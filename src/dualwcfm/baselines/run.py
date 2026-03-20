@@ -119,15 +119,16 @@ def _baseline_spec_from_exp(exp_spec, baseline_name: str, output_root: str):
     ref_cov  = getattr(exp_spec, "ref_cov",  None)
 
     return BaselineSpec(
-        name       = baseline_name,
-        mode       = exp_spec.mode,
-        source     = exp_spec.new_source,
-        target     = exp_spec.new_target,
-        dim        = exp_spec.model_cfg.flat_dimension,
-        output_dir = os.path.join(output_root, exp_spec.name, "baselines", baseline_name),
-        device     = device,
-        ref_mean   = ref_mean,
-        ref_cov    = ref_cov,
+        name          = baseline_name,
+        mode          = exp_spec.mode,
+        source        = exp_spec.new_source,
+        target        = exp_spec.new_target,
+        dim           = exp_spec.model_cfg.flat_dimension,
+        output_dir    = os.path.join(output_root, exp_spec.name, "baselines", baseline_name),
+        device        = device,
+        ref_mean      = ref_mean,
+        ref_cov       = ref_cov,
+        transport_map = getattr(exp_spec, "transport_map", None),
     )
 
 

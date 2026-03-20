@@ -313,19 +313,35 @@ def _gaussian_iso_2d(eps: float, output_root: str) -> ExperimentSpec:
     model_cfg  = FeedForwardConfig(dimension=2, hidden_size=64)
     vis_cfg    = VisualizeConfig(show_each=10, n_trajectories=300, trajectory_stride=2)
 
+    # Analytical conditional-mean transport map for the Gaussian EOT plan.
+    # T(x) = new_nu_mean + C_xy.T @ Σ_μ⁻¹ @ (x - new_mu_mean)
+    # (C_xy is the same for the shifted marginals as for the reference pair)
+    _Sigma_mu_inv = torch.tensor(np.linalg.inv(mu_cov), dtype=torch.float32)
+    _Sigma_nu_inv = torch.tensor(np.linalg.inv(nu_cov), dtype=torch.float32)
+    _C_xy         = torch.tensor(joint_cov[:2, 2:], dtype=torch.float32)  # d × d block
+    _new_mu_mean  = shift.float()
+    _new_nu_mean  = (shift + torch.tensor([3.0, 2.0])).float()
+
+    def _transport_map_iso2d(x: torch.Tensor) -> torch.Tensor:
+        return _new_nu_mean + (x - _new_mu_mean) @ (_Sigma_mu_inv @ _C_xy)
+
+    def _inv_transport_map_iso2d(y: torch.Tensor) -> torch.Tensor:
+        return _new_mu_mean + (y - _new_nu_mean) @ (_Sigma_nu_inv @ _C_xy.T)
+
     eps_tag = str(eps).replace(".", "p")
     return ExperimentSpec(
-        name             = f"gushchin_gaussian_iso_2d_eps{eps_tag}",
-        mode             = "2d",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"gushchin_gaussian_iso_2d_eps{eps_tag}",
+        mode                  = "2d",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        transport_map         = _transport_map_iso2d,
+        inverse_transport_map = _inv_transport_map_iso2d,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 
@@ -403,7 +419,6 @@ def _gaussian_gmm_2d(eps: float, output_root: str) -> ExperimentSpec:
         initial_coupling = coupling,
         new_source       = new_src,
         new_target       = new_tgt,
-        transport_map    = None,
         train_cfg        = train_cfg,
         model_cfg        = model_cfg,
         vis_cfg          = vis_cfg,
@@ -455,19 +470,33 @@ def _gaussian_iso_nd(dim: int, eps: float, output_root: str) -> ExperimentSpec:
     model_cfg  = FeedForwardConfig(dimension=dim, hidden_size=hidden)
     vis_cfg    = VisualizeConfig(show_each=25, n_trajectories=300, trajectory_stride=2)
 
+    # Analytical transport map for the shifted new marginals
+    _Smu_inv  = torch.tensor(np.linalg.inv(mu_cov), dtype=torch.float32)
+    _Snu_inv  = torch.tensor(np.linalg.inv(nu_cov), dtype=torch.float32)
+    _Cxy      = torch.tensor(joint_cov[:dim, dim:], dtype=torch.float32)
+    _mu_new   = shift.float()
+    _nu_new   = (shift + torch.ones(dim) * 1.5).float()
+
+    def _transport_map_nd(x: torch.Tensor) -> torch.Tensor:
+        return _nu_new + (x - _mu_new) @ (_Smu_inv @ _Cxy)
+
+    def _inv_transport_map_nd(y: torch.Tensor) -> torch.Tensor:
+        return _mu_new + (y - _nu_new) @ (_Snu_inv @ _Cxy.T)
+
     eps_tag = str(eps).replace(".", "p")
     return ExperimentSpec(
-        name             = f"gushchin_gaussian_iso_{dim}d_eps{eps_tag}",
-        mode             = "2d" if dim == 2 else "3d" if dim == 3 else "2d",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"gushchin_gaussian_iso_{dim}d_eps{eps_tag}",
+        mode                  = "2d" if dim == 2 else "3d" if dim == 3 else "2d",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        transport_map         = _transport_map_nd,
+        inverse_transport_map = _inv_transport_map_nd,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 

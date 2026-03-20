@@ -14,6 +14,9 @@ Universal (2-D, 3-D, Gushchin, image):
   energy_distance(X, Y)                 — Energy distance (kernel-free)
   sinkhorn_divergence(X, Y, eps)        — Debiased Sinkhorn divergence
 
+Transport-map quality (when ground-truth T is known):
+  map_error(x_gen, y_gen, transport_fn) — RMSE of E[||T(x) - y||²]
+
 Gaussian-specific (Gushchin benchmark):
   bures_wasserstein_2(X, Y, mu, Sigma)  — BW2 to a reference Gaussian
   mean_err(X, mu_ref)                   — L2 error of empirical mean
@@ -27,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import torch
 
@@ -190,6 +193,44 @@ def sinkhorn_divergence(
         ot_xx = _ot_eps(X, X)
         ot_yy = _ot_eps(Y, Y)
     return float((ot_xy - 0.5 * ot_xx - 0.5 * ot_yy).clamp(min=0.0).item())
+
+
+# ---------------------------------------------------------------------------
+# Transport-map quality (requires knowing the ground-truth map T)
+# ---------------------------------------------------------------------------
+
+def map_error(
+    x_gen: torch.Tensor,
+    y_gen: torch.Tensor,
+    transport_fn: Callable,
+) -> float:
+    """Ground-truth transport map RMSE: sqrt(E[||T(x) − y||²]).
+
+    Measures how accurately the model transports each source sample to the
+    location prescribed by the true map T.  Unlike marginal metrics (SW, MMD),
+    this is a per-sample quality measure that rewards deterministic, low-cost
+    transport.
+
+    Parameters
+    ----------
+    x_gen:
+        Source samples used as input (same pairing as y_gen).
+    y_gen:
+        Transported target samples from the model.
+    transport_fn:
+        Callable T: ℝ^d → ℝ^d (or image tensors).  Called on CPU float32
+        tensors; must return a tensor of the same shape.
+
+    Returns
+    -------
+    RMSE (float).
+    """
+    x_cpu = x_gen.float().cpu()
+    y_cpu = y_gen.float().cpu()
+    with torch.no_grad():
+        T_x = transport_fn(x_cpu)
+        err = (T_x.flatten(1) - y_cpu.flatten(1)).pow(2).sum(dim=-1).mean()
+    return float(err.sqrt().item())
 
 
 # ---------------------------------------------------------------------------

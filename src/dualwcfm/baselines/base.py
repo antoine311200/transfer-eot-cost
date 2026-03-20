@@ -27,7 +27,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 
@@ -76,8 +76,10 @@ class BaselineSpec:
         default_factory=lambda: torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
     # Optional: Gushchin ground-truth for BW₂
-    ref_mean:   Optional[torch.Tensor] = None
-    ref_cov:    Optional[torch.Tensor] = None
+    ref_mean:      Optional[torch.Tensor] = None
+    ref_cov:       Optional[torch.Tensor] = None
+    # Optional: ground-truth forward transport map T s.t. y ≈ T(x)
+    transport_map: Optional[Callable]     = None
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +96,8 @@ _SUMMARY_FIELDS = [
     # Universal
     "W1_mu", "W2_mu", "W1_nu", "W2_nu",
     "mmd_nu", "energy_dist_nu", "sinkhorn_div",
+    # Ground-truth transport map error (when T is known)
+    "map_err_fwd",
     # Gushchin
     "bw2", "mean_err_nu", "cov_frob_nu",
     # Image
@@ -139,6 +143,10 @@ def evaluate_metrics(
     result["W2_mu"] = M.sliced_wasserstein(x_g, x_ref, n_proj=n_proj, p=2)
     result["W1_nu"] = M.sliced_wasserstein(y_g, y_ref, n_proj=n_proj, p=1)
     result["W2_nu"] = M.sliced_wasserstein(y_g, y_ref, n_proj=n_proj, p=2)
+
+    # ── Ground-truth transport map error (when T is known) ──────────────
+    if spec.transport_map is not None:
+        result["map_err_fwd"] = M.map_error(x_g, y_g, spec.transport_map)
 
     # ── Low-dimensional metrics ──────────────────────────────────────────
     if spec.mode in _LOW_DIM_MODES:
