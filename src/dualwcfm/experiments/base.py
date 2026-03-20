@@ -178,6 +178,8 @@ def run_experiment(
     retrain: bool = True,
     save_models: bool = True,
     pretrain_dir: Optional[str] = None,
+    wandb_project: Optional[str] = None,
+    wandb_run_name: Optional[str] = None,
 ) -> None:
     """Build all objects from *spec* and run the full training loop.
 
@@ -208,6 +210,33 @@ def run_experiment(
     os.makedirs(spec.output_dir, exist_ok=True)
     model_dir = os.path.join(spec.output_dir, "models")
     device    = spec.train_cfg.device
+
+    # Resolve W&B project/name: CLI args > spec.train_cfg fields
+    _wb_project = wandb_project or spec.train_cfg.wandb_project
+    _wb_name    = wandb_run_name or spec.train_cfg.wandb_run_name or spec.name
+
+    # Initialise W&B (no-op if project is None or wandb not installed)
+    from dualwcfm import wandb_logger as _wl
+    import dataclasses
+    def _safe_asdict(obj):
+        """dataclasses.asdict but stringify non-serialisable values."""
+        d = {}
+        for f in dataclasses.fields(obj):
+            v = getattr(obj, f.name)
+            try:
+                import json; json.dumps(v)
+                d[f.name] = v
+            except (TypeError, ValueError):
+                d[f.name] = str(v)
+        return d
+    _wb_config = {
+        "experiment":    spec.name,
+        "mode":          spec.mode,
+        "method":        type(spec.method_cfg).__name__,
+        **_safe_asdict(spec.train_cfg),
+        **_safe_asdict(spec.method_cfg),
+    }
+    wandb_run = _wl.init(project=_wb_project, name=_wb_name, config=_wb_config)
 
     # --- Pre-trained weights ----------------------------------------------
     if pretrain_dir is not None:
@@ -250,14 +279,17 @@ def run_experiment(
 
     # --- Visualizer -------------------------------------------------------
     if spec.mode == "2d":
-        visualizer = LoggingVisualizer(spec.vis_cfg, spec.transport_map, spec.output_dir)
+        visualizer = LoggingVisualizer(spec.vis_cfg, spec.transport_map, spec.output_dir,
+                                       wandb_run=wandb_run)
     elif spec.mode == "3d":
-        visualizer = LoggingVisualizer3D(spec.vis_cfg, spec.transport_map, spec.output_dir)
+        visualizer = LoggingVisualizer3D(spec.vis_cfg, spec.transport_map, spec.output_dir,
+                                         wandb_run=wandb_run)
     else:
         if spec.train_cfg.image_shape is None:
             raise ValueError("image_shape must be set in train_cfg for image experiments.")
         visualizer = LoggingVisualizerImage(
-            spec.vis_cfg, spec.train_cfg.image_shape, spec.output_dir
+            spec.vis_cfg, spec.train_cfg.image_shape, spec.output_dir,
+            wandb_run=wandb_run,
         )
 
     # --- Trainer ----------------------------------------------------------
@@ -282,6 +314,7 @@ def run_experiment(
     # --- Post-training ----------------------------------------------------
     visualizer.make_timelapse_all(fps=3)
     save_metrics_plot(spec.output_dir)
+    wandb_run.finish()
     logger.info("  Finished -> %s", spec.output_dir)
 
 

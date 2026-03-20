@@ -35,6 +35,13 @@ class TrainingConfig:
     save_coupling_checkpoints: bool = False  # Save coupling dataset after each advance step
     save_model_checkpoints: bool = False     # Save CFM forward/backward weights after each iteration
 
+    # Final model persistence: save all learned models at the end of training.
+    save_final_models: bool = True  # Save forward/backward/bridges/duals after all iterations
+
+    # Weights & Biases integration (optional).
+    wandb_project: Optional[str] = None   # W&B project name; None = no W&B logging
+    wandb_run_name: Optional[str] = None  # W&B run display name; None = auto
+
 
 @dataclass
 class ModelConfig:

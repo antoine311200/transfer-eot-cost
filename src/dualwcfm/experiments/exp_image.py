@@ -247,7 +247,7 @@ def _make_flip_distributions(
 def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 2_000,
+        dataset_size             = 20_000,
         marginal_epochs          = 15_000,
         pretrain_epochs          = 20_000,
         dual_epochs              = 100,
@@ -256,11 +256,11 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
         iterations               = 30,
         num_rectified_flow       = 1,
         scale_factor             = 1.0,
-        batch_size               = 96,
+        batch_size               = 128,
         use_disk_coupling        = True,
-        coupling_chunk_size      = 2_048,
-        save_coupling_checkpoints= True,
-        save_model_checkpoints   = True,
+        coupling_chunk_size      = 128,
+        save_coupling_checkpoints= False,
+        save_model_checkpoints   = False,
     )
 
 
@@ -321,8 +321,8 @@ def _mnist_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
         hidden_size        = 32,
         image_shape        = (C, H, W),
         dual_learning_rate = 1e-4,
-        mu_learning_rate   = 5e-4,
-        nu_learning_rate   = 5e-4,
+        mu_learning_rate   = 2e-4,
+        nu_learning_rate   = 2e-4,
         flow_learning_rate = 2e-4,
     )
     vis_cfg                = VisualizeConfig(

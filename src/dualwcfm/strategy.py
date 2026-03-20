@@ -195,6 +195,32 @@ class Strategy:
         torch.save(self.initial_nu_bridge.state_dict(), f"{save_dir}/initial_nu_model.pth")
         logger.info("Pretrained models saved (flow + marginal bridges).")
 
+    def _save_final(self, save_dir: str) -> None:
+        """Save the fully-trained models (after all iterations) to *save_dir*.
+
+        Files written
+        -------------
+        forward_model.pth       – final forward CFM model
+        backward_model.pth      – final backward CFM model (BidirectionalStrategy only)
+        mu_bridge.pth           – source marginal bridge
+        nu_bridge.pth           – target marginal bridge
+        f_dual.pth              – dual potential f
+        g_dual.pth              – dual potential g
+        h_dual.pth              – dual mismatch potential h
+        """
+        if not save_dir:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(self.forward_model.state_dict(), f"{save_dir}/forward_model.pth")
+        if isinstance(self, BidirectionalStrategy):
+            torch.save(self.backward_model.state_dict(), f"{save_dir}/backward_model.pth")
+        torch.save(self.mu_bridge.state_dict(),  f"{save_dir}/mu_bridge.pth")
+        torch.save(self.nu_bridge.state_dict(),  f"{save_dir}/nu_bridge.pth")
+        torch.save(self.f_dual.state_dict(),     f"{save_dir}/f_dual.pth")
+        torch.save(self.g_dual.state_dict(),     f"{save_dir}/g_dual.pth")
+        torch.save(self.h_dual.state_dict(),     f"{save_dir}/h_dual.pth")
+        logger.info("Final trained models saved -> %s", save_dir)
+
 
 class BidirectionalStrategy(Strategy):
     def __init__(self, wrapper, config: FeedForwardConfig, change_of_measure: Optional[nn.Module] = None):

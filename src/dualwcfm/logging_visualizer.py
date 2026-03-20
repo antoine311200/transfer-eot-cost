@@ -47,15 +47,22 @@ class _LoggingMixin:
     """Adds disk-saving, CSV logging, per-type GIF timelapse, and locked axis
     limits (so all frames of a given plot type have identical boundaries)."""
 
-    def _init_logging(self, output_dir: str):
+    def _init_logging(self, output_dir: str, wandb_run=None):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         for sub in ("coupling", "cfm", "weights", "marginals", "pretrain"):
             (self.output_dir / sub).mkdir(exist_ok=True)
 
+        self._wandb_run = wandb_run  # may be None or a WandbRun instance
+
         self._csv_path = self.output_dir / "metrics.csv"
-        self._csv_fields = ["iteration", "W1_mu", "W2_mu", "W1_nu", "W2_nu",
-                            "weight_mean", "weight_std", "weight_min", "weight_max"]
+        self._csv_fields = [
+            "iteration",
+            "W1_mu", "W2_mu", "W1_nu", "W2_nu",
+            "weight_mean", "weight_std", "weight_min", "weight_max",
+            "weight_ess",        # Effective Sample Size (normalised to [0,1])
+            "transport_cost",    # E[||x - y||^2] in original (unscaled) space
+        ]
         with open(self._csv_path, "w", newline="") as f:
             csv.DictWriter(f, fieldnames=self._csv_fields).writeheader()
 
@@ -140,16 +147,42 @@ class _LoggingMixin:
             w = torch.exp(log_w)
 
         w_np = w.cpu().float().numpy().ravel()
+
+        # Effective Sample Size (Kish, 1965): ESS = (Σw)² / Σ(w²), normalised by N
+        w_sum  = float(w_np.sum())
+        w_sum2 = float((w_np ** 2).sum())
+        ess_norm = (w_sum ** 2 / (w_sum2 * len(w_np))) if w_sum2 > 0 else 0.0
+
+        # Transport cost E[||x - y||²] in original (unscaled) coordinates
+        x_orig = x * s
+        y_orig = y * s
+        if is_image_tensor(x_orig):
+            diff = (x_orig - y_orig).view(x_orig.shape[0], -1)
+        else:
+            diff = x_orig - y_orig
+        transport_cost = float(diff.pow(2).sum(dim=-1).mean().item())
+
         row = {
-            "iteration": time_step,
+            "iteration":      time_step,
             **distances,
-            "weight_mean": float(w_np.mean()),
-            "weight_std":  float(w_np.std()),
-            "weight_min":  float(w_np.min()),
-            "weight_max":  float(w_np.max()),
+            "weight_mean":    float(w_np.mean()),
+            "weight_std":     float(w_np.std()),
+            "weight_min":     float(w_np.min()),
+            "weight_max":     float(w_np.max()),
+            "weight_ess":     ess_norm,
+            "transport_cost": transport_cost,
         }
         with open(self._csv_path, "a", newline="") as f:
             csv.DictWriter(f, fieldnames=self._csv_fields).writerow(row)
+
+        # W&B logging (no-op when wandb_run is None)
+        if self._wandb_run:
+            self._wandb_run.log(
+                {
+                    **{k: v for k, v in row.items() if k != "iteration"},
+                },
+                step=time_step,
+            )
 
         self._save_weight_histogram(time_step, w_np)
         self._save_marginals_plot(
@@ -327,9 +360,9 @@ class _LoggingMixin:
 
 class LoggingVisualizer(_LoggingMixin, Visualizer):
     def __init__(self, config: VisualizeConfig, transport_map: Callable,
-                 output_dir: str):
+                 output_dir: str, wandb_run=None):
         Visualizer.__init__(self, config, transport_map)
-        self._init_logging(output_dir)
+        self._init_logging(output_dir, wandb_run=wandb_run)
 
     def display(self, epoch: int, trainer: "Trainer"):
         if epoch % self.config.show_each != 0:
@@ -405,9 +438,9 @@ class LoggingVisualizer(_LoggingMixin, Visualizer):
 
 class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
     def __init__(self, config: VisualizeConfig, transport_map: Callable,
-                 output_dir: str):
+                 output_dir: str, wandb_run=None):
         Visualizer3D.__init__(self, config, transport_map)
-        self._init_logging(output_dir)
+        self._init_logging(output_dir, wandb_run=wandb_run)
 
     def display(self, epoch: int, trainer: "Trainer"):
         if epoch % self.config.show_each != 0:
@@ -521,9 +554,104 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
 
 class LoggingVisualizerImage(_LoggingMixin, VisualizerImage):
     def __init__(self, config: VisualizeConfig, img_shape: Tuple[int, int, int],
-                 output_dir: str):
+                 output_dir: str, wandb_run=None):
         VisualizerImage.__init__(self, config, img_shape, transport_map=None)
-        self._init_logging(output_dir)
+        self._init_logging(output_dir, wandb_run=wandb_run)
+        self._fid_computed = False  # compute at most once (final iteration)
+
+    def analyse(self, time_step: int, trainer: "Trainer",
+                n_samples: int = 2000, n_proj: int = 2000) -> dict:
+        """Extend mixin analyse() with optional FID at the last iteration."""
+        distances = super().analyse(time_step, trainer, n_samples, n_proj)
+
+        is_final = (time_step == trainer.config.iterations - 1)
+        if is_final and not self._fid_computed:
+            fid_val = self._compute_fid(trainer)
+            if fid_val is not None:
+                logger.info("  FID (final iteration) = %.4f", fid_val)
+                # Append FID to the last CSV row as a separate summary entry
+                summary_path = self.output_dir / "fid_summary.txt"
+                summary_path.write_text(f"FID={fid_val:.4f}\n")
+                if self._wandb_run:
+                    self._wandb_run.summary({"FID": fid_val})
+            self._fid_computed = True
+
+        return distances
+
+    def _compute_fid(self, trainer: "Trainer", n_gen: int = 2048) -> Optional[float]:
+        """Compute FID between generated and true target images.
+
+        Uses ``torchmetrics`` if available, falls back to a lightweight
+        statistics-based estimate using scipy otherwise.
+        """
+        try:
+            import scipy.linalg
+        except ImportError:
+            logger.debug("scipy not installed — skipping FID computation.")
+            return None
+
+        device = trainer.device
+        C, H, W = self.img_shape
+
+        # --- Generate images by evolving new source through the learned flow ---
+        generated, real = [], []
+        batch = min(64, n_gen)
+        n_batches = (n_gen + batch - 1) // batch
+
+        fwd_model = trainer.strategy.get_flow(0, device)[0]
+        fwd_model.eval()
+        s = trainer.scale
+
+        with torch.no_grad():
+            for _ in range(n_batches):
+                x_src = trainer.new_source.sample(batch).to(device)
+                x_gen = trainer.flow_matching.evolve(
+                    x_src, fwd_model, num_steps=50,
+                    sigma=trainer._sigma, extend=True,
+                )
+                if is_image_tensor(x_gen):
+                    x_gen = x_gen[:, :C, :, :]
+                generated.append((x_gen * s).cpu())
+
+                x_tgt = trainer.new_target.sample(batch).to(device)
+                real.append((x_tgt * s).cpu())
+
+        gen_imgs  = torch.cat(generated, dim=0)[:n_gen]
+        real_imgs = torch.cat(real,      dim=0)[:n_gen]
+
+        # Try torchmetrics FID first (preferred, handles InceptionV3 features)
+        try:
+            from torchmetrics.image.fid import FrechetInceptionDistance
+            fid_metric = FrechetInceptionDistance(feature=64, normalize=True).to("cpu")
+            # torchmetrics expects uint8 [0, 255] or float [0, 1] with normalize=True
+            gen_01  = (gen_imgs.clamp(-1, 1) + 1) / 2   # [-1,1] → [0,1]
+            real_01 = (real_imgs.clamp(-1, 1) + 1) / 2
+            # FID requires 3-channel; expand grayscale if needed
+            if gen_01.shape[1] == 1:
+                gen_01  = gen_01.expand(-1, 3, -1, -1)
+                real_01 = real_01.expand(-1, 3, -1, -1)
+            fid_metric.update(real_01, real=True)
+            fid_metric.update(gen_01,  real=False)
+            return float(fid_metric.compute().item())
+        except Exception:
+            pass
+
+        # Fallback: raw pixel statistics (cheap but less accurate)
+        gen_flat  = gen_imgs.view(n_gen, -1).numpy()
+        real_flat = real_imgs.view(n_gen, -1).numpy()
+        mu_g, mu_r = gen_flat.mean(0), real_flat.mean(0)
+        cov_g = np.cov(gen_flat,  rowvar=False)
+        cov_r = np.cov(real_flat, rowvar=False)
+        diff  = mu_g - mu_r
+        # Bures metric (matrix square root)
+        try:
+            covmean = scipy.linalg.sqrtm(cov_g @ cov_r)
+            if np.iscomplexobj(covmean):
+                covmean = covmean.real
+            fid_approx = float(diff @ diff + np.trace(cov_g + cov_r - 2 * covmean))
+        except Exception:
+            fid_approx = None
+        return fid_approx
 
     def display(self, epoch: int, trainer: "Trainer"):
         if epoch % self.config.show_each != 0:

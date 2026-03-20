@@ -177,3 +177,7 @@ class Trainer:
                 f"W1_nu={distances['W1_nu']:.4f}  W2_nu={distances['W2_nu']:.4f}"
             )
 
+        # Save final trained models after all iterations.
+        if save and self.config.save_final_models:
+            self.strategy._save_final(save)
+

@@ -639,14 +639,14 @@ def _base_image_train_cfg(device) -> TrainingConfig:
 
 def _base_image_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma=0.05,
-        sigma2=0.05,
+        sigma=0.1,
+        sigma2=0.1,
         loss="weighted",
         l2_reg=0,
         lip_reg=0,
         mean_reg=0,
         use_noisy_field=False,
-        particle_ratio=0.25,
+        particle_ratio=0.1,
     )
 
 class BidirectionalUnetStrategy(BidirectionalStrategy):
