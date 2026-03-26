@@ -59,6 +59,50 @@ def _rot_x(centers: List[List[float]], degrees: float) -> List[List[float]]:
 
 
 # ---------------------------------------------------------------------------
+# 3-D rotation matrix helpers
+# ---------------------------------------------------------------------------
+
+def _Rz(degrees: float) -> torch.Tensor:
+    """Rotation matrix around the z-axis."""
+    rad = math.radians(degrees)
+    c, s = math.cos(rad), math.sin(rad)
+    return torch.tensor([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float32)
+
+
+def _Rx(degrees: float) -> torch.Tensor:
+    """Rotation matrix around the x-axis."""
+    rad = math.radians(degrees)
+    c, s = math.cos(rad), math.sin(rad)
+    return torch.tensor([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]], dtype=torch.float32)
+
+
+def _make_transport_maps(rot_z_deg: float, perturbed: bool):
+    """Return (transport_map, inverse_transport_map) for a 3-D rotation experiment.
+
+    Non-perturbed: T(x) = R_z(θ) · x
+    Perturbed:     T(x) = R_x(30°) · R_z(θ) · x   (x-tilt applied after z-rotation)
+
+    For row-vector convention (used throughout this codebase):
+        T(x)      = x  @ M.T
+        T⁻¹(y)   = y  @ M          (since M is orthogonal: M⁻¹ = M.T)
+    """
+    Rz = _Rz(rot_z_deg)
+    if perturbed:
+        Rx  = _Rx(30.0)
+        M   = Rx @ Rz       # compose: apply Rz first, then Rx
+    else:
+        M   = Rz
+
+    def transport_map(x: torch.Tensor) -> torch.Tensor:
+        return x @ M.T
+
+    def inverse_transport_map(y: torch.Tensor) -> torch.Tensor:
+        return y @ M        # M.T is the inverse; (M.T).T = M
+
+    return transport_map, inverse_transport_map
+
+
+# ---------------------------------------------------------------------------
 # 3-D distributions
 # ---------------------------------------------------------------------------
 
@@ -196,23 +240,26 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     new_src = GMM3DDistribution(new_src_c, blob_scale=0.25, device=device)
     new_tgt = GMM3DDistribution(new_tgt_c, blob_scale=0.25, device=device)
 
+    transport_map, inverse_transport_map = _make_transport_maps(90.0, perturbed)
+
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
     model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128)
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=200, trajectory_stride=2)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
 
     return ExperimentSpec(
-        name             = f"3d_simple{'_perturbed' if perturbed else ''}",
-        mode             = "3d",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"3d_simple{'_perturbed' if perturbed else ''}",
+        mode                  = "3d",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        transport_map         = transport_map,
+        inverse_transport_map = inverse_transport_map,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 
@@ -247,23 +294,26 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     new_src = GMM3DDistribution(new_src_c, blob_scale=0.3, device=device)
     new_tgt = GMM3DDistribution(new_tgt_c, blob_scale=0.3, device=device)
 
+    transport_map, inverse_transport_map = _make_transport_maps(120.0, perturbed)
+
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
     model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128)
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=200, trajectory_stride=2)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
 
     return ExperimentSpec(
-        name             = f"3d_medium{'_perturbed' if perturbed else ''}",
-        mode             = "3d",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"3d_medium{'_perturbed' if perturbed else ''}",
+        mode                  = "3d",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        transport_map         = transport_map,
+        inverse_transport_map = inverse_transport_map,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 
@@ -300,24 +350,27 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     new_src = GMM3DDistribution(new_src_c, blob_scale=0.3, device=device)
     new_tgt = GMM3DDistribution(new_tgt_c, blob_scale=0.3, device=device)
 
+    transport_map, inverse_transport_map = _make_transport_maps(60.0, perturbed)
+
     train_cfg              = _default_train_cfg(device)
     train_cfg.iterations   = 200
     method_cfg             = _default_method_cfg()
     model_cfg              = FeedForwardConfig(dimension=3, hidden_size=256)
-    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=200, trajectory_stride=2)
+    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
 
     return ExperimentSpec(
-        name             = f"3d_complex{'_perturbed' if perturbed else ''}",
-        mode             = "3d",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"3d_complex{'_perturbed' if perturbed else ''}",
+        mode                  = "3d",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        transport_map         = transport_map,
+        inverse_transport_map = inverse_transport_map,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 

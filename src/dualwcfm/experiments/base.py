@@ -341,7 +341,7 @@ def run_experiment(
 # ---------------------------------------------------------------------------
 
 def save_metrics_plot(output_dir: str) -> None:
-    """Read ``metrics.csv`` and write two summary PNG plots to *output_dir*."""
+    """Read ``metrics.csv`` and write a comprehensive summary dashboard to *output_dir*."""
     csv_path = os.path.join(output_dir, "metrics.csv")
     if not os.path.exists(csv_path):
         return
@@ -352,53 +352,96 @@ def save_metrics_plot(output_dir: str) -> None:
 
     iters = [int(r["iteration"]) for r in rows]
 
-    # --- Sliced-Wasserstein convergence curves ----------------------------
-    fig, (ax_src, ax_tgt) = plt.subplots(1, 2, figsize=(12, 4))
+    def _get(key):
+        vals = []
+        for r in rows:
+            v = r.get(key, "")
+            vals.append(float(v) if v not in ("", "N/A") else None)
+        return vals
 
-    for key, color, label in [
-        ("W1_mu", "royalblue",  "SW₁ – source"),
-        ("W2_mu", "steelblue",  "SW₂ – source"),
-    ]:
-        vals = [float(r.get(key, 0)) for r in rows]
-        ax_src.plot(iters, vals, label=label, color=color)
-    ax_src.set_title("Source marginal SW distances")
-    ax_src.set_xlabel("Iteration")
-    ax_src.legend()
-    ax_src.grid(True, alpha=0.3)
+    def _plot(ax, keys_colors_labels, title, ylabel="", log=False):
+        for key, color, label in keys_colors_labels:
+            vals = _get(key)
+            xs   = [i for i, v in zip(iters, vals) if v is not None]
+            ys   = [v for v in vals if v is not None]
+            if xs:
+                ax.plot(xs, ys, color=color, label=label, linewidth=1.8)
+        ax.set_title(title, fontsize=10, fontweight="bold")
+        ax.set_xlabel("Iteration", fontsize=8)
+        if ylabel:
+            ax.set_ylabel(ylabel, fontsize=8)
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.25, linestyle="--")
+        ax.tick_params(labelsize=7)
+        if log:
+            try:
+                ax.set_yscale("log")
+            except Exception:
+                pass
+        ax.spines[["top", "right"]].set_visible(False)
 
-    for key, color, label in [
-        ("W1_nu", "tomato",    "SW₁ – target"),
-        ("W2_nu", "firebrick", "SW₂ – target"),
-    ]:
-        vals = [float(r.get(key, 0)) for r in rows]
-        ax_tgt.plot(iters, vals, label=label, color=color)
-    ax_tgt.set_title("Target marginal SW distances")
-    ax_tgt.set_xlabel("Iteration")
-    ax_tgt.legend()
-    ax_tgt.grid(True, alpha=0.3)
+    # 3×2 comprehensive dashboard
+    fig, axes = plt.subplots(3, 2, figsize=(13, 11))
+    fig.patch.set_facecolor("#f8f9fa")
+    for ax in axes.flat:
+        ax.set_facecolor("#ffffff")
 
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "metrics.png"), dpi=100)
-    plt.close(fig)
+    # Row 0: SW marginal distances
+    _plot(axes[0, 0],
+          [("W1_mu", "#4878d0", "SW₁ source"), ("W2_mu", "#1a3a6e", "SW₂ source")],
+          "Source marginal (SW distance)", "SW")
+    _plot(axes[0, 1],
+          [("W1_nu", "#ee854a", "SW₁ target"), ("W2_nu", "#c0392b", "SW₂ target")],
+          "Target marginal (SW distance)", "SW")
 
-    # --- Importance-weight evolution --------------------------------------
-    fig, ax = plt.subplots(figsize=(7, 3))
-    w_mean = [float(r.get("weight_mean", 1.0)) for r in rows]
-    w_std  = [float(r.get("weight_std",  0.0)) for r in rows]
+    # Row 1: distributional quality + map errors
+    _plot(axes[1, 0],
+          [("mmd_nu",         "#6acc65", "MMD"),
+           ("energy_dist_nu", "#956cb4", "Energy dist"),
+           ("sinkhorn_div",   "#d65f5f", "Sinkhorn div")],
+          "Target distribution quality", log=True)
+    _plot(axes[1, 1],
+          [("map_err_fwd", "#0173b2", "Map err fwd  √E‖T(x)−ŷ‖²"),
+           ("map_err_bwd", "#de8f05", "Map err bwd  √E‖T⁻¹(y)−x̂‖²")],
+          "Transport map error (ground truth)", "RMSE")
 
-    ax.plot(iters, w_mean, label="mean(w)", color="navy")
-    ax.fill_between(
-        iters,
-        [m - s for m, s in zip(w_mean, w_std)],
-        [m + s for m, s in zip(w_mean, w_std)],
-        alpha=0.2, color="navy",
+    # Row 2: importance weights
+    w_mean = _get("weight_mean")
+    w_std  = _get("weight_std")
+    w_ess  = _get("weight_ess")
+    xs_w   = [i for i, v in zip(iters, w_mean) if v is not None]
+    ys_m   = [v for v in w_mean if v is not None]
+    ys_s   = [v for v in w_std  if v is not None]
+
+    axes[2, 0].plot(xs_w, ys_m, color="#023eff", linewidth=1.8, label="mean(w)")
+    if ys_s:
+        lo = [m - s for m, s in zip(ys_m, ys_s)]
+        hi = [m + s for m, s in zip(ys_m, ys_s)]
+        axes[2, 0].fill_between(xs_w, lo, hi, alpha=0.2, color="#023eff")
+    axes[2, 0].axhline(1.0, color="#ff7c00", linestyle="--", linewidth=1, label="ideal (1.0)")
+    axes[2, 0].set_title("Importance weight mean ± std", fontsize=10, fontweight="bold")
+    axes[2, 0].set_xlabel("Iteration", fontsize=8)
+    axes[2, 0].legend(fontsize=7)
+    axes[2, 0].grid(True, alpha=0.25, linestyle="--")
+    axes[2, 0].tick_params(labelsize=7)
+    axes[2, 0].spines[["top", "right"]].set_visible(False)
+
+    axes[2, 1].plot(
+        [i for i, v in zip(iters, w_ess) if v is not None],
+        [v for v in w_ess if v is not None],
+        color="#3cb44b", linewidth=1.8, label="ESS (normalised)"
     )
-    ax.axhline(1.0, color="red", linestyle="--", linewidth=1, label="ideal")
-    ax.set_title("Importance weight evolution")
-    ax.set_xlabel("Iteration")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    axes[2, 1].axhline(1.0, color="#ff7c00", linestyle="--", linewidth=1, label="ideal (1.0)")
+    axes[2, 1].set_ylim(0, 1.05)
+    axes[2, 1].set_title("Effective Sample Size", fontsize=10, fontweight="bold")
+    axes[2, 1].set_xlabel("Iteration", fontsize=8)
+    axes[2, 1].legend(fontsize=7)
+    axes[2, 1].grid(True, alpha=0.25, linestyle="--")
+    axes[2, 1].tick_params(labelsize=7)
+    axes[2, 1].spines[["top", "right"]].set_visible(False)
 
+    exp_name = os.path.basename(output_dir.rstrip("/\\"))
+    fig.suptitle(f"Training Dashboard — {exp_name}", fontsize=12, fontweight="bold", y=1.01)
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "weights_evolution.png"), dpi=100)
+    fig.savefig(os.path.join(output_dir, "metrics.png"), dpi=120, bbox_inches="tight")
     plt.close(fig)

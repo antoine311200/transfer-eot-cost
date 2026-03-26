@@ -91,7 +91,7 @@ class _LoggingMixin:
                  and t.dim() == 2 and t.shape[1] >= 2]
         if not valid:
             return
-        pts = torch.cat(valid, dim=0)[:, :2]
+        pts = torch.cat([t[:, :2] for t in valid], dim=0)
         xmin, xmax = pts[:, 0].min().item(), pts[:, 0].max().item()
         ymin, ymax = pts[:, 1].min().item(), pts[:, 1].max().item()
         dx = max((xmax - xmin) * padding, 0.5)
@@ -430,7 +430,8 @@ class LoggingVisualizer(_LoggingMixin, Visualizer):
             start, trainer.strategy.get_flow(epoch, trainer.device)[0],
             num_steps=25, sigma=trainer._sigma, extend=True,
         )
-        traj = traj[:, :, :self.dim]
+        data_dim = start.shape[1]
+        traj = traj[:, :, :data_dim]
         end = traj[-1]
         s = trainer.scale
         stride = self.config.trajectory_stride
@@ -598,18 +599,43 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
         if mu_t.dim() != 2 or mu_t.shape[1] < 2:
             return
         self._lock_axis_lim(mu_t, nu_t, x_coup, y_coup)
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        kw = dict(s=4, alpha=0.35, linewidths=0)
-        axes[0].scatter(mu_t[:, 0],   mu_t[:, 1],   c="royalblue",  label=r"$\mu_t$ theory",  **kw)
-        axes[0].scatter(x_coup[:, 0], x_coup[:, 1], c="darkorange", label=r"$\pi_t^{(1)}$",   **kw)
-        axes[0].legend(fontsize=7); axes[0].set_aspect("equal")
-        axes[0].set_title(f"Source marginal (xy) — iter {time_step}")
-        self._apply_axis_lim(axes[0])
-        axes[1].scatter(nu_t[:, 0],   nu_t[:, 1],   c="firebrick",  label=r"$\nu_t$ theory",  **kw)
-        axes[1].scatter(y_coup[:, 0], y_coup[:, 1], c="limegreen",  label=r"$\pi_t^{(2)}$",   **kw)
-        axes[1].legend(fontsize=7); axes[1].set_aspect("equal")
-        axes[1].set_title(f"Target marginal (xy) — iter {time_step}")
-        self._apply_axis_lim(axes[1])
+        # 3D experiments: show XY, XZ, YZ projections (3 columns × 2 rows)
+        # 2D experiments: show 1 column × 2 rows
+        dim = mu_t.shape[1]
+        projections = [(0, 1, "X", "Y")]
+        if dim >= 3:
+            projections += [(0, 2, "X", "Z"), (1, 2, "Y", "Z")]
+
+        ncols = len(projections)
+        fig, axes = plt.subplots(2, ncols, figsize=(5 * ncols, 9))
+        if ncols == 1:
+            axes = axes[:, None]   # make 2D
+
+        kw = dict(s=5, alpha=0.40, linewidths=0)
+        for col, (xi, yi, xl, yl) in enumerate(projections):
+            ax_src, ax_tgt = axes[0, col], axes[1, col]
+            proj = f"{xl}{yl}"
+
+            ax_src.scatter(mu_t[:, xi],   mu_t[:, yi],   c="#4878d0", label=r"$\mu_t$",         **kw)
+            ax_src.scatter(x_coup[:, xi], x_coup[:, yi], c="#ee854a", label=r"$\pi_t^{(1)}$",   **kw)
+            ax_src.set_title(f"Source — {proj}  (iter {time_step})", fontsize=8, fontweight="bold")
+            ax_src.set_xlabel(xl, fontsize=7); ax_src.set_ylabel(yl, fontsize=7)
+            ax_src.legend(fontsize=6); ax_src.set_aspect("equal")
+            ax_src.grid(True, alpha=0.2); ax_src.tick_params(labelsize=6)
+            ax_src.spines[["top", "right"]].set_visible(False)
+            if col == 0:
+                self._apply_axis_lim(ax_src)
+
+            ax_tgt.scatter(nu_t[:, xi],   nu_t[:, yi],   c="#c44e52", label=r"$\nu_t$",         **kw)
+            ax_tgt.scatter(y_coup[:, xi], y_coup[:, yi], c="#55a868", label=r"$\pi_t^{(2)}$",   **kw)
+            ax_tgt.set_title(f"Target — {proj}  (iter {time_step})", fontsize=8, fontweight="bold")
+            ax_tgt.set_xlabel(xl, fontsize=7); ax_tgt.set_ylabel(yl, fontsize=7)
+            ax_tgt.legend(fontsize=6); ax_tgt.set_aspect("equal")
+            ax_tgt.grid(True, alpha=0.2); ax_tgt.tick_params(labelsize=6)
+            ax_tgt.spines[["top", "right"]].set_visible(False)
+            if col == 0:
+                self._apply_axis_lim(ax_tgt)
+
         fig.tight_layout()
         self._accumulate(fig, "marginals")
         self._save_fig(fig, "marginals", f"marginals_{time_step:04d}.png")

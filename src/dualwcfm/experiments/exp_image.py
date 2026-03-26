@@ -103,7 +103,9 @@ class DualUNetWrapper(torch.nn.Module):
 
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         t = torch.zeros(x.shape[0], device=x.device, dtype=torch.float32)
-        return self.model(t, x)
+        out = self.model(t, x)  # (N, C) after Flatten when stop_middle=True
+        # Collapse to (N, 1, 1, 1) regardless of input channels
+        return out.view(x.shape[0], -1).mean(dim=1).view(x.shape[0], 1, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -131,13 +133,15 @@ class BidirectionalUnetStrategy(BidirectionalStrategy):
     def _create_models(self, dim: int, hidden_size: int) -> None:  # noqa: D102
         self._device = None  # Reset so the next to_device() call moves the new models.
         C, H, W = self.config.image_shape
+        num_channels   = hidden_size if hidden_size > 0 else _NUM_CHANNELS
+        num_res_blocks = getattr(self.config, "num_res_blocks", _NUM_RES_BLOCKS)
 
         def _make_unet(in_channels: int, stop_middle: bool = False) -> UNetModel:
             return UNetModel(
                 dim            = (in_channels, H, W),
                 channel_mult   = _CHANNEL_MULT,
-                num_channels   = _NUM_CHANNELS,
-                num_res_blocks = _NUM_RES_BLOCKS,
+                num_channels   = num_channels,
+                num_res_blocks = num_res_blocks,
                 stop_middle    = stop_middle,
             )
 
@@ -247,14 +251,14 @@ def _make_flip_distributions(
 def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 20_000,
-        marginal_epochs          = 15_000,
-        pretrain_epochs          = 20_000,
-        dual_epochs              = 100,
-        cfm_epochs               = 500,
-        advance_steps            = 30,
+        dataset_size             = 2_000,
+        marginal_epochs          = 30_000,
+        pretrain_epochs          = 30_000,
+        dual_epochs              = 50,
+        cfm_epochs               = 1000,
+        advance_steps            = 50,
         iterations               = 30,
-        num_rectified_flow       = 1,
+        num_rectified_flow       = 2,
         scale_factor             = 1.0,
         batch_size               = 128,
         use_disk_coupling        = True,
@@ -266,16 +270,16 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma           = 0.05,
-        sigma2          = 0.05,
+        sigma           = 0.01,
+        sigma2          = 0.01,
         loss            = "weighted",
         l2_reg          = 0,
         lip_reg         = 0,
         mean_reg        = 0,
         use_noisy_field = False,
-        particle_ratio  = 0.25,
+        particle_ratio  = 0.1,
         lr_cosine_decay = False,
-        lr_min_factor   = 0.5,
+        lr_min_factor   = 0.1,
     )
 
 
@@ -425,6 +429,58 @@ def _fashion_medium(perturbed: bool, output_root: str) -> ExperimentSpec:
 # ---------------------------------------------------------------------------
 # Public catalogue
 # ---------------------------------------------------------------------------
+
+def make_image_experiments_v2(output_root: str = "results") -> List[ExperimentSpec]:
+    """Image experiments with improved hyperparameters for better DL convergence.
+
+    Key changes vs v1
+    -----------------
+    - UNet: 64 base channels (was 32), 2 res blocks (was 1)  → more capacity
+    - dual_epochs: 300 (was 100)  → dual potentials converge per iteration
+    - cfm_epochs:  1000 (was 500) → flow model converges per iteration
+    - advance_steps: 20 (was 30)  → slower coupling advance, UNets can track it
+    - iterations: 60 (was 30)     → more outer loop steps
+    - batch_size: 256 (was 128)   → more stable gradient estimates
+    - particle_ratio: 0.5 (was 0.25) → more new-marginal samples in CFM loss
+    - sigma: 0.1 (was 0.05)       → slightly more regularisation for image scale
+    - lr_cosine_decay: True       → learning rate annealing for stability
+    - Learning rates halved       → slower, more careful updates
+    """
+    try:
+        import torchvision  # noqa: F401
+    except ImportError:
+        import warnings
+        warnings.warn("torchvision not found – skipping image experiments.", stacklevel=2)
+        return []
+
+    # Build v1 specs then override configs in place
+    specs = make_image_experiments(output_root)
+    for spec in specs:
+        t = spec.train_cfg
+        t.iterations      = 60
+        t.dual_epochs     = 300
+        t.cfm_epochs      = 1_000
+        t.advance_steps   = 20
+        t.batch_size      = 256
+        t.marginal_epochs = 15_000
+        t.pretrain_epochs = 20_000
+
+        m = spec.method_cfg
+        m.particle_ratio  = 0.5
+        m.sigma           = 0.1
+        m.sigma2          = 0.1
+        m.lr_cosine_decay = True
+
+        c = spec.model_cfg
+        c.hidden_size        = 64
+        c.num_res_blocks     = 2
+        c.dual_learning_rate = 5e-5
+        c.mu_learning_rate   = 1e-4
+        c.nu_learning_rate   = 1e-4
+        c.flow_learning_rate = 1e-4
+
+    return specs
+
 
 def make_image_experiments(output_root: str = "results") -> List[ExperimentSpec]:
     """Return all image experiment specs (requires torchvision).

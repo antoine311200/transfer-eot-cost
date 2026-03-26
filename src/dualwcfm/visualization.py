@@ -526,9 +526,18 @@ class VisualizerImage(Visualizer):
         C, H, W = self.img_shape
 
         def _show(ax, tensor, i, title):
-            img = tensor[i]
-            img = img.squeeze(0) if img.dim() == 3 else img.reshape(H, W)
-            ax.imshow(img.float().numpy(), cmap="gray", vmin=-1, vmax=1)
+            img = tensor[i]  # (C, H, W)
+            if img.dim() == 3 and img.shape[0] == 1:
+                img = img.squeeze(0)          # (H, W) — grayscale
+                cmap = "gray"
+            elif img.dim() == 3:
+                img = img.permute(1, 2, 0)   # (H, W, C) — RGB
+                img = img.clamp(-1, 1)
+                cmap = None
+            else:
+                img = img.reshape(H, W)
+                cmap = "gray"
+            ax.imshow(img.float().numpy(), cmap=cmap, vmin=-1, vmax=1)
             ax.set_title(title, fontsize=7); ax.axis("off")
 
         for i in range(n):

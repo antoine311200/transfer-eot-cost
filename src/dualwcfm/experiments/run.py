@@ -54,12 +54,16 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── Experiment selection ─────────────────────────────────────────────────
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
-        "--mode", choices=["2d", "3d", "image", "color", "gushchin"],
+        "--mode", choices=["2d", "3d", "image", "image-v2", "color", "gushchin"],
         help="Experiment mode.  Required unless --all is given.",
     )
     sel.add_argument(
-        "--level", choices=["simple", "medium", "complex"],
-        help="Difficulty level of the experiment.",
+        "--level",
+        help=(
+            "Filter experiments by name substring.  "
+            "Standard levels: simple, medium, complex.  "
+            "Gushchin examples: 8d, gmm, eps0p1, eps0p5, eps2p0."
+        ),
     )
     sel.add_argument(
         "--perturbed", action="store_true",
@@ -243,7 +247,7 @@ def main() -> None:
 
     from dualwcfm.experiments.exp_2d       import make_2d_experiments
     from dualwcfm.experiments.exp_3d       import make_3d_experiments
-    from dualwcfm.experiments.exp_image    import make_image_experiments
+    from dualwcfm.experiments.exp_image    import make_image_experiments, make_image_experiments_v2
     from dualwcfm.experiments.exp_color    import make_color_experiments
     from dualwcfm.experiments.exp_gushchin import make_gushchin_experiments
     from dualwcfm.experiments.base         import run_experiment
@@ -253,6 +257,7 @@ def main() -> None:
         "2d":       make_2d_experiments,
         "3d":       make_3d_experiments,
         "image":    make_image_experiments,
+        "image-v2": make_image_experiments_v2,
         "color":    make_color_experiments,
         "gushchin": make_gushchin_experiments,
     }

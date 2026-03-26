@@ -163,16 +163,19 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
         device=device,
     )
 
-    _theta_med = math.radians(60.0)
+    # Transport map for the *new* marginals: rotate by the same angle as the
+    # new target (60° standard, 70° perturbed).  For the reference coupling the
+    # rotation is always 60°; the perturbed experiment tests adaptation to an
+    # extra 10° tilt on the target, so T must reflect the new marginals.
+    _theta_med = math.radians(60.0 + (10.0 if perturbed else 0.0))
     _c, _s     = math.cos(_theta_med), math.sin(_theta_med)
-    _R60       = torch.tensor([[_c, -_s], [_s,  _c]], dtype=torch.float32)
-    _R60_inv   = _R60.T  # rotation inverse = transpose
+    _R_med     = torch.tensor([[_c, -_s], [_s,  _c]], dtype=torch.float32)
 
     def transport_map_med(x: torch.Tensor) -> torch.Tensor:
-        return x @ _R60.T
+        return x @ _R_med.T          # R · x  (row-vector convention)
 
     def inverse_transport_map_med(y: torch.Tensor) -> torch.Tensor:
-        return y @ _R60_inv.T
+        return y @ _R_med            # Rᵀ · y  =  R⁻¹ · y
 
     train_cfg              = _default_train_cfg(device)
     train_cfg.iterations   = 100
@@ -225,16 +228,16 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
         device=device,
     )
 
-    _theta_cpx = math.radians(45.0)
+    # As with medium: map angle matches the *new* target rotation angle.
+    _theta_cpx = math.radians(45.0 + (10.0 if perturbed else 0.0))
     _c2, _s2   = math.cos(_theta_cpx), math.sin(_theta_cpx)
-    _R45       = torch.tensor([[_c2, -_s2], [_s2,  _c2]], dtype=torch.float32)
-    _R45_inv   = _R45.T
+    _R_cpx     = torch.tensor([[_c2, -_s2], [_s2,  _c2]], dtype=torch.float32)
 
     def transport_map_cpx(x: torch.Tensor) -> torch.Tensor:
-        return x @ _R45.T
+        return x @ _R_cpx.T
 
     def inverse_transport_map_cpx(y: torch.Tensor) -> torch.Tensor:
-        return y @ _R45_inv.T
+        return y @ _R_cpx
 
     train_cfg                = _default_train_cfg(device)
     train_cfg.iterations     = 150

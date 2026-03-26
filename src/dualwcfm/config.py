@@ -57,6 +57,7 @@ class FeedForwardConfig(ModelConfig):
     hidden_size: int = 64
     # For image models
     image_shape: Optional[Tuple[int, int, int]] = None  # (C, H, W)
+    num_res_blocks: int = 1  # UNet residual blocks per resolution level
 
     @property
     def is_image_model(self) -> bool:

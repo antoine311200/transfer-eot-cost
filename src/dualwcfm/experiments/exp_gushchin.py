@@ -311,7 +311,7 @@ def _gaussian_iso_2d(eps: float, output_root: str) -> ExperimentSpec:
     method_cfg.sigma  = eps / 4    # tune sigma ≈ eps / 4 for Gaussian experiments
     method_cfg.sigma2 = eps / 4
     model_cfg  = FeedForwardConfig(dimension=2, hidden_size=64)
-    vis_cfg    = VisualizeConfig(show_each=10, n_trajectories=300, trajectory_stride=2)
+    vis_cfg    = VisualizeConfig(show_each=10, n_trajectories=300, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     # Analytical conditional-mean transport map for the Gaussian EOT plan.
     # T(x) = new_nu_mean + C_xy.T @ Σ_μ⁻¹ @ (x - new_mu_mean)
@@ -406,11 +406,16 @@ def _gaussian_gmm_2d(eps: float, output_root: str) -> ExperimentSpec:
     new_tgt = GMMDistribution(new_tgt_means, covs, device=device)
 
     train_cfg  = _default_train_cfg(device, dim=2)
+    train_cfg.iterations      = 150
+    train_cfg.batch_size      = 8_192
+    train_cfg.pretrain_epochs = 20_000
+    train_cfg.marginal_epochs = 10_000
+    train_cfg.scale_factor    = 100.0
     method_cfg = _default_method_cfg()
     method_cfg.sigma  = max(eps / 4, 0.01)
     method_cfg.sigma2 = max(eps / 4, 0.01)
     model_cfg  = FeedForwardConfig(dimension=2, hidden_size=64)
-    vis_cfg    = VisualizeConfig(show_each=10, n_trajectories=400, trajectory_stride=2)
+    vis_cfg    = VisualizeConfig(show_each=5, n_trajectories=400, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     eps_tag = str(eps).replace(".", "p")
     return ExperimentSpec(
@@ -468,7 +473,7 @@ def _gaussian_iso_nd(dim: int, eps: float, output_root: str) -> ExperimentSpec:
     method_cfg.sigma  = eps / 4
     method_cfg.sigma2 = eps / 4
     model_cfg  = FeedForwardConfig(dimension=dim, hidden_size=hidden)
-    vis_cfg    = VisualizeConfig(show_each=25, n_trajectories=300, trajectory_stride=2)
+    vis_cfg    = VisualizeConfig(show_each=25, n_trajectories=300, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     # Analytical transport map for the shifted new marginals
     _Smu_inv  = torch.tensor(np.linalg.inv(mu_cov), dtype=torch.float32)
