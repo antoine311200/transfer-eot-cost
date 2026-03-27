@@ -158,6 +158,84 @@ class Visualizer:
             plt.suptitle(title)
             self.save_fig(plt.gcf(), "marginals", fname)
 
+    def at_flow_pretrain_end(self, trainer: "Trainer", ctx: dict) -> None:
+        """Visualize the pretrained forward (and backward) flows on the new marginals.
+
+        Called once after the initial flow models are trained on the reference
+        coupling.  Shows how poorly (or well) the pretrained model handles the
+        *new* marginals **before** any dual adaptation begins — a key diagnostic
+        for the paper comparing the pretrained baseline against the adapted result.
+
+        Forward:  new_source → pretrained_forward → compare vs new_target
+        Backward: new_target → pretrained_backward → compare vs new_source
+
+        Saves to ``pretrain/pretrained_fwd_new_marginals.png``
+        (and ``pretrain/pretrained_bwd_new_marginals.png`` if bidirectional).
+        """
+        strategy = trainer.strategy
+        fwd_model = getattr(strategy, "initial_forward_model", None)
+        if fwd_model is None:
+            return
+
+        n = min(self.config.n_trajectories, 500)
+        device = trainer.device
+        s = trainer.scale
+        dim = trainer.strategy.config.dimension
+
+        x_new = trainer.new_source.sample(n).to(device)
+        fwd_model.eval()
+        with torch.no_grad():
+            evolved = trainer.flow_matching.evolve(
+                x_new, fwd_model, num_steps=100, sigma=0.0, extend=True
+            )
+            y_hat = evolved[:, :dim]
+        y_true = trainer.new_target.sample(n).to(device)
+
+        map_err_str = ""
+        if self.transport_map is not None:
+            with torch.no_grad():
+                err = (y_hat - self.transport_map(x_new)).pow(2).sum(-1).mean().sqrt()
+            map_err_str = f"  (map err = {err.item() * s:.4f})"
+
+        self._display_evolution(
+            (x_new * s).cpu(), (y_hat * s).cpu(), (y_true * s).cpu(),
+        )
+        plt.suptitle(
+            f"Pretrained forward flow on new marginals — before adaptation{map_err_str}",
+            fontsize=10,
+        )
+        self.save_fig(plt.gcf(), "pretrain", "pretrained_fwd_new_marginals.png")
+
+        # Backward direction (BidirectionalStrategy only)
+        bwd_model = getattr(strategy, "initial_backward_model", None)
+        if bwd_model is None or not isinstance(strategy, BidirectionalStrategy):
+            return
+
+        inv_map = getattr(self, "_inverse_transport_map", None)
+        y_new = trainer.new_target.sample(n).to(device)
+        bwd_model.eval()
+        with torch.no_grad():
+            evolved_bwd = trainer.flow_matching.evolve(
+                y_new, bwd_model, num_steps=100, sigma=0.0, extend=True
+            )
+            x_hat = evolved_bwd[:, :dim]
+        x_true = trainer.new_source.sample(n).to(device)
+
+        map_err_bwd_str = ""
+        if inv_map is not None:
+            with torch.no_grad():
+                err_bwd = (x_hat - inv_map(y_new)).pow(2).sum(-1).mean().sqrt()
+            map_err_bwd_str = f"  (map err = {err_bwd.item() * s:.4f})"
+
+        self._display_evolution(
+            (y_new * s).cpu(), (x_hat * s).cpu(), (x_true * s).cpu(),
+        )
+        plt.suptitle(
+            f"Pretrained backward flow on new marginals — before adaptation{map_err_bwd_str}",
+            fontsize=10,
+        )
+        self.save_fig(plt.gcf(), "pretrain", "pretrained_bwd_new_marginals.png")
+
     # ------------------------------------------------------------------
     # Preprocess lifecycle hooks (no-ops)
     # ------------------------------------------------------------------
@@ -513,6 +591,65 @@ class VisualizerImage(Visualizer):
             self._display_evolution((start * s).cpu(), (end * s).cpu(), (target * s).cpu())
             plt.suptitle(title)
             self.save_fig(plt.gcf(), "marginals", fname)
+
+    def at_flow_pretrain_end(self, trainer: "Trainer", ctx: dict) -> None:
+        """Image version: 3-row grid (source | pretrained output | true target).
+
+        Shows the pretrained forward (and backward) flows applied to the new
+        marginals before any dual adaptation.  Each column is one image sample;
+        rows are: source, transported by pretrained model, true target.
+        Saves to ``pretrain/pretrained_fwd_new_marginals.png``.
+        """
+        strategy = trainer.strategy
+        fwd_model = getattr(strategy, "initial_forward_model", None)
+        if fwd_model is None:
+            return
+
+        n = min(self.config.n_trajectories, 6)
+        device = trainer.device
+        s = trainer.scale
+        C = self.img_shape[0]
+
+        x_new = trainer.new_source.sample(n).to(device)
+        fwd_model.eval()
+        with torch.no_grad():
+            evolved = trainer.flow_matching.evolve(
+                x_new, fwd_model, num_steps=100, sigma=0.0, extend=True
+            )
+            y_hat = evolved[:, :C, :, :] if is_image_tensor(evolved) else evolved[:, :C]
+        y_true = trainer.new_target.sample(n).to(device)
+
+        self._display_evolution(
+            (x_new * s).cpu(), (y_hat * s).cpu(), (y_true * s).cpu()
+        )
+        plt.suptitle(
+            "Pretrained forward flow on new marginals — before adaptation",
+            fontsize=10,
+        )
+        self.save_fig(plt.gcf(), "pretrain", "pretrained_fwd_new_marginals.png")
+
+        # Backward direction (BidirectionalStrategy only)
+        bwd_model = getattr(strategy, "initial_backward_model", None)
+        if bwd_model is None or not isinstance(strategy, BidirectionalStrategy):
+            return
+
+        y_new = trainer.new_target.sample(n).to(device)
+        bwd_model.eval()
+        with torch.no_grad():
+            evolved_bwd = trainer.flow_matching.evolve(
+                y_new, bwd_model, num_steps=100, sigma=0.0, extend=True
+            )
+            x_hat = evolved_bwd[:, :C, :, :] if is_image_tensor(evolved_bwd) else evolved_bwd[:, :C]
+        x_true = trainer.new_source.sample(n).to(device)
+
+        self._display_evolution(
+            (y_new * s).cpu(), (x_hat * s).cpu(), (x_true * s).cpu()
+        )
+        plt.suptitle(
+            "Pretrained backward flow on new marginals — before adaptation",
+            fontsize=10,
+        )
+        self.save_fig(plt.gcf(), "pretrain", "pretrained_bwd_new_marginals.png")
 
     def _display_evolution(
         self, start_points: torch.Tensor, end_points: torch.Tensor,

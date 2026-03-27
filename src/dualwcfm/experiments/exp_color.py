@@ -4,26 +4,43 @@ Color-domain image transfer experiments (E5 in the NeurIPS experiment plan).
 
 Design principle
 ----------------
-The reference coupling π encodes a deterministic color-channel transformation
-applied to images of class A.  The new source μ' consists of images of class B
-(a *different* class, hence different support) colored in a *different* color
-scheme, and the new target ν' is the corresponding color-shifted class-B images.
+All experiments share the **same underlying transport map**
 
-This setup deliberately makes the pretrained forward flow inapplicable to the
-new marginals: the source and target color distributions differ completely from
-the reference.  DualWCFM must adapt the coupling via dual-potential reweighting.
+    T(r, g, b) = (g, b, r)          # cyclic left-shift of RGB channels
+
+applied per-pixel to the (normalised) 3-channel image.  Because T is a fixed
+linear transformation, the quadratic transport cost is the same for every pair
+on the same orbit:
+
+    c(x, T(x)) = ‖x − T(x)‖² = 2v²   per pixel (v = grayscale intensity)
+
+This means reference and new marginals present the *same difficulty* to the
+optimal transport problem; only the image content (digit class / CIFAR class)
+and the specific colour pair differ, creating a genuine domain shift while
+keeping the transport cost controlled.
+
+The T-cyclic orbits used:
+    RED   (1,0,0) → BLUE   (0,0,1) → GREEN  (0,1,0) → RED    [reference orbit]
+    PURPLE(1,0,1) → CYAN   (0,1,1) → YELLOW (1,1,0) → PURPLE [new-marginal orbit]
 
 Experiments
 -----------
-mnist_rgb_simple  – MNIST digit 3 (red→blue) transferred to digit 7 (green→purple)
-mnist_rgb_complex – MNIST digit 3 (red→blue) transferred to digit 7 (yellow→cyan)
-                    (trickier: orthogonal hue shift instead of complementary)
-cifar_hue_simple  – CIFAR-10 automobile (+0.3 hue) transferred to airplane (+0.3 hue)
-cifar_hue_medium  – CIFAR-10 automobile (+0.3 hue) transferred to ship  (+0.3 hue)
+mnist_rgb_simple      – digit 3 (RED→BLUE) reference; digit 7 (PURPLE→CYAN) new marginals
+                        T(PURPLE) = CYAN, same cost 2v²
+mnist_rgb_complex     – digit 3 (RED→BLUE) reference; digit 7 (YELLOW→PURPLE) new marginals
+                        T(YELLOW) = PURPLE, same cost 2v²; harder because the source
+                        two-channel structure (R+G) is more distant from reference (R only)
+mnist_rgb_flip_simple – digit 3 (RED→flip(BLUE)) reference; digit 7 (PURPLE→flip(CYAN)) new
+                        T = hflip ∘ T_cyclic; combines color shift with spatial flip
+mnist_rgb_flip_complex– digit 3 (RED→flip(BLUE)) reference; digit 7 (YELLOW→flip(PURPLE)) new
+                        Hardest MNIST variant: two-channel source + spatial flip mismatch
+cifar_hue_simple      – CIFAR-10 automobile (hue+0.3) reference; airplane (hue+0.3) new
+cifar_hue_medium      – CIFAR-10 automobile (hue+0.3) reference; ship    (hue+0.3) new
 
-Each experiment has a *standard* and *perturbed* variant.  In the perturbed
-variant the new target receives an additional +10° rotation so that the true
-target marginal is slightly off from the reference-coupling target.
+Standard variants: Supp(T(μ')) = Supp(ν') exactly.
+Perturbed variants: the new target receives an additional +10° spatial rotation,
+breaking the exact support match and probing robustness to slight distribution
+mismatch — analogous to the perturbed variants in E2/E3.
 
 UNet architecture
 -----------------
@@ -149,15 +166,18 @@ def _make_color_coupling(
     src_rgb: Tuple[float, float, float],
     tgt_rgb: Tuple[float, float, float],
     rotation_degrees: float = 0.0,
+    flip_target: bool = False,
 ) -> FunctionalCouplingDistribution:
     """Build a coupling (color_src(x), color_tgt(x)) from a fixed image set.
 
-    Optionally applies an additional rotation to the target image.
+    Optionally applies a horizontal flip and/or rotation to the target image.
     """
     def _sample(k: int):
         idx = torch.randint(len(images), (k,))
         x   = _apply_color_mask(images[idx], src_rgb)
         y   = _apply_color_mask(images[idx], tgt_rgb)
+        if flip_target:
+            y = TF.hflip(y)
         if rotation_degrees != 0.0:
             y = TF.rotate(y, rotation_degrees, fill=-1.0)
         return x, y
@@ -171,6 +191,7 @@ def _make_color_distributions(
     tgt_rgb: Tuple[float, float, float],
     rotation_degrees: float = 0.0,
     extra_target_rotation: float = 0.0,
+    flip_target: bool = False,
 ) -> Tuple[MarginalDistribution, MarginalDistribution]:
     """Build (source_dist, target_dist) with the given color masks."""
     def _src(k: int):
@@ -180,6 +201,8 @@ def _make_color_distributions(
     def _tgt(k: int):
         idx = torch.randint(len(images), (k,))
         y = _apply_color_mask(images[idx], tgt_rgb)
+        if flip_target:
+            y = TF.hflip(y)
         if rotation_degrees != 0.0:
             y = TF.rotate(y, rotation_degrees, fill=-1.0)
         if extra_target_rotation != 0.0:
@@ -230,18 +253,18 @@ def _make_hue_distributions(
 def _default_train_cfg_mnist(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 20_000,
-        marginal_epochs          = 20_000,
-        pretrain_epochs          = 25_000,
-        dual_epochs              = 100,
+        dataset_size             = 2_000,
+        marginal_epochs          = 10_000,
+        pretrain_epochs          = 2_001,
+        dual_epochs              = 200,
         cfm_epochs               = 500,
         advance_steps            = 200,
-        iterations               = 20,
+        iterations               = 21,
         num_rectified_flow       = 1,
         scale_factor             = 1.0,
         batch_size               = 128,
         use_disk_coupling        = True,
-        coupling_chunk_size      = 2_048,
+        coupling_chunk_size      = 256,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
     )
@@ -251,8 +274,8 @@ def _default_train_cfg_cifar(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
         dataset_size             = 50_000,
-        marginal_epochs          = 30_000,
-        pretrain_epochs          = 50_000,
+        marginal_epochs          = 5_000,
+        pretrain_epochs          = 1_000,
         dual_epochs              = 200,
         cfm_epochs               = 500,
         advance_steps            = 200,
@@ -261,7 +284,7 @@ def _default_train_cfg_cifar(device: torch.device) -> TrainingConfig:
         scale_factor             = 1.0,
         batch_size               = 64,
         use_disk_coupling        = True,
-        coupling_chunk_size      = 2_048,
+        coupling_chunk_size      = 256,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
     )
@@ -295,18 +318,66 @@ _YELLOW = (1.0, 1.0, 0.0)
 _CYAN   = (0.0, 1.0, 1.0)
 
 
-def _mnist_rgb_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
-    """MNIST: digit 3 (red→blue) reference; digit 7 (green→purple) new marginals.
+# ---------------------------------------------------------------------------
+# Shared transport map  T(r,g,b) = (g,b,r)  — cyclic left-shift of channels
+# ---------------------------------------------------------------------------
 
-    Reference coupling
-        (red_digit3, blue_digit3) — deterministic color shift.
-    New marginals
-        Source = green_digit7,  Target = purple_digit7
-        (+ 10° rotation if perturbed).
-    Why pretrained model fails
-        Reference was trained on red source; new source is green. The pretrained
-        forward flow maps red→blue but outputs are blue when the input is green,
-        which does not match the true purple target.
+def _cyclic_color_shift(x: torch.Tensor) -> torch.Tensor:
+    """T(r,g,b) = (g,b,r): cyclic left-shift of RGB channels.
+
+    Works on batches of shape (N, 3, H, W).
+    Orbits: RED→BLUE→GREEN→RED  and  PURPLE→CYAN→YELLOW→PURPLE.
+    Cost per pixel: ‖x − T(x)‖² = 2v² (v = pixel intensity).
+    """
+    return torch.stack([x[:, 1], x[:, 2], x[:, 0]], dim=1)
+
+
+def _cyclic_color_shift_inv(y: torch.Tensor) -> torch.Tensor:
+    """T⁻¹(r,g,b) = (b,r,g): inverse cyclic shift (right-shift).
+
+    T⁻¹(BLUE)=(RED), T⁻¹(CYAN)=(PURPLE), T⁻¹(PURPLE)=(YELLOW).
+    """
+    return torch.stack([y[:, 2], y[:, 0], y[:, 1]], dim=1)
+
+
+def _flip_cyclic(x: torch.Tensor) -> torch.Tensor:
+    """T_flip(x) = hflip(T_cyclic(x)): cyclic channel shift then horizontal flip.
+
+    Combines the colour transformation with a spatial reflection.
+    Orbits (colour component only):
+        RED→BLUE→GREEN→RED  and  PURPLE→CYAN→YELLOW→PURPLE
+    The flip is applied after the channel permutation, so the target is both
+    colour-shifted AND mirrored left–right.
+    """
+    return TF.hflip(_cyclic_color_shift(x))
+
+
+def _flip_cyclic_inv(y: torch.Tensor) -> torch.Tensor:
+    """T_flip⁻¹(y) = T_cyclic⁻¹(hflip(y)): inverse of hflip ∘ T_cyclic.
+
+    Since hflip is its own inverse: T_flip⁻¹ = T_cyclic⁻¹ ∘ hflip.
+    """
+    return _cyclic_color_shift_inv(TF.hflip(y))
+
+
+def _mnist_rgb_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
+    """MNIST: digit 3 (RED→BLUE) reference; digit 7 (PURPLE→CYAN) new marginals.
+
+    Transport map  T(r,g,b) = (g,b,r):
+        T(RED)    = T(1,0,0) = (0,0,1) = BLUE   [reference]
+        T(PURPLE) = T(1,0,1) = (0,1,1) = CYAN   [new marginals]
+
+    Both pairs share the same quadratic transport cost: 2v² per pixel,
+    so the transport *difficulty* is identical between reference and new marginals.
+    Supp(T(purple_digit7)) = Supp(cyan_digit7) exactly in the standard variant;
+    the perturbed variant adds a +10° spatial rotation on the cyan target to
+    break the exact support match.
+
+    Why the pretrained model fails
+        The model was trained on RED sources; PURPLE inputs have an extra B channel
+        that the model has never seen.  It outputs BLUE-ish images, not CYAN.
+        Dual adaptation must re-weight the coupling to discover that purple digit 7
+        should be paired with cyan digit 7 of the same image content.
     """
     device    = get_device()
     data_root = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data")
@@ -319,8 +390,8 @@ def _mnist_rgb_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     coupling         = _make_color_coupling(ref_images, src_rgb=_RED, tgt_rgb=_BLUE)
     new_src, new_tgt = _make_color_distributions(
         new_images,
-        src_rgb               = _GREEN,
-        tgt_rgb               = _PURPLE,
+        src_rgb               = _PURPLE,
+        tgt_rgb               = _CYAN,
         extra_target_rotation = 10.0 if perturbed else 0.0,
     )
 
@@ -345,26 +416,35 @@ def _mnist_rgb_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     )
 
     return ExperimentSpec(
-        name             = f"color_mnist_rgb_simple{'_perturbed' if perturbed else ''}",
-        mode             = "image",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"color_mnist_rgb_simple{'_perturbed' if perturbed else ''}",
+        mode                  = "image",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        transport_map         = _cyclic_color_shift,
+        inverse_transport_map = _cyclic_color_shift_inv,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 
 def _mnist_rgb_complex(perturbed: bool, output_root: str) -> ExperimentSpec:
-    """MNIST: digit 3 (red→blue) reference; digit 7 (yellow→cyan) new marginals.
+    """MNIST: digit 3 (RED→BLUE) reference; digit 7 (YELLOW→PURPLE) new marginals.
 
-    The yellow→cyan shift is orthogonal to the red→blue reference, making
-    generalisation harder: the model must identify the abstract "complementary
-    color channel" rule and apply it to an entirely different hue pair.
+    Transport map  T(r,g,b) = (g,b,r):
+        T(RED)    = T(1,0,0) = (0,0,1) = BLUE   [reference]
+        T(YELLOW) = T(1,1,0) = (1,0,1) = PURPLE [new marginals]
+
+    Same quadratic cost 2v² per pixel as the reference and the simple experiment.
+
+    Harder than 'simple' (PURPLE→CYAN) because the YELLOW source has two active
+    channels (R+G) while the reference source has only one (R).  The G channel is
+    entirely absent from the reference support, so the pretrained flow has never
+    seen it and the mismatch is more severe: the model outputs BLUE (ignoring G),
+    whereas the true target is PURPLE (R+B active).
     """
     device    = get_device()
     data_root = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data")
@@ -378,7 +458,7 @@ def _mnist_rgb_complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     new_src, new_tgt = _make_color_distributions(
         new_images,
         src_rgb               = _YELLOW,
-        tgt_rgb               = _CYAN,
+        tgt_rgb               = _PURPLE,
         extra_target_rotation = 10.0 if perturbed else 0.0,
     )
 
@@ -397,17 +477,156 @@ def _mnist_rgb_complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     vis_cfg = VisualizeConfig(show_each=1, n_trajectories=6, trajectory_stride=0)
 
     return ExperimentSpec(
-        name             = f"color_mnist_rgb_complex{'_perturbed' if perturbed else ''}",
-        mode             = "image",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"color_mnist_rgb_complex{'_perturbed' if perturbed else ''}",
+        mode                  = "image",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        transport_map         = _cyclic_color_shift,
+        inverse_transport_map = _cyclic_color_shift_inv,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
+    )
+
+
+# ---------------------------------------------------------------------------
+# MNIST-RGB + horizontal flip experiments
+# ---------------------------------------------------------------------------
+
+def _mnist_rgb_flip_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
+    """MNIST: digit 3 (RED→flip(BLUE)) reference; digit 7 (PURPLE→flip(CYAN)) new marginals.
+
+    Transport map  T_flip = hflip ∘ T_cyclic:
+        T_flip(RED)    = hflip(BLUE)   [reference]
+        T_flip(PURPLE) = hflip(CYAN)   [new marginals]
+
+    Same colour cost 2v² per pixel as the non-flip variants; the horizontal flip
+    adds a *spatial* component to the transport, making the pretrained model
+    doubly mismatched: wrong colour (PURPLE≠RED) and wrong orientation (flipped).
+    Dual adaptation must simultaneously identify the colour-shift rule and the
+    spatial reflection from the reference coupling.
+
+    Supp(T_flip(purple_digit7)) = Supp(hflip(cyan_digit7)) exactly in standard variant.
+    Perturbed: an additional +10° rotation on the target, on top of the flip.
+    """
+    device    = get_device()
+    data_root = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data")
+
+    from torchvision import datasets
+    ref_images = _load_rgb_images(datasets.MNIST, cls=3, n=2_000, device=device, root=data_root)
+    new_images = _load_rgb_images(datasets.MNIST, cls=7, n=2_000, device=device, root=data_root)
+    C, H, W    = ref_images.shape[1:]
+
+    coupling         = _make_color_coupling(ref_images, src_rgb=_RED, tgt_rgb=_BLUE,
+                                            flip_target=True)
+    new_src, new_tgt = _make_color_distributions(
+        new_images,
+        src_rgb               = _PURPLE,
+        tgt_rgb               = _CYAN,
+        flip_target           = True,
+        extra_target_rotation = 10.0 if perturbed else 0.0,
+    )
+
+    train_cfg              = _default_train_cfg_mnist(device)
+    train_cfg.image_shape  = (C, H, W)
+    method_cfg             = _default_method_cfg()
+    model_cfg              = FeedForwardConfig(
+        dimension          = C,
+        hidden_size        = 32,
+        image_shape        = (C, H, W),
+        dual_learning_rate = 1e-4,
+        mu_learning_rate   = 2e-4,
+        nu_learning_rate   = 2e-4,
+        flow_learning_rate = 2e-4,
+    )
+    vis_cfg = VisualizeConfig(
+        show_each           = 1,
+        n_trajectories      = 6,
+        trajectory_stride   = 0,
+        show_each_marginal  = 1_000,
+        show_each_pretrain  = 1_000,
+    )
+
+    return ExperimentSpec(
+        name                  = f"color_mnist_rgb_flip_simple{'_perturbed' if perturbed else ''}",
+        mode                  = "image",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        transport_map         = _flip_cyclic,
+        inverse_transport_map = _flip_cyclic_inv,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
+    )
+
+
+def _mnist_rgb_flip_complex(perturbed: bool, output_root: str) -> ExperimentSpec:
+    """MNIST: digit 3 (RED→flip(BLUE)) reference; digit 7 (YELLOW→flip(PURPLE)) new marginals.
+
+    Transport map  T_flip = hflip ∘ T_cyclic:
+        T_flip(RED)    = hflip(BLUE)   [reference]
+        T_flip(YELLOW) = hflip(PURPLE) [new marginals]
+
+    Hardest MNIST variant: combines the two-channel source mismatch of
+    'mnist_rgb_complex' (YELLOW has R+G while reference source is R only) with
+    the spatial flip of 'mnist_rgb_flip_simple'.  The pretrained model has never
+    seen a two-channel source nor flipped targets, so the initial transport error
+    is maximal.
+
+    Supp(T_flip(yellow_digit7)) = Supp(hflip(purple_digit7)) exactly in standard variant.
+    Perturbed: an additional +10° rotation on the target, on top of the flip.
+    """
+    device    = get_device()
+    data_root = os.path.join(os.path.dirname(__file__), "..", "..", "..", "data")
+
+    from torchvision import datasets
+    ref_images = _load_rgb_images(datasets.MNIST, cls=3, n=2_000, device=device, root=data_root)
+    new_images = _load_rgb_images(datasets.MNIST, cls=7, n=2_000, device=device, root=data_root)
+    C, H, W    = ref_images.shape[1:]
+
+    coupling         = _make_color_coupling(ref_images, src_rgb=_RED, tgt_rgb=_BLUE,
+                                            flip_target=True)
+    new_src, new_tgt = _make_color_distributions(
+        new_images,
+        src_rgb               = _YELLOW,
+        tgt_rgb               = _PURPLE,
+        flip_target           = True,
+        extra_target_rotation = 10.0 if perturbed else 0.0,
+    )
+
+    train_cfg              = _default_train_cfg_mnist(device)
+    train_cfg.image_shape  = (C, H, W)
+    method_cfg             = _default_method_cfg()
+    model_cfg              = FeedForwardConfig(
+        dimension          = C,
+        hidden_size        = 32,
+        image_shape        = (C, H, W),
+        dual_learning_rate = 1e-4,
+        mu_learning_rate   = 2e-4,
+        nu_learning_rate   = 2e-4,
+        flow_learning_rate = 2e-4,
+    )
+    vis_cfg = VisualizeConfig(show_each=1, n_trajectories=6, trajectory_stride=0)
+
+    return ExperimentSpec(
+        name                  = f"color_mnist_rgb_flip_complex{'_perturbed' if perturbed else ''}",
+        mode                  = "image",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        transport_map         = _flip_cyclic,
+        inverse_transport_map = _flip_cyclic_inv,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 
@@ -511,9 +730,17 @@ def make_color_experiments(output_root: str = "results") -> List[ExperimentSpec]
         _mnist_rgb_simple(False, output_root),
         _mnist_rgb_simple(True,  output_root),
 
-        # MNIST-RGB: complex (orthogonal hue pair)
+        # MNIST-RGB: complex (two-channel source)
         _mnist_rgb_complex(False, output_root),
         _mnist_rgb_complex(True,  output_root),
+
+        # MNIST-RGB + flip: simple (color shift + horizontal flip)
+        _mnist_rgb_flip_simple(False, output_root),
+        _mnist_rgb_flip_simple(True,  output_root),
+
+        # MNIST-RGB + flip: complex (two-channel source + horizontal flip)
+        _mnist_rgb_flip_complex(False, output_root),
+        _mnist_rgb_flip_complex(True,  output_root),
 
         # CIFAR-10 hue rotation: automobile → airplane
         _cifar_hue(new_class=0, new_class_name="airplane", perturbed=False, output_root=output_root),

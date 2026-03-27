@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.optim.lr_scheduler as lr_scheduler
 from tqdm import trange
 
 from dualwcfm.losses import FlowLoss
@@ -77,6 +78,7 @@ class StandardMethod(Method):
                     trainer.strategy.backward_model.load_state_dict(
                         trainer.strategy.initial_backward_model.state_dict()
                     )
+            trainer.visualizer.at_flow_pretrain_end(trainer, {})
             return
 
         strategy = trainer.strategy
@@ -95,6 +97,7 @@ class StandardMethod(Method):
             strategy.initial_forward_model.load_state_dict(model.state_dict())
 
         trainer.strategy._save_pretrained(save)
+        trainer.visualizer.at_flow_pretrain_end(trainer, {})
 
     # ------------------------------------------------------------------
     # Pretrain marginal flow matching
@@ -119,10 +122,11 @@ class StandardMethod(Method):
             for i in range(trainer.config.num_rectified_flow + 1):
                 logger.info(f"Marginal flow matching phase {i + 1}/{trainer.config.num_rectified_flow + 1}")
 
-                pbar = trange(
-                    trainer.config.marginal_epochs if i == 0 else trainer.config.marginal_epochs // 10,
-                    desc="Marginal Flow Matching",
-                )
+                n_epochs = trainer.config.marginal_epochs if i == 0 else trainer.config.marginal_epochs // 10
+                mu_scheduler = lr_scheduler.CosineAnnealingLR(mu_optimizer, T_max=n_epochs, eta_min=1e-6)
+                nu_scheduler = lr_scheduler.CosineAnnealingLR(nu_optimizer, T_max=n_epochs, eta_min=1e-6)
+
+                pbar = trange(n_epochs, desc="Marginal Flow Matching")
                 for epoch in pbar:
                     # Sample (x0, y0) from initial coupling and (x1, y1) from current marginals.
                     # In the first pass, use initial coupling for both.
@@ -173,7 +177,14 @@ class StandardMethod(Method):
                     loss_nu.backward()
                     nu_optimizer.step()
 
-                    pbar.set_postfix({"Loss mu": loss_mu.item(), "Loss nu": loss_nu.item()})
+                    mu_scheduler.step()
+                    nu_scheduler.step()
+
+                    pbar.set_postfix({
+                        "Loss mu": loss_mu.item(),
+                        "Loss nu": loss_nu.item(),
+                        "lr": mu_scheduler.get_last_lr()[0],
+                    })
 
                     trainer.visualizer.during_pretrain(
                         epoch,
