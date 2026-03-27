@@ -299,13 +299,15 @@ def run_grid_search(
             try:
                 run_experiment(
                     gs_spec,
-                    retrain        = False,
-                    save_models    = True,
-                    pretrain_dir   = pt_dir,
-                    wandb_project  = wandb_project,
-                    wandb_entity   = wandb_entity,
-                    wandb_run_name = run_name,
-                    wandb_group    = f"grid__{spec.name}",
+                    retrain             = False,
+                    save_models         = True,
+                    pretrain_dir        = pt_dir,
+                    wandb_project       = wandb_project,
+                    wandb_entity        = wandb_entity,
+                    wandb_run_name      = run_name,
+                    wandb_group         = f"grid__{spec.name}",
+                    wandb_extra_config  = {"base_experiment": spec.name},
+                    wandb_tags          = [spec.name],
                 )
             except Exception as exc:
                 logger.error("  FAILED %s: %s", run_name, exc)
@@ -371,6 +373,7 @@ def run_wandb_sweep(
             run = wandb.init(
                 project = args.wandb_project,
                 entity  = args.wandb_entity,
+                group   = f"grid__{_spec.name}",
             )
             combo = {
                 "sigma":            run.config.get("sigma",            args.sigma[0]),
@@ -382,7 +385,10 @@ def run_wandb_sweep(
                 "lr_cosine_decay":  run.config.get("lr_cosine_decay",  args.lr_cosine_decay[0]),
                 "batch_size":       run.config.get("batch_size",       args.batch_size[0]),
             }
-            run_name = run.name or _run_name(_spec.name, combo)
+            run_name = _run_name(_spec.name, combo)
+            if run.name != run_name:
+                run.name = run_name
+                run.save()
             gs_spec  = _apply_combo(_spec, combo)
             gs_spec  = dataclasses.replace(gs_spec, name=run_name, output_root=_out_root)
 

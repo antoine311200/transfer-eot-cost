@@ -84,3 +84,5 @@ experiments/
 *.toc
 
 misc/
+results*/
+paper/

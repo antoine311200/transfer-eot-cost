@@ -322,6 +322,11 @@ class StandardMethod(Method):
             a, a_mu = f_dual(x), f_dual(x_mu)
             b, b_nu = g_dual(y), g_dual(y_nu)
 
+            # Gauge invariance
+            a_mean = a.mean()
+            a = a - a_mean
+            a_mu = a_mu - a_mean
+
             # Coupling term (with optional change_of_measure)
             # com = trainer.strategy.change_of_measure
             # com_opt = trainer.strategy.get_com_optimizer()

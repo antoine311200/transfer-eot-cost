@@ -186,6 +186,8 @@ def run_experiment(
     wandb_entity: Optional[str] = None,
     wandb_run_name: Optional[str] = None,
     wandb_group: Optional[str] = None,
+    wandb_extra_config: Optional[Dict] = None,
+    wandb_tags: Optional[list] = None,
 ) -> None:
     """Build all objects from *spec* and run the full training loop.
 
@@ -243,13 +245,18 @@ def run_experiment(
         "method":        type(spec.method_cfg).__name__,
         **_safe_asdict(spec.train_cfg),
         **_safe_asdict(spec.method_cfg),
+        **(wandb_extra_config or {}),
     }
+    # Always tag the run with the experiment name so runs are filterable in
+    # the W&B UI even when the run display-name encodes hyperparameters.
+    _wb_tags = list(dict.fromkeys([spec.name] + (wandb_tags or [])))
     wandb_run = _wl.init(
         project = _wb_project,
         name    = _wb_name,
         entity  = _wb_entity,
         group   = _wb_group,
         config  = _wb_config,
+        tags    = _wb_tags,
     )
 
     # --- Pre-trained weights ----------------------------------------------

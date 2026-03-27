@@ -254,10 +254,10 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
         dataset_size             = 2_000,
         marginal_epochs          = 30_000,
         pretrain_epochs          = 30_000,
-        dual_epochs              = 50,
+        dual_epochs              = 100,
         cfm_epochs               = 1000,
-        advance_steps            = 50,
-        iterations               = 30,
+        advance_steps            = 200,
+        iterations               = 10,
         num_rectified_flow       = 2,
         scale_factor             = 1.0,
         batch_size               = 128,
@@ -279,7 +279,7 @@ def _default_method_cfg() -> MixtureConfig:
         use_noisy_field = False,
         particle_ratio  = 0.1,
         lr_cosine_decay = False,
-        lr_min_factor   = 0.1,
+        lr_min_factor   = 1.0,
     )
 
 

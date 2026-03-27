@@ -189,7 +189,7 @@ class _LoggingMixin:
             x_eval = trainer.new_source.sample(n_map).to(device)
             with torch.no_grad():
                 evolved = trainer.flow_matching.evolve(
-                    x_eval, fwd_model, num_steps=100, sigma=0.0, extend=True)
+                    x_eval, fwd_model, num_steps=200, sigma=0.0, extend=True)
                 y_hat = (evolved[:, : x_eval.shape[1], :, :]
                          if is_image_tensor(x_eval)
                          else evolved[:, : trainer.strategy.config.dimension])
@@ -201,7 +201,7 @@ class _LoggingMixin:
             y_eval = trainer.new_target.sample(n_map).to(device)
             with torch.no_grad():
                 evolved = trainer.flow_matching.evolve(
-                    y_eval, bwd_model, num_steps=100, sigma=0.0, extend=True)
+                    y_eval, bwd_model, num_steps=200, sigma=0.0, extend=True)
                 x_hat = (evolved[:, : y_eval.shape[1], :, :]
                          if is_image_tensor(y_eval)
                          else evolved[:, : trainer.strategy.config.dimension])
@@ -555,7 +555,7 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
         with torch.no_grad():
             nu_flow = trainer.flow_matching.evolve(
                 mu_cpu.to(device), trainer.strategy.get_flow(0, device)[0],
-                num_steps=100, sigma=trainer._sigma, extend=True,
+                num_steps=200, sigma=trainer._sigma, extend=True,
             )[:, :trainer.strategy.config.dimension]
         nu_flow_cpu = nu_flow.cpu()
 
@@ -702,7 +702,7 @@ class LoggingVisualizerImage(_LoggingMixin, VisualizerImage):
             for _ in range(n_batches):
                 x_src = trainer.new_source.sample(batch).to(device)
                 x_gen = trainer.flow_matching.evolve(
-                    x_src, fwd_model, num_steps=50,
+                    x_src, fwd_model, num_steps=200,
                     sigma=trainer._sigma, extend=True,
                 )
                 if is_image_tensor(x_gen):
@@ -761,7 +761,7 @@ class LoggingVisualizerImage(_LoggingMixin, VisualizerImage):
         # ref_target = (trainer.new_source if backward else trainer.new_target).sample(n).to(trainer.device)
         evolved = trainer.flow_matching.evolve(
             start, trainer.strategy.get_flow(epoch, trainer.device)[0],
-            num_steps=25, sigma=trainer._sigma, extend=True,
+            num_steps=200, sigma=trainer._sigma, extend=True,
         )
         if is_image_tensor(evolved):
             evolved = evolved[:, :self.img_shape[0], :, :]
@@ -780,14 +780,20 @@ class LoggingVisualizerImage(_LoggingMixin, VisualizerImage):
 
         fig, axes = plt.subplots(2, n_samples, figsize=(3 * n_samples, 6))
         C, H, W = self.img_shape
+        cmap = "gray" if C == 1 else None
+
+        def _to_imshow(tensor, i):
+            img = tensor[i] if tensor.dim() == 4 else tensor[i].reshape(C, H, W)
+            img = img.float().numpy()
+            if C == 1:
+                return img.squeeze(0)  # (H, W)
+            else:
+                return img.transpose(1, 2, 0)  # (H, W, C)
+
         for i in range(n_samples):
-            img_mu = mu_coup[i].squeeze(0).numpy() if mu_coup.dim() == 4 else \
-                mu_coup[i].reshape(H, W).numpy()
-            axes[0, i].imshow(img_mu, cmap="gray", vmin=-1, vmax=1)
+            axes[0, i].imshow(_to_imshow(mu_coup, i), cmap=cmap, vmin=-1, vmax=1)
             axes[0, i].set_title(f"Source {i+1}"); axes[0, i].axis("off")
-            img_nu = nu_coup[i].squeeze(0).numpy() if nu_coup.dim() == 4 else \
-                nu_coup[i].reshape(H, W).numpy()
-            axes[1, i].imshow(img_nu, cmap="gray", vmin=-1, vmax=1)
+            axes[1, i].imshow(_to_imshow(nu_coup, i), cmap=cmap, vmin=-1, vmax=1)
             axes[1, i].set_title(f"Target {i+1}"); axes[1, i].axis("off")
 
         plt.suptitle(f"Coupling after Step {iteration + 1}")
@@ -801,10 +807,16 @@ class LoggingVisualizerImage(_LoggingMixin, VisualizerImage):
         if n == 1:
             axes = axes.reshape(2, 1)
 
+        cmap = "gray" if C == 1 else None
+
         def _show(ax, tensor, i, title):
-            img = tensor[i]
-            img = img.squeeze(0) if img.dim() == 3 else img.reshape(H, W)
-            ax.imshow(img.float().numpy(), cmap="gray", vmin=-1, vmax=1)
+            img = tensor[i] if tensor[i].dim() == 3 else tensor[i].reshape(C, H, W)
+            img = img.float().numpy()
+            if C == 1:
+                img = img.squeeze(0)  # (H, W)
+            else:
+                img = img.transpose(1, 2, 0)  # (H, W, C)
+            ax.imshow(img, cmap=cmap, vmin=-1, vmax=1)
             ax.set_title(title, fontsize=6); ax.axis("off")
 
         for i in range(n):

@@ -12,7 +12,7 @@ and nothing will break if wandb is unavailable.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("dualwcfm")
 
@@ -75,6 +75,7 @@ def init(
     entity: Optional[str] = None,
     group: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
+    tags: Optional[List[str]] = None,
 ) -> "_NoOpRun | _WandbRun":
     """Initialise a W&B run, or return a no-op stub if wandb is unavailable.
 
@@ -92,6 +93,9 @@ def init(
         ablation suites, e.g. ``"ablation_particle_ratio"``).
     config:
         Flat dict of hyper-parameters logged as run configuration.
+    tags:
+        List of string tags attached to the run (e.g. ``["mnist_simple"]``).
+        Tags are searchable and filterable in the W&B UI.
 
     Returns
     -------
@@ -108,8 +112,13 @@ def init(
             entity  = entity,
             group   = group,
             config  = config or {},
+            tags    = tags or [],
             reinit  = True,
         )
+        # wandb sometimes ignores name= when reinit=True; force it explicitly.
+        if name and run.name != name:
+            run.name = name
+            run.save()
         logger.info("  W&B run initialised: %s/%s — run: %s", entity or "<default>", project, run.name)
         return _WandbRun(run)
     except Exception as exc:
