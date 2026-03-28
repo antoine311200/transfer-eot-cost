@@ -47,6 +47,7 @@ class StandardConfig(MethodConfig):
     #       Set lr_min_factor=1.0 to keep the original flat flow_learning_rate.
     lr_cosine_decay: bool = False
     lr_min_factor: float = 1.0  # 1.0 = no change; 0.5 = half the base flow_lr
+    gauge_ema_momentum: float = 0.99  # EMA momentum for gauge fix (used when batch_size < 512)
 
 class StandardMethod(Method):
     """Standard DualWCFM method: interpolation-based marginals, weighted/implicit CFM.
@@ -315,6 +316,10 @@ class StandardMethod(Method):
         mu_model.eval()
         nu_model.eval()
 
+        use_ema_gauge = batch_size < 512
+        ema_a_mean = torch.tensor(0.0, device=device)
+        gauge_mom = self.config.gauge_ema_momentum
+
         pbar = trange(trainer.config.dual_epochs, desc="Dual Training")
         for _ in pbar:
             x, y = trainer.current_coupling.coupling_sample(batch_size)
@@ -333,8 +338,13 @@ class StandardMethod(Method):
             a, a_mu = f_dual(x), f_dual(x_mu)
             b, b_nu = g_dual(y), g_dual(y_nu)
 
-            # Gauge invariance
-            a_mean = a.mean()
+            # Gauge invariance: subtract mean of f to fix the additive constant.
+            # With small batches the batch mean is too noisy; use an EMA instead.
+            if use_ema_gauge:
+                ema_a_mean = gauge_mom * ema_a_mean + (1 - gauge_mom) * a.detach().mean()
+                a_mean = ema_a_mean
+            else:
+                a_mean = a.mean()
             a = a - a_mean
             a_mu = a_mu - a_mean
 

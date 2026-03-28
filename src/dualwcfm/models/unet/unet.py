@@ -442,11 +442,18 @@ class UNetModel(nn.Module):
         self.stop_middle = stop_middle # Hardcoded
 
         time_embed_dim = model_channels * 4
-        self.time_embed = nn.Sequential(
-            linear(model_channels, time_embed_dim),
-            nn.SiLU(),
-            linear(time_embed_dim, time_embed_dim),
-        )
+        if stop_middle:
+            # Dual potentials are time-independent.  Replace the time MLP with a
+            # single learnable constant vector so every ResBlock still gets a
+            # well-shaped embedding without wasting capacity on a fake t=0 input.
+            self.time_embed = None
+            self._time_const = nn.Parameter(th.zeros(time_embed_dim))
+        else:
+            self.time_embed = nn.Sequential(
+                linear(model_channels, time_embed_dim),
+                nn.SiLU(),
+                linear(time_embed_dim, time_embed_dim),
+            )
 
         if self.num_classes is not None:
             self.label_emb = nn.Embedding(num_classes, time_embed_dim)
@@ -534,65 +541,63 @@ class UNetModel(nn.Module):
             ),
         )
         self._feature_size += ch
+        bottleneck_ch = ch  # channel count at the bottleneck (used by stop_middle head)
 
         self.output_blocks = nn.ModuleList([])
-        for level, mult in list(enumerate(channel_mult))[::-1]:
-            for i in range(num_res_blocks + 1):
-                ich = input_block_chans.pop()
-                layers = [
-                    ResBlock(
-                        ch + ich,
-                        time_embed_dim,
-                        dropout,
-                        out_channels=int(model_channels * mult),
-                        dims=dims,
-                        use_checkpoint=use_checkpoint,
-                        use_scale_shift_norm=use_scale_shift_norm,
-                    )
-                ]
-                ch = int(model_channels * mult)
-                if ds in attention_resolutions:
-                    layers.append(
-                        AttentionBlock(
-                            ch,
-                            use_checkpoint=use_checkpoint,
-                            num_heads=num_heads_upsample,
-                            num_head_channels=num_head_channels,
-                            use_new_attention_order=use_new_attention_order,
-                        )
-                    )
-                if level and i == num_res_blocks:
-                    out_ch = ch
-                    layers.append(
+        if not self.stop_middle:
+            for level, mult in list(enumerate(channel_mult))[::-1]:
+                for i in range(num_res_blocks + 1):
+                    ich = input_block_chans.pop()
+                    layers = [
                         ResBlock(
-                            ch,
+                            ch + ich,
                             time_embed_dim,
                             dropout,
-                            out_channels=out_ch,
+                            out_channels=int(model_channels * mult),
                             dims=dims,
                             use_checkpoint=use_checkpoint,
                             use_scale_shift_norm=use_scale_shift_norm,
-                            up=True,
                         )
-                        if resblock_updown
-                        else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
-                    )
-                    ds //= 2
-                self.output_blocks.append(TimestepEmbedSequential(*layers))
-                self._feature_size += ch
+                    ]
+                    ch = int(model_channels * mult)
+                    if ds in attention_resolutions:
+                        layers.append(
+                            AttentionBlock(
+                                ch,
+                                use_checkpoint=use_checkpoint,
+                                num_heads=num_heads_upsample,
+                                num_head_channels=num_head_channels,
+                                use_new_attention_order=use_new_attention_order,
+                            )
+                        )
+                    if level and i == num_res_blocks:
+                        out_ch = ch
+                        layers.append(
+                            ResBlock(
+                                ch,
+                                time_embed_dim,
+                                dropout,
+                                out_channels=out_ch,
+                                dims=dims,
+                                use_checkpoint=use_checkpoint,
+                                use_scale_shift_norm=use_scale_shift_norm,
+                                up=True,
+                            )
+                            if resblock_updown
+                            else Upsample(ch, conv_resample, dims=dims, out_channels=out_ch)
+                        )
+                        ds //= 2
+                    self.output_blocks.append(TimestepEmbedSequential(*layers))
+                    self._feature_size += ch
 
         if self.stop_middle:
             self.out = nn.Sequential(
-                normalization(ch*4),
+                normalization(bottleneck_ch),
                 nn.SiLU(),
                 nn.AdaptiveAvgPool2d((1, 1)),
-                zero_module(conv_nd(dims, ch*4, out_channels, 1)),
-                # spectral_norm(zero_module(conv_nd(dims, ch*4, out_channels, 1))),
+                zero_module(conv_nd(dims, bottleneck_ch, out_channels, 1)),
                 nn.Flatten(),
             )
-            # self.final_conv = spectral_norm(nn.Conv2d(ch*4, ch*4, 3, padding=1))
-            # self.act = nn.LeakyReLU(0.2)
-            # self.output_linear = spectral_norm(nn.Linear(ch*4, 1))
         else:
             self.out = nn.Sequential(
                 normalization(ch),
@@ -630,7 +635,11 @@ class UNetModel(nn.Module):
             timesteps = timesteps.repeat(x.shape[0])
 
         hs = []
-        emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
+        if self.stop_middle:
+            # Time-independent model: broadcast the learnable constant to batch size.
+            emb = self._time_const.unsqueeze(0).expand(x.shape[0], -1)
+        else:
+            emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
 
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
@@ -897,6 +906,7 @@ class UNetModelWrapper(UNetModel):
         use_fp16=False,
         use_new_attention_order=False,
         stop_middle=False, # Hardcoded
+        out_channels=None,
     ):
         """Dim (tuple): (C, H, W)"""
         image_size = dim[-1]
@@ -926,7 +936,7 @@ class UNetModelWrapper(UNetModel):
             image_size=image_size,
             in_channels=dim[0],
             model_channels=num_channels,
-            out_channels=(dim[0] if not learn_sigma else dim[0] * 2),
+            out_channels=(out_channels if out_channels is not None else (dim[0] if not learn_sigma else dim[0] * 2)),
             num_res_blocks=num_res_blocks,
             attention_resolutions=tuple(attention_ds),
             dropout=dropout,

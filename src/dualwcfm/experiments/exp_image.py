@@ -92,9 +92,9 @@ class UNetWrapper(torch.nn.Module):
 class DualUNetWrapper(torch.nn.Module):
     """Adapts a ``stop_middle=True`` UNetModel for dual potential functions.
 
-    Dual potentials are time-independent scalars.  This wrapper:
-    - Always passes a zero timestep to the UNet.
-    - Returns shape ``(N, 1, 1, 1)`` for broadcast-safe arithmetic with image tensors.
+    Dual potentials are time-independent scalars.  The UNet uses a learnable
+    constant embedding instead of a time embedding, so no timestep is needed.
+    Returns shape ``(N, 1, 1, 1)`` for broadcast-safe arithmetic with image tensors.
     """
 
     def __init__(self, model: UNetModel):
@@ -102,10 +102,10 @@ class DualUNetWrapper(torch.nn.Module):
         self.model = model
 
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        # t is ignored by the UNet when stop_middle=True (learnable constant used).
         t = torch.zeros(x.shape[0], device=x.device, dtype=torch.float32)
-        out = self.model(t, x)  # (N, C) after Flatten when stop_middle=True
-        # Collapse to (N, 1, 1, 1) regardless of input channels
-        return out.view(x.shape[0], -1).mean(dim=1).view(x.shape[0], 1, 1, 1)
+        out = self.model(t, x)  # (N, 1) after Flatten
+        return out.view(x.shape[0], 1, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +144,7 @@ class BidirectionalUnetStrategy(BidirectionalStrategy):
                 num_channels   = num_channels,
                 num_res_blocks = num_res_blocks,
                 stop_middle    = stop_middle,
+                out_channels   = 1 if stop_middle else in_channels,
             )
 
         wrap  = self.wrapper   # UNetWrapper
