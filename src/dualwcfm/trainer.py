@@ -144,7 +144,7 @@ class Trainer:
     # Main training entry point
     # ------------------------------------------------------------------
 
-    def train(self, retrain: bool = False, save: str = None):
+    def train(self, retrain: bool = False, save: str = None, save_checkpoints: str = None):
         self.strategy._create_models(self.strategy.config.dimension, self.strategy.config.hidden_size)
         self.strategy._create_optimizers(self.strategy.config)
         self.strategy.to_device(self.device)
@@ -166,8 +166,8 @@ class Trainer:
             self.method.step_flow_matching(self, iteration, ctx)
             self.method.step_postprocess(self, iteration, ctx)
 
-            if save and (self.config.save_coupling_checkpoints or self.config.save_model_checkpoints):
-                self._save_iteration_checkpoint(iteration, save)
+            if save_checkpoints and (self.config.save_coupling_checkpoints or self.config.save_model_checkpoints):
+                self._save_iteration_checkpoint(iteration, save_checkpoints)
 
             self.visualizer.display(iteration, self)
             distances = self.visualizer.analyse(iteration, self)
@@ -176,4 +176,8 @@ class Trainer:
                 f"W1_mu={distances['W1_mu']:.4f}  W2_mu={distances['W2_mu']:.4f}  "
                 f"W1_nu={distances['W1_nu']:.4f}  W2_nu={distances['W2_nu']:.4f}"
             )
+
+        # Save final trained models after all iterations.
+        if save and self.config.save_final_models:
+            self.strategy._save_final(save)
 

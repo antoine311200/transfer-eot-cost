@@ -158,6 +158,84 @@ class Visualizer:
             plt.suptitle(title)
             self.save_fig(plt.gcf(), "marginals", fname)
 
+    def at_flow_pretrain_end(self, trainer: "Trainer", ctx: dict) -> None:
+        """Visualize the pretrained forward (and backward) flows on the new marginals.
+
+        Called once after the initial flow models are trained on the reference
+        coupling.  Shows how poorly (or well) the pretrained model handles the
+        *new* marginals **before** any dual adaptation begins — a key diagnostic
+        for the paper comparing the pretrained baseline against the adapted result.
+
+        Forward:  new_source → pretrained_forward → compare vs new_target
+        Backward: new_target → pretrained_backward → compare vs new_source
+
+        Saves to ``pretrain/pretrained_fwd_new_marginals.png``
+        (and ``pretrain/pretrained_bwd_new_marginals.png`` if bidirectional).
+        """
+        strategy = trainer.strategy
+        fwd_model = getattr(strategy, "initial_forward_model", None)
+        if fwd_model is None:
+            return
+
+        n = min(self.config.n_trajectories, 500)
+        device = trainer.device
+        s = trainer.scale
+        dim = trainer.strategy.config.dimension
+
+        x_new = trainer.new_source.sample(n).to(device)
+        fwd_model.eval()
+        with torch.no_grad():
+            evolved = trainer.flow_matching.evolve(
+                x_new, fwd_model, num_steps=100, sigma=0.0, extend=True
+            )
+            y_hat = evolved[:, :dim]
+        y_true = trainer.new_target.sample(n).to(device)
+
+        map_err_str = ""
+        if self.transport_map is not None:
+            with torch.no_grad():
+                err = (y_hat - self.transport_map(x_new)).pow(2).sum(-1).mean().sqrt()
+            map_err_str = f"  (map err = {err.item() * s:.4f})"
+
+        self._display_evolution(
+            (x_new * s).cpu(), (y_hat * s).cpu(), (y_true * s).cpu(),
+        )
+        plt.suptitle(
+            f"Pretrained forward flow on new marginals — before adaptation{map_err_str}",
+            fontsize=10,
+        )
+        self.save_fig(plt.gcf(), "pretrain", "pretrained_fwd_new_marginals.png")
+
+        # Backward direction (BidirectionalStrategy only)
+        bwd_model = getattr(strategy, "initial_backward_model", None)
+        if bwd_model is None or not isinstance(strategy, BidirectionalStrategy):
+            return
+
+        inv_map = getattr(self, "_inverse_transport_map", None)
+        y_new = trainer.new_target.sample(n).to(device)
+        bwd_model.eval()
+        with torch.no_grad():
+            evolved_bwd = trainer.flow_matching.evolve(
+                y_new, bwd_model, num_steps=100, sigma=0.0, extend=True
+            )
+            x_hat = evolved_bwd[:, :dim]
+        x_true = trainer.new_source.sample(n).to(device)
+
+        map_err_bwd_str = ""
+        if inv_map is not None:
+            with torch.no_grad():
+                err_bwd = (x_hat - inv_map(y_new)).pow(2).sum(-1).mean().sqrt()
+            map_err_bwd_str = f"  (map err = {err_bwd.item() * s:.4f})"
+
+        self._display_evolution(
+            (y_new * s).cpu(), (x_hat * s).cpu(), (x_true * s).cpu(),
+        )
+        plt.suptitle(
+            f"Pretrained backward flow on new marginals — before adaptation{map_err_bwd_str}",
+            fontsize=10,
+        )
+        self.save_fig(plt.gcf(), "pretrain", "pretrained_bwd_new_marginals.png")
+
     # ------------------------------------------------------------------
     # Preprocess lifecycle hooks (no-ops)
     # ------------------------------------------------------------------
@@ -302,36 +380,59 @@ class Visualizer:
         n_traj = min(self.config.n_trajectories, start_points.shape[0])
         segments = []
 
+        # For dim > 2, project onto first two principal components for visualisation
+        dim = start_points.shape[1] if start_points.ndim == 2 else 2
+        if dim > 2:
+            all_pts = torch.cat([start_points, end_points], dim=0).numpy()
+            mean = all_pts.mean(axis=0, keepdims=True)
+            centered = all_pts - mean
+            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+            proj = Vt[:2]  # (2, dim)
+            def _project(t: torch.Tensor) -> np.ndarray:
+                return (t.numpy() - mean) @ proj.T
+            ax.set_xlabel("PC1")
+            ax.set_ylabel("PC2")
+            ax_label = " (PCA projection)"
+        else:
+            def _project(t: torch.Tensor) -> np.ndarray:
+                return t.numpy()[:, :2]
+            ax.set_xlabel("X")
+            ax.set_ylabel("Y")
+            ax_label = ""
+
+        start_2d = _project(start_points)
+        end_2d   = _project(end_points)
+
         if trajectories is not None:
-            traj_np = trajectories[::max(1, trajectory_stride), :n_traj, :2].numpy()
-            if traj_np.shape[0] == 0 or not np.array_equal(traj_np[-1], end_points[:n_traj].cpu().numpy()):
-                traj_np = np.concatenate([traj_np, end_points[:n_traj].cpu().numpy()[None, :, :2]], axis=0)
+            traj_pts = trajectories[::max(1, trajectory_stride), :n_traj, :]  # (T, n_traj, dim)
+            T_steps, _, _ = traj_pts.shape
+            traj_2d = np.stack([_project(traj_pts[t]) for t in range(T_steps)], axis=0)  # (T, n_traj, 2)
+            if T_steps == 0 or not np.array_equal(traj_2d[-1], end_2d[:n_traj]):
+                traj_2d = np.concatenate([traj_2d, end_2d[:n_traj][None]], axis=0)
             for j in range(n_traj):
-                pts = traj_np[:, j, :]
+                pts = traj_2d[:, j, :]
                 segs = np.stack([pts[:-1], pts[1:]], axis=1)
                 segments.extend(segs)
-            mid_points = torch.from_numpy(traj_np[len(traj_np) // 2])
+            mid_points_2d = traj_2d[len(traj_2d) // 2]
         else:
             for j in range(n_traj):
-                points = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
-                segs = np.stack([points[:-1], points[1:]], axis=1)
-                segments.extend(segs)
-            mid_points = (start_points + end_points) / 2
+                seg = np.stack([start_2d[j], end_2d[j]], axis=0)  # (2, 2)
+                segments.append(seg)
+            mid_points_2d = (start_2d + end_2d) / 2
 
         lc = LineCollection(segments, colors="black", alpha=0.2, linewidths=0.8)
         ax.add_collection(lc)
 
-        if target_points is not None:
-            ax.scatter(target_points[:, 0], target_points[:, 1], c="orange", s=20, alpha=0.5, zorder=4, label="Target", edgecolors='k')
-        ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
-        ax.scatter(start_points[:n_traj, 0], start_points[:n_traj, 1], c="red", s=20, alpha=0.5, zorder=4, label="Start", edgecolors='k')
-        ax.scatter(end_points[:n_traj, 0], end_points[:n_traj, 1], c="green", s=20, alpha=0.5, zorder=4, label="End", edgecolors='k')
+        target_2d = _project(target_points) if target_points is not None else None
+        if target_2d is not None:
+            ax.scatter(target_2d[:, 0], target_2d[:, 1], c="orange", s=20, alpha=0.5, zorder=4, label="Target", edgecolors='k')
+        ax.scatter(mid_points_2d[:n_traj, 0], mid_points_2d[:n_traj, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
+        ax.scatter(start_2d[:n_traj, 0], start_2d[:n_traj, 1], c="red", s=20, alpha=0.5, zorder=4, label="Start", edgecolors='k')
+        ax.scatter(end_2d[:n_traj, 0], end_2d[:n_traj, 1], c="green", s=20, alpha=0.5, zorder=4, label="End", edgecolors='k')
         # ax.xaxis.set_major_locator(MultipleLocator(0.25))
         # ax.yaxis.set_major_locator(MultipleLocator(0.25))
         ax.grid(True, alpha=0.2)
         ax.tick_params(axis='both', which='major', labelsize=5)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
         ax.legend()
         ax.set_aspect("equal")
 
@@ -491,6 +592,65 @@ class VisualizerImage(Visualizer):
             plt.suptitle(title)
             self.save_fig(plt.gcf(), "marginals", fname)
 
+    def at_flow_pretrain_end(self, trainer: "Trainer", ctx: dict) -> None:
+        """Image version: 3-row grid (source | pretrained output | true target).
+
+        Shows the pretrained forward (and backward) flows applied to the new
+        marginals before any dual adaptation.  Each column is one image sample;
+        rows are: source, transported by pretrained model, true target.
+        Saves to ``pretrain/pretrained_fwd_new_marginals.png``.
+        """
+        strategy = trainer.strategy
+        fwd_model = getattr(strategy, "initial_forward_model", None)
+        if fwd_model is None:
+            return
+
+        n = min(self.config.n_trajectories, 6)
+        device = trainer.device
+        s = trainer.scale
+        C = self.img_shape[0]
+
+        x_new = trainer.new_source.sample(n).to(device)
+        fwd_model.eval()
+        with torch.no_grad():
+            evolved = trainer.flow_matching.evolve(
+                x_new, fwd_model, num_steps=100, sigma=0.0, extend=True
+            )
+            y_hat = evolved[:, :C, :, :] if is_image_tensor(evolved) else evolved[:, :C]
+        y_true = trainer.new_target.sample(n).to(device)
+
+        self._display_evolution(
+            (x_new * s).cpu(), (y_hat * s).cpu(), (y_true * s).cpu()
+        )
+        plt.suptitle(
+            "Pretrained forward flow on new marginals — before adaptation",
+            fontsize=10,
+        )
+        self.save_fig(plt.gcf(), "pretrain", "pretrained_fwd_new_marginals.png")
+
+        # Backward direction (BidirectionalStrategy only)
+        bwd_model = getattr(strategy, "initial_backward_model", None)
+        if bwd_model is None or not isinstance(strategy, BidirectionalStrategy):
+            return
+
+        y_new = trainer.new_target.sample(n).to(device)
+        bwd_model.eval()
+        with torch.no_grad():
+            evolved_bwd = trainer.flow_matching.evolve(
+                y_new, bwd_model, num_steps=100, sigma=0.0, extend=True
+            )
+            x_hat = evolved_bwd[:, :C, :, :] if is_image_tensor(evolved_bwd) else evolved_bwd[:, :C]
+        x_true = trainer.new_source.sample(n).to(device)
+
+        self._display_evolution(
+            (y_new * s).cpu(), (x_hat * s).cpu(), (x_true * s).cpu()
+        )
+        plt.suptitle(
+            "Pretrained backward flow on new marginals — before adaptation",
+            fontsize=10,
+        )
+        self.save_fig(plt.gcf(), "pretrain", "pretrained_bwd_new_marginals.png")
+
     def _display_evolution(
         self, start_points: torch.Tensor, end_points: torch.Tensor,
         target_points: Optional[torch.Tensor] = None, **kwargs,
@@ -503,9 +663,18 @@ class VisualizerImage(Visualizer):
         C, H, W = self.img_shape
 
         def _show(ax, tensor, i, title):
-            img = tensor[i]
-            img = img.squeeze(0) if img.dim() == 3 else img.reshape(H, W)
-            ax.imshow(img.float().numpy(), cmap="gray", vmin=-1, vmax=1)
+            img = tensor[i]  # (C, H, W)
+            if img.dim() == 3 and img.shape[0] == 1:
+                img = img.squeeze(0)          # (H, W) — grayscale
+                cmap = "gray"
+            elif img.dim() == 3:
+                img = img.permute(1, 2, 0)   # (H, W, C) — RGB
+                img = img.clamp(-1, 1)
+                cmap = None
+            else:
+                img = img.reshape(H, W)
+                cmap = "gray"
+            ax.imshow(img.float().numpy(), cmap=cmap, vmin=-1, vmax=1)
             ax.set_title(title, fontsize=7); ax.axis("off")
 
         for i in range(n):

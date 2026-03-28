@@ -54,12 +54,16 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── Experiment selection ─────────────────────────────────────────────────
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
-        "--mode", choices=["2d", "3d", "image"],
-        help="Experiment dimensionality.  Required unless --all is given.",
+        "--mode", choices=["2d", "3d", "image", "image-v2", "color", "gushchin"],
+        help="Experiment mode.  Required unless --all is given.",
     )
     sel.add_argument(
-        "--level", choices=["simple", "medium", "complex"],
-        help="Difficulty level of the experiment.",
+        "--level",
+        help=(
+            "Filter experiments by name substring.  "
+            "Standard levels: simple, medium, complex.  "
+            "Gushchin examples: 8d, gmm, eps0p1, eps0p5, eps2p0."
+        ),
     )
     sel.add_argument(
         "--perturbed", action="store_true",
@@ -124,6 +128,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run an ablation study comparing methods instead of a single run.",
     )
     abl.add_argument(
+        "--ablation-type",
+        choices=["method", "particle_ratio", "sigma", "iterations", "seeds", "all"],
+        default="method", dest="ablation_type",
+        help=(
+            "Which ablation to run (default: method). "
+            "method=Standard vs Mixture vs Score, "
+            "particle_ratio=sweep alpha in {0,0.1,0.25,0.5,1.0}, "
+            "sigma=sweep sigma in {0.001,0.01,0.05,0.1,0.5}, "
+            "iterations=sweep N in {10,25,50,100,200}, "
+            "seeds=multi-seed stability, "
+            "all=run every pre-defined ablation suite."
+        ),
+    )
+    abl.add_argument(
         "--methods", nargs="+",
         choices=["standard", "mixture", "score"],
         default=["standard", "mixture", "score"],
@@ -136,6 +154,21 @@ def _build_parser() -> argparse.ArgumentParser:
     abl.add_argument(
         "--ablation-name", default=None, dest="ablation_name",
         help="Name for the ablation suite output directory.  Auto-generated if omitted.",
+    )
+
+    # ── Weights & Biases ─────────────────────────────────────────────────────
+    wb = parser.add_argument_group("Weights & Biases (optional)")
+    wb.add_argument(
+        "--wandb-project", default=None, dest="wandb_project", metavar="PROJECT",
+        help="W&B project name (e.g. 'Data-Based EOT').  Omit to disable W&B logging.",
+    )
+    wb.add_argument(
+        "--wandb-entity", default=None, dest="wandb_entity", metavar="ENTITY",
+        help="W&B entity (username or team, e.g. 'antoine311200').  Defaults to logged-in user.",
+    )
+    wb.add_argument(
+        "--wandb-run", default=None, dest="wandb_run_name", metavar="RUN",
+        help="W&B run display name.  Defaults to the experiment name.",
     )
 
     # ── Output ───────────────────────────────────────────────────────────────
@@ -212,16 +245,21 @@ def main() -> None:
     parser = _build_parser()
     args   = parser.parse_args()
 
-    from dualwcfm.experiments.exp_2d    import make_2d_experiments
-    from dualwcfm.experiments.exp_3d    import make_3d_experiments
-    from dualwcfm.experiments.exp_image import make_image_experiments
-    from dualwcfm.experiments.base      import run_experiment
+    from dualwcfm.experiments.exp_2d       import make_2d_experiments
+    from dualwcfm.experiments.exp_3d       import make_3d_experiments
+    from dualwcfm.experiments.exp_image    import make_image_experiments, make_image_experiments_v2
+    from dualwcfm.experiments.exp_color    import make_color_experiments
+    from dualwcfm.experiments.exp_gushchin import make_gushchin_experiments
+    from dualwcfm.experiments.base         import run_experiment
 
     # ── Catalogue factory ────────────────────────────────────────────────────
     catalogue_factories = {
-        "2d":    make_2d_experiments,
-        "3d":    make_3d_experiments,
-        "image": make_image_experiments,
+        "2d":       make_2d_experiments,
+        "3d":       make_3d_experiments,
+        "image":    make_image_experiments,
+        "image-v2": make_image_experiments_v2,
+        "color":    make_color_experiments,
+        "gushchin": make_gushchin_experiments,
     }
 
     # ── Run everything ───────────────────────────────────────────────────────
@@ -242,9 +280,12 @@ def main() -> None:
                 spec.method_cfg = _build_method_cfg(args.method, args)
                 run_experiment(
                     spec,
-                    retrain      = not args.load_pretrained,
-                    save_models  = args.save_models,
-                    pretrain_dir = args.pretrain_dir,
+                    retrain          = not args.load_pretrained,
+                    save_models      = args.save_models,
+                    pretrain_dir     = args.pretrain_dir,
+                    wandb_project    = getattr(args, "wandb_project", None),
+                    wandb_entity     = getattr(args, "wandb_entity", None),
+                    wandb_run_name   = getattr(args, "wandb_run_name", None),
                 )
         return
 
@@ -262,7 +303,12 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # ── Ablation study ───────────────────────────────────────────────────────
+    # ── Pre-defined ablation suites ──────────────────────────────────────────
+    if args.ablation and args.ablation_type != "method":
+        _run_predefined_ablation(args)
+        return
+
+    # ── Method-comparison ablation ───────────────────────────────────────────
     if args.ablation:
         _run_ablation(args, matching)
         return
@@ -273,9 +319,12 @@ def main() -> None:
         spec.method_cfg = _build_method_cfg(args.method, args)
         run_experiment(
             spec,
-            retrain      = not args.load_pretrained,
-            save_models  = args.save_models,
-            pretrain_dir = args.pretrain_dir,
+            retrain          = not args.load_pretrained,
+            save_models      = args.save_models,
+            pretrain_dir     = args.pretrain_dir,
+            wandb_project    = getattr(args, "wandb_project", None),
+            wandb_entity     = getattr(args, "wandb_entity", None),
+            wandb_run_name   = getattr(args, "wandb_run_name", None),
         )
 
 
@@ -322,10 +371,12 @@ def _run_ablation(args: argparse.Namespace, base_specs) -> None:
     )
 
     runner = AblationRunner(
-        suite        = suite,
-        output_root  = args.output,
-        retrain      = not args.load_pretrained,
-        save_models  = args.save_models,
+        suite          = suite,
+        output_root    = args.output,
+        retrain        = not args.load_pretrained,
+        save_models    = args.save_models,
+        wandb_project  = getattr(args, "wandb_project", None),
+        wandb_entity   = getattr(args, "wandb_entity", None),
     )
     runner.run()
 
@@ -336,6 +387,55 @@ def _run_ablation(args: argparse.Namespace, base_specs) -> None:
         runner.plot_checkpoint_evolution()
     if len(args.seeds) > 1:
         runner.plot_seed_aggregate(metric="W2_nu")
+
+
+def _run_predefined_ablation(args: argparse.Namespace) -> None:
+    """Run one of the pre-defined ablation suites (E7a-f)."""
+    from dualwcfm.experiments.ablation import AblationRunner
+    from dualwcfm.experiments.exp_ablations import (
+        make_particle_ratio_ablation,
+        make_sigma_ablation,
+        make_iterations_ablation,
+        make_seed_ablation,
+        make_method_ablation,
+        make_all_ablation_suites,
+    )
+
+    atype = args.ablation_type
+    out   = args.output
+
+    if atype == "particle_ratio":
+        suites = [make_particle_ratio_ablation(out)]
+    elif atype == "sigma":
+        suites = [make_sigma_ablation(out)]
+    elif atype == "iterations":
+        suites = [make_iterations_ablation(out)]
+    elif atype == "seeds":
+        suites = [make_seed_ablation(out)]
+    elif atype == "all":
+        suites = make_all_ablation_suites(out)
+    else:
+        suites = []
+
+    for suite in suites:
+        runner = AblationRunner(
+            suite          = suite,
+            output_root    = out,
+            retrain        = not args.load_pretrained,
+            save_models    = args.save_models,
+            wandb_project  = getattr(args, "wandb_project", None),
+            wandb_entity   = getattr(args, "wandb_entity", None),
+        )
+        runner.run()
+        runner.plot_convergence()
+        runner.plot_weight_evolution()
+        runner.plot_final_metrics_bar()
+        runner.export_latex_table()
+        if suite.base_spec.mode == "2d":
+            runner.plot_final_distributions()
+            runner.plot_checkpoint_evolution()
+        if atype in ("seeds", "all"):
+            runner.plot_seed_aggregate(metric="W2_nu")
 
 
 if __name__ == "__main__":

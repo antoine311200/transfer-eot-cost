@@ -137,10 +137,14 @@ class ExperimentSpec:
     initial_coupling: CouplingDistribution
     new_source:       Distribution
     new_target:       Distribution
-    transport_map:    Optional[Callable]
     train_cfg:        TrainingConfig
     model_cfg:        FeedForwardConfig
     vis_cfg:          VisualizeConfig
+    # Ground-truth transport maps for diagnostic map-error metrics.
+    # transport_map:         T   s.t. y ≈ T(x)   (forward direction)
+    # inverse_transport_map: T⁻¹ s.t. x ≈ T⁻¹(y) (backward direction)
+    transport_map:         Optional[Callable] = None
+    inverse_transport_map: Optional[Callable] = None
     method_cfg:       MethodConfig = field(default_factory=MixtureConfig)
     bidirectional:    bool = True
     output_root:      str = "results"
@@ -178,6 +182,12 @@ def run_experiment(
     retrain: bool = True,
     save_models: bool = True,
     pretrain_dir: Optional[str] = None,
+    wandb_project: Optional[str] = None,
+    wandb_entity: Optional[str] = None,
+    wandb_run_name: Optional[str] = None,
+    wandb_group: Optional[str] = None,
+    wandb_extra_config: Optional[Dict] = None,
+    wandb_tags: Optional[list] = None,
 ) -> None:
     """Build all objects from *spec* and run the full training loop.
 
@@ -206,8 +216,48 @@ def run_experiment(
     logger.info("%s", "=" * 70)
 
     os.makedirs(spec.output_dir, exist_ok=True)
-    model_dir = os.path.join(spec.output_dir, "models") if save_models else None
+    model_dir = os.path.join(spec.output_dir, "models")
     device    = spec.train_cfg.device
+
+    # Resolve W&B fields: CLI args > spec.train_cfg fields
+    _wb_project = wandb_project or spec.train_cfg.wandb_project
+    _wb_entity  = wandb_entity  or getattr(spec.train_cfg, "wandb_entity", None)
+    _wb_name    = wandb_run_name or spec.train_cfg.wandb_run_name or spec.name
+    _wb_group   = wandb_group
+
+    # Initialise W&B (no-op if project is None or wandb not installed)
+    from dualwcfm import wandb_logger as _wl
+    import dataclasses
+    def _safe_asdict(obj):
+        """dataclasses.asdict but stringify non-serialisable values."""
+        d = {}
+        for f in dataclasses.fields(obj):
+            v = getattr(obj, f.name)
+            try:
+                import json; json.dumps(v)
+                d[f.name] = v
+            except (TypeError, ValueError):
+                d[f.name] = str(v)
+        return d
+    _wb_config = {
+        "experiment":    spec.name,
+        "mode":          spec.mode,
+        "method":        type(spec.method_cfg).__name__,
+        **_safe_asdict(spec.train_cfg),
+        **_safe_asdict(spec.method_cfg),
+        **(wandb_extra_config or {}),
+    }
+    # Always tag the run with the experiment name so runs are filterable in
+    # the W&B UI even when the run display-name encodes hyperparameters.
+    _wb_tags = list(dict.fromkeys([spec.name] + (wandb_tags or [])))
+    wandb_run = _wl.init(
+        project = _wb_project,
+        name    = _wb_name,
+        entity  = _wb_entity,
+        group   = _wb_group,
+        config  = _wb_config,
+        tags    = _wb_tags,
+    )
 
     # --- Pre-trained weights ----------------------------------------------
     if pretrain_dir is not None:
@@ -250,14 +300,21 @@ def run_experiment(
 
     # --- Visualizer -------------------------------------------------------
     if spec.mode == "2d":
-        visualizer = LoggingVisualizer(spec.vis_cfg, spec.transport_map, spec.output_dir)
+        visualizer = LoggingVisualizer(spec.vis_cfg, spec.transport_map, spec.output_dir,
+                                       wandb_run=wandb_run,
+                                       inverse_transport_map=spec.inverse_transport_map)
     elif spec.mode == "3d":
-        visualizer = LoggingVisualizer3D(spec.vis_cfg, spec.transport_map, spec.output_dir)
+        visualizer = LoggingVisualizer3D(spec.vis_cfg, spec.transport_map, spec.output_dir,
+                                         wandb_run=wandb_run,
+                                         inverse_transport_map=spec.inverse_transport_map)
     else:
         if spec.train_cfg.image_shape is None:
             raise ValueError("image_shape must be set in train_cfg for image experiments.")
         visualizer = LoggingVisualizerImage(
-            spec.vis_cfg, spec.train_cfg.image_shape, spec.output_dir
+            spec.vis_cfg, spec.train_cfg.image_shape, spec.output_dir,
+            wandb_run=wandb_run,
+            transport_map=spec.transport_map,
+            inverse_transport_map=spec.inverse_transport_map,
         )
 
     # --- Trainer ----------------------------------------------------------
@@ -273,11 +330,16 @@ def run_experiment(
         device           = device,
     )
 
-    trainer.train(retrain=retrain, save=model_dir)
+    trainer.train(
+        retrain          = retrain,
+        save             = model_dir,
+        save_checkpoints = model_dir if save_models else None,
+    )
 
     # --- Post-training ----------------------------------------------------
     visualizer.make_timelapse_all(fps=3)
     save_metrics_plot(spec.output_dir)
+    wandb_run.finish()
     logger.info("  Finished -> %s", spec.output_dir)
 
 
@@ -286,7 +348,7 @@ def run_experiment(
 # ---------------------------------------------------------------------------
 
 def save_metrics_plot(output_dir: str) -> None:
-    """Read ``metrics.csv`` and write two summary PNG plots to *output_dir*."""
+    """Read ``metrics.csv`` and write a comprehensive summary dashboard to *output_dir*."""
     csv_path = os.path.join(output_dir, "metrics.csv")
     if not os.path.exists(csv_path):
         return
@@ -297,53 +359,127 @@ def save_metrics_plot(output_dir: str) -> None:
 
     iters = [int(r["iteration"]) for r in rows]
 
-    # --- Sliced-Wasserstein convergence curves ----------------------------
-    fig, (ax_src, ax_tgt) = plt.subplots(1, 2, figsize=(12, 4))
+    def _get(key):
+        vals = []
+        for r in rows:
+            v = r.get(key, "")
+            vals.append(float(v) if v not in ("", "N/A") else None)
+        return vals
 
-    for key, color, label in [
-        ("W1_mu", "royalblue",  "SW₁ – source"),
-        ("W2_mu", "steelblue",  "SW₂ – source"),
-    ]:
-        vals = [float(r.get(key, 0)) for r in rows]
-        ax_src.plot(iters, vals, label=label, color=color)
-    ax_src.set_title("Source marginal SW distances")
-    ax_src.set_xlabel("Iteration")
-    ax_src.legend()
-    ax_src.grid(True, alpha=0.3)
+    def _plot(ax, keys_colors_labels, title, ylabel="", log=False):
+        for key, color, label in keys_colors_labels:
+            vals = _get(key)
+            xs   = [i for i, v in zip(iters, vals) if v is not None]
+            ys   = [v for v in vals if v is not None]
+            if xs:
+                ax.plot(xs, ys, color=color, label=label, linewidth=1.8)
+        ax.set_title(title, fontsize=10, fontweight="bold")
+        ax.set_xlabel("Iteration", fontsize=8)
+        if ylabel:
+            ax.set_ylabel(ylabel, fontsize=8)
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.25, linestyle="--")
+        ax.tick_params(labelsize=7)
+        if log:
+            try:
+                ax.set_yscale("log")
+            except Exception:
+                pass
+        ax.spines[["top", "right"]].set_visible(False)
 
-    for key, color, label in [
-        ("W1_nu", "tomato",    "SW₁ – target"),
-        ("W2_nu", "firebrick", "SW₂ – target"),
-    ]:
-        vals = [float(r.get(key, 0)) for r in rows]
-        ax_tgt.plot(iters, vals, label=label, color=color)
-    ax_tgt.set_title("Target marginal SW distances")
-    ax_tgt.set_xlabel("Iteration")
-    ax_tgt.legend()
-    ax_tgt.grid(True, alpha=0.3)
+    # Auto-detect which optional columns are present
+    has_bw2 = any(r.get("bw2", "") not in ("", "N/A") for r in rows)
+    has_fid = any(r.get("fid", "") not in ("", "N/A") for r in rows)
+    has_kid = any(r.get("kid", "") not in ("", "N/A") for r in rows)
+    has_map = any(r.get("map_err_fwd", "") not in ("", "N/A") or
+                  r.get("map_err_bwd", "") not in ("", "N/A") for r in rows)
 
-    fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "metrics.png"), dpi=100)
-    plt.close(fig)
+    # Decide layout: 3 fixed rows + optional rows for BW2 and FID/KID
+    n_extra = (1 if has_bw2 else 0) + (1 if has_fid or has_kid else 0)
+    nrows = 3 + n_extra
+    fig, axes = plt.subplots(nrows, 2, figsize=(13, 4 * nrows))
+    if nrows == 1:
+        axes = axes[None, :]
+    fig.patch.set_facecolor("#f8f9fa")
+    for ax in axes.flat:
+        ax.set_facecolor("#ffffff")
 
-    # --- Importance-weight evolution --------------------------------------
-    fig, ax = plt.subplots(figsize=(7, 3))
-    w_mean = [float(r.get("weight_mean", 1.0)) for r in rows]
-    w_std  = [float(r.get("weight_std",  0.0)) for r in rows]
+    # Row 0: SW marginal distances
+    _plot(axes[0, 0],
+          [("W1_mu", "#4878d0", "SW₁ source"), ("W2_mu", "#1a3a6e", "SW₂ source")],
+          "Source marginal (SW distance)", "SW")
+    _plot(axes[0, 1],
+          [("W1_nu", "#ee854a", "SW₁ target"), ("W2_nu", "#c0392b", "SW₂ target")],
+          "Target marginal (SW distance)", "SW")
 
-    ax.plot(iters, w_mean, label="mean(w)", color="navy")
-    ax.fill_between(
-        iters,
-        [m - s for m, s in zip(w_mean, w_std)],
-        [m + s for m, s in zip(w_mean, w_std)],
-        alpha=0.2, color="navy",
+    # Row 1: distributional quality + map errors
+    _plot(axes[1, 0],
+          [("mmd_nu",         "#6acc65", "MMD"),
+           ("energy_dist_nu", "#956cb4", "Energy dist"),
+           ("sinkhorn_div",   "#d65f5f", "Sinkhorn div")],
+          "Target distribution quality", log=True)
+    if has_map:
+        _plot(axes[1, 1],
+              [("map_err_fwd", "#0173b2", "Map err fwd  √E‖T(x)−ŷ‖²"),
+               ("map_err_bwd", "#de8f05", "Map err bwd  √E‖T⁻¹(y)−x̂‖²")],
+              "Transport map error (ground truth)", "RMSE")
+    else:
+        axes[1, 1].set_visible(False)
+
+    # Row 2: importance weights
+    w_mean = _get("weight_mean")
+    w_std  = _get("weight_std")
+    w_ess  = _get("weight_ess")
+    xs_w   = [i for i, v in zip(iters, w_mean) if v is not None]
+    ys_m   = [v for v in w_mean if v is not None]
+    ys_s   = [v for v in w_std  if v is not None]
+
+    axes[2, 0].plot(xs_w, ys_m, color="#023eff", linewidth=1.8, label="mean(w)")
+    if ys_s:
+        lo = [m - s for m, s in zip(ys_m, ys_s)]
+        hi = [m + s for m, s in zip(ys_m, ys_s)]
+        axes[2, 0].fill_between(xs_w, lo, hi, alpha=0.2, color="#023eff")
+    axes[2, 0].axhline(1.0, color="#ff7c00", linestyle="--", linewidth=1, label="ideal (1.0)")
+    axes[2, 0].set_title("Importance weight mean ± std", fontsize=10, fontweight="bold")
+    axes[2, 0].set_xlabel("Iteration", fontsize=8)
+    axes[2, 0].legend(fontsize=7)
+    axes[2, 0].grid(True, alpha=0.25, linestyle="--")
+    axes[2, 0].tick_params(labelsize=7)
+    axes[2, 0].spines[["top", "right"]].set_visible(False)
+
+    axes[2, 1].plot(
+        [i for i, v in zip(iters, w_ess) if v is not None],
+        [v for v in w_ess if v is not None],
+        color="#3cb44b", linewidth=1.8, label="ESS (normalised)"
     )
-    ax.axhline(1.0, color="red", linestyle="--", linewidth=1, label="ideal")
-    ax.set_title("Importance weight evolution")
-    ax.set_xlabel("Iteration")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    axes[2, 1].axhline(1.0, color="#ff7c00", linestyle="--", linewidth=1, label="ideal (1.0)")
+    axes[2, 1].set_ylim(0, 1.05)
+    axes[2, 1].set_title("Effective Sample Size", fontsize=10, fontweight="bold")
+    axes[2, 1].set_xlabel("Iteration", fontsize=8)
+    axes[2, 1].legend(fontsize=7)
+    axes[2, 1].grid(True, alpha=0.25, linestyle="--")
+    axes[2, 1].tick_params(labelsize=7)
+    axes[2, 1].spines[["top", "right"]].set_visible(False)
 
+    # Optional rows
+    extra_row = 3
+    if has_bw2:
+        _plot(axes[extra_row, 0],
+              [("bw2", "#8b1a1a", "BW₂ joint coupling")],
+              "Gushchin BW₂ (joint coupling vs reference)", "BW₂", log=True)
+        axes[extra_row, 1].set_visible(False)
+        extra_row += 1
+    if has_fid or has_kid:
+        series = []
+        if has_fid:
+            series.append(("fid", "#c84b31", "FID"))
+        if has_kid:
+            series.append(("kid", "#845ec2", "KID"))
+        _plot(axes[extra_row, 0], series, "Image quality (FID / KID)", log=True)
+        axes[extra_row, 1].set_visible(False)
+
+    exp_name = os.path.basename(output_dir.rstrip("/\\"))
+    fig.suptitle(f"Training Dashboard — {exp_name}", fontsize=12, fontweight="bold", y=1.01)
     fig.tight_layout()
-    fig.savefig(os.path.join(output_dir, "weights_evolution.png"), dpi=100)
+    fig.savefig(os.path.join(output_dir, "metrics.png"), dpi=120, bbox_inches="tight")
     plt.close(fig)

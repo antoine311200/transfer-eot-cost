@@ -210,15 +210,19 @@ class AblationRunner:
 
     def __init__(
         self,
-        suite:        AblationSuite,
-        output_root:  str  = "ablation_results",
-        retrain:      bool = True,
-        save_models:  bool = True,
+        suite:         AblationSuite,
+        output_root:   str  = "ablation_results",
+        retrain:       bool = True,
+        save_models:   bool = True,
+        wandb_project: Optional[str] = None,
+        wandb_entity:  Optional[str] = None,
     ):
-        self.suite        = suite
-        self.output_root  = output_root
-        self.retrain      = retrain
-        self.save_models  = save_models
+        self.suite         = suite
+        self.output_root   = output_root
+        self.retrain       = retrain
+        self.save_models   = save_models
+        self.wandb_project = wandb_project
+        self.wandb_entity  = wandb_entity
 
         self.suite_dir  = os.path.join(output_root, suite.name)
         self.fig_dir    = os.path.join(self.suite_dir, "figures")
@@ -275,7 +279,14 @@ class AblationRunner:
                 logger.info("  Seed: %d", variant.seed)
 
             spec = self._make_spec(variant)
-            run_experiment(spec, retrain=self.retrain, save_models=self.save_models)
+            run_experiment(
+                spec,
+                retrain       = self.retrain,
+                save_models   = self.save_models,
+                wandb_project = self.wandb_project,
+                wandb_entity  = self.wandb_entity,
+                wandb_group   = self.suite.name,   # cluster all variants under the suite name
+            )
 
         logger.info("\n  All variants complete.  Generating figures and tables ...")
         self.plot_convergence()

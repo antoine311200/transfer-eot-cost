@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.optim.lr_scheduler as lr_scheduler
 from tqdm import trange
 
 from dualwcfm.losses import FlowLoss
@@ -46,6 +47,7 @@ class StandardConfig(MethodConfig):
     #       Set lr_min_factor=1.0 to keep the original flat flow_learning_rate.
     lr_cosine_decay: bool = False
     lr_min_factor: float = 1.0  # 1.0 = no change; 0.5 = half the base flow_lr
+    gauge_ema_momentum: float = 0.99  # EMA momentum for gauge fix (used when batch_size < 512)
 
 class StandardMethod(Method):
     """Standard DualWCFM method: interpolation-based marginals, weighted/implicit CFM.
@@ -77,6 +79,7 @@ class StandardMethod(Method):
                     trainer.strategy.backward_model.load_state_dict(
                         trainer.strategy.initial_backward_model.state_dict()
                     )
+            trainer.visualizer.at_flow_pretrain_end(trainer, {})
             return
 
         strategy = trainer.strategy
@@ -95,6 +98,7 @@ class StandardMethod(Method):
             strategy.initial_forward_model.load_state_dict(model.state_dict())
 
         trainer.strategy._save_pretrained(save)
+        trainer.visualizer.at_flow_pretrain_end(trainer, {})
 
     # ------------------------------------------------------------------
     # Pretrain marginal flow matching
@@ -119,10 +123,11 @@ class StandardMethod(Method):
             for i in range(trainer.config.num_rectified_flow + 1):
                 logger.info(f"Marginal flow matching phase {i + 1}/{trainer.config.num_rectified_flow + 1}")
 
-                pbar = trange(
-                    trainer.config.marginal_epochs if i == 0 else trainer.config.marginal_epochs // 10,
-                    desc="Marginal Flow Matching",
-                )
+                n_epochs = trainer.config.marginal_epochs if i == 0 else trainer.config.marginal_epochs // 10
+                mu_scheduler = lr_scheduler.CosineAnnealingLR(mu_optimizer, T_max=n_epochs, eta_min=1e-6)
+                nu_scheduler = lr_scheduler.CosineAnnealingLR(nu_optimizer, T_max=n_epochs, eta_min=1e-6)
+
+                pbar = trange(n_epochs, desc="Marginal Flow Matching")
                 for epoch in pbar:
                     # Sample (x0, y0) from initial coupling and (x1, y1) from current marginals.
                     # In the first pass, use initial coupling for both.
@@ -173,7 +178,14 @@ class StandardMethod(Method):
                     loss_nu.backward()
                     nu_optimizer.step()
 
-                    pbar.set_postfix({"Loss mu": loss_mu.item(), "Loss nu": loss_nu.item()})
+                    mu_scheduler.step()
+                    nu_scheduler.step()
+
+                    pbar.set_postfix({
+                        "Loss mu": loss_mu.item(),
+                        "Loss nu": loss_nu.item(),
+                        "lr": mu_scheduler.get_last_lr()[0],
+                    })
 
                     trainer.visualizer.during_pretrain(
                         epoch,
@@ -304,6 +316,10 @@ class StandardMethod(Method):
         mu_model.eval()
         nu_model.eval()
 
+        use_ema_gauge = batch_size < 512
+        ema_a_mean = torch.tensor(0.0, device=device)
+        gauge_mom = self.config.gauge_ema_momentum
+
         pbar = trange(trainer.config.dual_epochs, desc="Dual Training")
         for _ in pbar:
             x, y = trainer.current_coupling.coupling_sample(batch_size)
@@ -321,6 +337,16 @@ class StandardMethod(Method):
 
             a, a_mu = f_dual(x), f_dual(x_mu)
             b, b_nu = g_dual(y), g_dual(y_nu)
+
+            # Gauge invariance: subtract mean of f to fix the additive constant.
+            # With small batches the batch mean is too noisy; use an EMA instead.
+            if use_ema_gauge:
+                ema_a_mean = gauge_mom * ema_a_mean + (1 - gauge_mom) * a.detach().mean()
+                a_mean = ema_a_mean
+            else:
+                a_mean = a.mean()
+            a = a - a_mean
+            a_mu = a_mu - a_mean
 
             # Coupling term (with optional change_of_measure)
             # com = trainer.strategy.change_of_measure
@@ -497,16 +523,13 @@ class StandardMethod(Method):
 
         trainer.visualizer.at_flow_matching_end(iteration, trainer, flow_ctx, start_ctx)
 
-        # Transport cost diagnostic
+        # Transport cost diagnostic — always evaluate on new marginal samples so
+        # that T(x) is well-defined and the metric tracks adaptation progress.
         n_diag = 10000 if not is_image else min(256, batch_size)
         if backward:
-            x0_tc = trainer.initial_coupling.sample_target(n_diag).to(device)
-            x1_tc = trainer.new_target.sample(n_diag).to(device)
+            xt_tc = trainer.new_target.sample(n_diag).to(device)
         else:
-            x0_tc = trainer.initial_coupling.sample_init(n_diag).to(device)
-            x1_tc = trainer.new_source.sample(n_diag).to(device)
-        t_full = torch.full((n_diag, 1), ctx["t"], device=device)
-        xt_tc = trainer.flow_matching.interpolate(x0_tc, x1_tc, t_full, trainer._sigma)
+            xt_tc = trainer.new_source.sample(n_diag).to(device)
 
         model.eval()
         _evolved = trainer.flow_matching.evolve(xt_tc, model, num_steps=100, sigma=trainer._sigma, extend=True)

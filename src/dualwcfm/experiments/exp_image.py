@@ -92,9 +92,9 @@ class UNetWrapper(torch.nn.Module):
 class DualUNetWrapper(torch.nn.Module):
     """Adapts a ``stop_middle=True`` UNetModel for dual potential functions.
 
-    Dual potentials are time-independent scalars.  This wrapper:
-    - Always passes a zero timestep to the UNet.
-    - Returns shape ``(N, 1, 1, 1)`` for broadcast-safe arithmetic with image tensors.
+    Dual potentials are time-independent scalars.  The UNet uses a learnable
+    constant embedding instead of a time embedding, so no timestep is needed.
+    Returns shape ``(N, 1, 1, 1)`` for broadcast-safe arithmetic with image tensors.
     """
 
     def __init__(self, model: UNetModel):
@@ -102,8 +102,10 @@ class DualUNetWrapper(torch.nn.Module):
         self.model = model
 
     def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        # t is ignored by the UNet when stop_middle=True (learnable constant used).
         t = torch.zeros(x.shape[0], device=x.device, dtype=torch.float32)
-        return self.model(t, x)
+        out = self.model(t, x)  # (N, 1) after Flatten
+        return out.view(x.shape[0], 1, 1, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +114,7 @@ class DualUNetWrapper(torch.nn.Module):
 
 #: UNet channel multiplier schedule used for all image experiments.
 _CHANNEL_MULT = (1, 2, 3, 4)
+# _CHANNEL_MULT = (1, 2, 2)
 #: Base number of UNet channels.
 _NUM_CHANNELS = 32
 #: Number of residual blocks per resolution level.
@@ -131,14 +134,17 @@ class BidirectionalUnetStrategy(BidirectionalStrategy):
     def _create_models(self, dim: int, hidden_size: int) -> None:  # noqa: D102
         self._device = None  # Reset so the next to_device() call moves the new models.
         C, H, W = self.config.image_shape
+        num_channels   = hidden_size if hidden_size > 0 else _NUM_CHANNELS
+        num_res_blocks = getattr(self.config, "num_res_blocks", _NUM_RES_BLOCKS)
 
         def _make_unet(in_channels: int, stop_middle: bool = False) -> UNetModel:
             return UNetModel(
                 dim            = (in_channels, H, W),
                 channel_mult   = _CHANNEL_MULT,
-                num_channels   = _NUM_CHANNELS,
-                num_res_blocks = _NUM_RES_BLOCKS,
+                num_channels   = num_channels,
+                num_res_blocks = num_res_blocks,
                 stop_middle    = stop_middle,
+                out_channels   = 1 if stop_middle else in_channels,
             )
 
         wrap  = self.wrapper   # UNetWrapper
@@ -248,34 +254,34 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
         dataset_size             = 2_000,
-        marginal_epochs          = 15_000,
-        pretrain_epochs          = 20_000,
+        marginal_epochs          = 30_000,
+        pretrain_epochs          = 30_000,
         dual_epochs              = 100,
-        cfm_epochs               = 500,
-        advance_steps            = 30,
-        iterations               = 30,
-        num_rectified_flow       = 1,
+        cfm_epochs               = 1000,
+        advance_steps            = 200,
+        iterations               = 10,
+        num_rectified_flow       = 2,
         scale_factor             = 1.0,
-        batch_size               = 96,
+        batch_size               = 128,
         use_disk_coupling        = True,
-        coupling_chunk_size      = 2_048,
-        save_coupling_checkpoints= True,
-        save_model_checkpoints   = True,
+        coupling_chunk_size      = 128,
+        save_coupling_checkpoints= False,
+        save_model_checkpoints   = False,
     )
 
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma           = 0.05,
-        sigma2          = 0.05,
+        sigma           = 0.01,
+        sigma2          = 0.01,
         loss            = "weighted",
         l2_reg          = 0,
         lip_reg         = 0,
         mean_reg        = 0,
         use_noisy_field = False,
-        particle_ratio  = 0.25,
+        particle_ratio  = 0.1,
         lr_cosine_decay = False,
-        lr_min_factor   = 0.5,
+        lr_min_factor   = 1.0,
     )
 
 
@@ -321,8 +327,8 @@ def _mnist_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
         hidden_size        = 32,
         image_shape        = (C, H, W),
         dual_learning_rate = 1e-4,
-        mu_learning_rate   = 5e-4,
-        nu_learning_rate   = 5e-4,
+        mu_learning_rate   = 2e-4,
+        nu_learning_rate   = 2e-4,
         flow_learning_rate = 2e-4,
     )
     vis_cfg                = VisualizeConfig(
@@ -333,18 +339,23 @@ def _mnist_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
         show_each_pretrain  = 1_000,
     )
 
+    # T = horizontal flip (self-inverse: flip(flip(x)) = x)
+    def _flip_map(x: torch.Tensor) -> torch.Tensor:
+        return torch.flip(x, dims=[-1])  # last dim = width for both 3D and 4D tensors
+
     return ExperimentSpec(
-        name             = f"mnist_simple{'_perturbed' if perturbed else ''}",
-        mode             = "image",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"mnist_simple{'_perturbed' if perturbed else ''}",
+        mode                  = "image",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        transport_map         = _flip_map,
+        inverse_transport_map = _flip_map,  # self-inverse
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 
@@ -392,24 +403,86 @@ def _fashion_medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     )
     vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=6, trajectory_stride=0)
 
+    # T = flip then rotate(10°).  T⁻¹ = rotate(-10°) then flip.
+    def _flip_rot10_map(x: torch.Tensor) -> torch.Tensor:
+        y = torch.flip(x, dims=[-1])
+        return TF.rotate(y, 10.0, fill=-1.0)
+
+    def _flip_rot10_inv(y: torch.Tensor) -> torch.Tensor:
+        x = TF.rotate(y, -10.0, fill=-1.0)
+        return torch.flip(x, dims=[-1])
+
     return ExperimentSpec(
-        name             = f"fashion_medium{'_perturbed' if perturbed else ''}",
-        mode             = "image",
-        initial_coupling = coupling,
-        new_source       = new_src,
-        new_target       = new_tgt,
-        transport_map    = None,
-        train_cfg        = train_cfg,
-        model_cfg        = model_cfg,
-        vis_cfg          = vis_cfg,
-        method_cfg       = method_cfg,
-        output_root      = output_root,
+        name                  = f"fashion_medium{'_perturbed' if perturbed else ''}",
+        mode                  = "image",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        transport_map         = _flip_rot10_map,
+        inverse_transport_map = _flip_rot10_inv,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
     )
 
 
 # ---------------------------------------------------------------------------
 # Public catalogue
 # ---------------------------------------------------------------------------
+
+def make_image_experiments_v2(output_root: str = "results") -> List[ExperimentSpec]:
+    """Image experiments with improved hyperparameters for better DL convergence.
+
+    Key changes vs v1
+    -----------------
+    - UNet: 64 base channels (was 32), 2 res blocks (was 1)  → more capacity
+    - dual_epochs: 300 (was 100)  → dual potentials converge per iteration
+    - cfm_epochs:  1000 (was 500) → flow model converges per iteration
+    - advance_steps: 20 (was 30)  → slower coupling advance, UNets can track it
+    - iterations: 60 (was 30)     → more outer loop steps
+    - batch_size: 256 (was 128)   → more stable gradient estimates
+    - particle_ratio: 0.5 (was 0.25) → more new-marginal samples in CFM loss
+    - sigma: 0.1 (was 0.05)       → slightly more regularisation for image scale
+    - lr_cosine_decay: True       → learning rate annealing for stability
+    - Learning rates halved       → slower, more careful updates
+    """
+    try:
+        import torchvision  # noqa: F401
+    except ImportError:
+        import warnings
+        warnings.warn("torchvision not found – skipping image experiments.", stacklevel=2)
+        return []
+
+    # Build v1 specs then override configs in place
+    specs = make_image_experiments(output_root)
+    for spec in specs:
+        t = spec.train_cfg
+        t.iterations      = 60
+        t.dual_epochs     = 300
+        t.cfm_epochs      = 1_000
+        t.advance_steps   = 20
+        t.batch_size      = 256
+        t.marginal_epochs = 15_000
+        t.pretrain_epochs = 20_000
+
+        m = spec.method_cfg
+        m.particle_ratio  = 0.5
+        m.sigma           = 0.1
+        m.sigma2          = 0.1
+        m.lr_cosine_decay = True
+
+        c = spec.model_cfg
+        c.hidden_size        = 64
+        c.num_res_blocks     = 2
+        c.dual_learning_rate = 5e-5
+        c.mu_learning_rate   = 1e-4
+        c.nu_learning_rate   = 1e-4
+        c.flow_learning_rate = 1e-4
+
+    return specs
+
 
 def make_image_experiments(output_root: str = "results") -> List[ExperimentSpec]:
     """Return all image experiment specs (requires torchvision).
