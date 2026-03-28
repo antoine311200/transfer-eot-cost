@@ -390,6 +390,35 @@ def _to_01(x: torch.Tensor) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------------------
+# Joint coupling metric (Gushchin BW2)
+# ---------------------------------------------------------------------------
+
+def joint_bw2(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    x_ref: torch.Tensor,
+    y_ref: torch.Tensor,
+) -> float:
+    """Bures–Wasserstein² distance between two joint coupling distributions.
+
+    Fits Gaussians to (x‖y) and (x_ref‖y_ref) then evaluates BW₂ analytically.
+    This is the standard Gushchin benchmark metric for coupling quality.
+
+    Parameters
+    ----------
+    x, y     : learned coupling samples (N, d) each
+    x_ref, y_ref : reference coupling samples (M, d) each
+
+    Returns
+    -------
+    BW₂ distance (float)
+    """
+    xy     = torch.cat([x.flatten(1), y.flatten(1)], dim=1).float()
+    xy_ref = torch.cat([x_ref.flatten(1), y_ref.flatten(1)], dim=1).float()
+    return bures_wasserstein_2(xy, xy_ref)
+
+
+# ---------------------------------------------------------------------------
 # Convenience: compute all universal metrics at once
 # ---------------------------------------------------------------------------
 

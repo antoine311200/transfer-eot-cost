@@ -387,8 +387,19 @@ def save_metrics_plot(output_dir: str) -> None:
                 pass
         ax.spines[["top", "right"]].set_visible(False)
 
-    # 3×2 comprehensive dashboard
-    fig, axes = plt.subplots(3, 2, figsize=(13, 11))
+    # Auto-detect which optional columns are present
+    has_bw2 = any(r.get("bw2", "") not in ("", "N/A") for r in rows)
+    has_fid = any(r.get("fid", "") not in ("", "N/A") for r in rows)
+    has_kid = any(r.get("kid", "") not in ("", "N/A") for r in rows)
+    has_map = any(r.get("map_err_fwd", "") not in ("", "N/A") or
+                  r.get("map_err_bwd", "") not in ("", "N/A") for r in rows)
+
+    # Decide layout: 3 fixed rows + optional rows for BW2 and FID/KID
+    n_extra = (1 if has_bw2 else 0) + (1 if has_fid or has_kid else 0)
+    nrows = 3 + n_extra
+    fig, axes = plt.subplots(nrows, 2, figsize=(13, 4 * nrows))
+    if nrows == 1:
+        axes = axes[None, :]
     fig.patch.set_facecolor("#f8f9fa")
     for ax in axes.flat:
         ax.set_facecolor("#ffffff")
@@ -407,10 +418,13 @@ def save_metrics_plot(output_dir: str) -> None:
            ("energy_dist_nu", "#956cb4", "Energy dist"),
            ("sinkhorn_div",   "#d65f5f", "Sinkhorn div")],
           "Target distribution quality", log=True)
-    _plot(axes[1, 1],
-          [("map_err_fwd", "#0173b2", "Map err fwd  √E‖T(x)−ŷ‖²"),
-           ("map_err_bwd", "#de8f05", "Map err bwd  √E‖T⁻¹(y)−x̂‖²")],
-          "Transport map error (ground truth)", "RMSE")
+    if has_map:
+        _plot(axes[1, 1],
+              [("map_err_fwd", "#0173b2", "Map err fwd  √E‖T(x)−ŷ‖²"),
+               ("map_err_bwd", "#de8f05", "Map err bwd  √E‖T⁻¹(y)−x̂‖²")],
+              "Transport map error (ground truth)", "RMSE")
+    else:
+        axes[1, 1].set_visible(False)
 
     # Row 2: importance weights
     w_mean = _get("weight_mean")
@@ -446,6 +460,23 @@ def save_metrics_plot(output_dir: str) -> None:
     axes[2, 1].grid(True, alpha=0.25, linestyle="--")
     axes[2, 1].tick_params(labelsize=7)
     axes[2, 1].spines[["top", "right"]].set_visible(False)
+
+    # Optional rows
+    extra_row = 3
+    if has_bw2:
+        _plot(axes[extra_row, 0],
+              [("bw2", "#8b1a1a", "BW₂ joint coupling")],
+              "Gushchin BW₂ (joint coupling vs reference)", "BW₂", log=True)
+        axes[extra_row, 1].set_visible(False)
+        extra_row += 1
+    if has_fid or has_kid:
+        series = []
+        if has_fid:
+            series.append(("fid", "#c84b31", "FID"))
+        if has_kid:
+            series.append(("kid", "#845ec2", "KID"))
+        _plot(axes[extra_row, 0], series, "Image quality (FID / KID)", log=True)
+        axes[extra_row, 1].set_visible(False)
 
     exp_name = os.path.basename(output_dir.rstrip("/\\"))
     fig.suptitle(f"Training Dashboard — {exp_name}", fontsize=12, fontweight="bold", y=1.01)

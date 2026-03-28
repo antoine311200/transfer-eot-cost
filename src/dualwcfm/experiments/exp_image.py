@@ -114,6 +114,7 @@ class DualUNetWrapper(torch.nn.Module):
 
 #: UNet channel multiplier schedule used for all image experiments.
 _CHANNEL_MULT = (1, 2, 3, 4)
+# _CHANNEL_MULT = (1, 2, 2)
 #: Base number of UNet channels.
 _NUM_CHANNELS = 32
 #: Number of residual blocks per resolution level.
