@@ -80,8 +80,11 @@ class Trainer:
         self.mu_distribution = mu_distribution
         self.nu_distribution = nu_distribution
 
-        # Use disk-based coupling for images to avoid OOM
-        if self.config.use_disk_coupling or (self.config.image_shape is not None and self.config.dataset_size > 1000):
+        # Use disk-based coupling for images to avoid OOM.
+        # use_disk_coupling=None → auto (disk when image_shape + large dataset)
+        # use_disk_coupling=True → always disk; use_disk_coupling=False → always RAM
+        _auto_disk = self.config.image_shape is not None and self.config.dataset_size > 1000
+        if self.config.use_disk_coupling is True or (self.config.use_disk_coupling is None and _auto_disk):
             logger.info("Using disk-based coupling distribution for memory efficiency.")
             self.current_coupling = DiskCouplingDistribution(
                 initial_coupling,
@@ -112,10 +115,14 @@ class Trainer:
                 iter_dir = os.path.join(coupling_dir, f"iter_{iteration:04d}")
                 os.makedirs(iter_dir, exist_ok=True)
 
-                for chunk_idx in range(coupling.n_chunks):
-                    src = coupling._chunk_path(chunk_idx)
+                if coupling._x_mmap is not None:
+                    coupling._x_mmap.flush()
+                    coupling._y_mmap.flush()
+
+                for fname in ("x.dat", "y.dat", "meta.pt"):
+                    src = os.path.join(coupling.save_dir, fname)
                     if os.path.exists(src):
-                        shutil.copy2(src, os.path.join(iter_dir, f"chunk_{chunk_idx:06d}.pt"))
+                        shutil.copy2(src, os.path.join(iter_dir, fname))
 
                 logger.info(f"  [ckpt] coupling saved -> {iter_dir}")
             elif isinstance(coupling, FixedSizeCouplingDistribution):
