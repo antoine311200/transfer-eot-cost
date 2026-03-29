@@ -43,7 +43,7 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
         dataset_size             = 1_000_000,
-        marginal_epochs          = 5_000,
+        marginal_epochs          = 10_000,
         pretrain_epochs          = 10_000,
         dual_epochs              = 100,
         cfm_epochs               = 250,
@@ -118,7 +118,7 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
     model_cfg  = FeedForwardConfig(dimension=2, hidden_size=32)
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=300, trajectory_stride=2)
+    vis_cfg    = VisualizeConfig(show_each=10, n_trajectories=500, trajectory_stride=2)
 
     return ExperimentSpec(
         name                  = f"2d_simple{'_perturbed' if perturbed else ''}",
