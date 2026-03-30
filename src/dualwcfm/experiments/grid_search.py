@@ -112,10 +112,11 @@ def _build_parser() -> argparse.ArgumentParser:
                           "(skip pretraining).  When running multiple specs this must contain "
                           "weights valid for every spec — prefer --reuse-from for the "
                           "multi-experiment case.")
-    sel.add_argument("--reuse-from",  default="results", metavar="DIR",
+    sel.add_argument("--reuse-from",  default="", metavar="DIR",
                      help="Root results dir to scan for pre-existing {name}/models/ weights "
-                          "per spec (default: results).  Each spec looks up its own subdir "
-                          "independently.  Set to '' to always retrain.")
+                          "per spec (opt-in, disabled by default).  Each spec looks up its "
+                          "own subdir independently.  The grid output dir is always checked "
+                          "first regardless of this flag.")
 
     # ── W&B ───────────────────────────────────────────────────────────
     wb = p.add_argument_group("Weights & Biases")
@@ -256,34 +257,50 @@ def _apply_combo(spec: ExperimentSpec, combo: Dict[str, Any]) -> ExperimentSpec:
 # Pretraining helper
 # ---------------------------------------------------------------------------
 
+def _has_pth(directory: str) -> bool:
+    return os.path.isdir(directory) and any(f.endswith(".pth") for f in os.listdir(directory))
+
+
 def _ensure_pretrain(
     spec:          ExperimentSpec,
     pretrain_dir:  Optional[str],
     wandb_project: Optional[str],
     wandb_entity:  Optional[str],
-    reuse_from:    str = "results",
+    reuse_from:    str = "",
 ) -> str:
-    """Run pretraining for *spec* if *pretrain_dir* is not given; return path.
+    """Ensure pretrained weights exist for *spec* and return their directory.
 
     Resolution order
     ----------------
-    1. ``pretrain_dir`` (explicit path from --pretrain-dir)
-    2. ``{reuse_from}/{spec.name}/models/`` — auto-detected existing weights
-    3. Fresh pretrain run (saves into ``spec.output_dir/models/``)
+    1. Grid output dir  ``{spec.output_dir}/models/`` — self-contained reuse.
+       If a previous grid run already trained this spec, reuse those weights.
+    2. ``--pretrain-dir`` — explicit path given by the user (applies to ALL specs
+       when ``--both`` is used; only safe when a single spec is selected).
+    3. ``--reuse-from/{spec.name}/models/`` — opt-in reuse from another results
+       folder (disabled by default; pass ``--reuse-from <dir>`` to enable).
+    4. Fresh pretrain run, saved into ``{spec.output_dir}/models/``.
     """
+    # 1. Self-contained reuse within the grid output folder
+    own_dir = os.path.join(spec.output_dir, "models")
+    if _has_pth(own_dir):
+        logger.info("  Reusing pretrained models from grid output dir: %s", own_dir)
+        return own_dir
+
+    # 2. Explicit --pretrain-dir
     if pretrain_dir is not None:
         if not os.path.isdir(pretrain_dir):
             raise FileNotFoundError(f"--pretrain-dir not found: {pretrain_dir}")
-        logger.info("  Re-using pretrained models from %s", pretrain_dir)
+        logger.info("  Reusing pretrained models from --pretrain-dir: %s", pretrain_dir)
         return pretrain_dir
 
-    # Auto-detect from a previous full-experiment run
+    # 3. --reuse-from (opt-in)
     if reuse_from:
         candidate = os.path.join(reuse_from, spec.name, "models")
-        if os.path.isdir(candidate) and any(f.endswith(".pth") for f in os.listdir(candidate)):
-            logger.info("  Auto-detected pretrained models at %s", candidate)
+        if _has_pth(candidate):
+            logger.info("  Reusing pretrained models from --reuse-from: %s", candidate)
             return candidate
 
+    # 4. Fresh pretrain
     logger.info("  Pretraining base experiment: %s", spec.name)
     run_experiment(
         spec,
@@ -294,7 +311,7 @@ def _ensure_pretrain(
         wandb_run_name= f"{spec.name}__pretrain",
         wandb_group   = f"grid__{spec.name}",
     )
-    return os.path.join(spec.output_dir, "models")
+    return own_dir
 
 
 # ---------------------------------------------------------------------------

@@ -46,7 +46,7 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
         marginal_epochs          = 10_000,
         pretrain_epochs          = 10_000,
         dual_epochs              = 100,
-        cfm_epochs               = 250,
+        cfm_epochs               = 500,
         advance_steps            = 100,
         iterations               = 50,
         num_rectified_flow       = 1,
@@ -108,8 +108,8 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     def transport_map(x: torch.Tensor) -> torch.Tensor:
         # T(x) = -x + [0, perturbation]
-        A = torch.tensor([[-1.0, 0.0], [0.0, -1.0]])
-        b = torch.tensor([0.0, perturbation])
+        A = torch.tensor([[-1.0, 0.0], [0.0, -1.0]], device=x.device, dtype=x.dtype)
+        b = torch.tensor([0.0, perturbation], device=x.device, dtype=x.dtype)
         return x @ A.T + b
 
     # T is its own inverse: T(T(x)) = -(-x + [0,p]) + [0,p] = x
@@ -172,10 +172,10 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     _R_med     = torch.tensor([[_c, -_s], [_s,  _c]], dtype=torch.float32)
 
     def transport_map_med(x: torch.Tensor) -> torch.Tensor:
-        return x @ _R_med.T          # R · x  (row-vector convention)
+        return x @ _R_med.to(x.device, x.dtype).T
 
     def inverse_transport_map_med(y: torch.Tensor) -> torch.Tensor:
-        return y @ _R_med            # Rᵀ · y  =  R⁻¹ · y
+        return y @ _R_med.to(y.device, y.dtype)
 
     train_cfg              = _default_train_cfg(device)
     train_cfg.iterations   = 100
@@ -234,10 +234,10 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     _R_cpx     = torch.tensor([[_c2, -_s2], [_s2,  _c2]], dtype=torch.float32)
 
     def transport_map_cpx(x: torch.Tensor) -> torch.Tensor:
-        return x @ _R_cpx.T
+        return x @ _R_cpx.to(x.device, x.dtype).T
 
     def inverse_transport_map_cpx(y: torch.Tensor) -> torch.Tensor:
-        return y @ _R_cpx
+        return y @ _R_cpx.to(y.device, y.dtype)
 
     train_cfg                = _default_train_cfg(device)
     train_cfg.iterations     = 150
