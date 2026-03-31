@@ -192,9 +192,12 @@ class _LoggingMixin:
         nu_ref = trainer.new_target.sample(n).to(device)
         if is_image_tensor(y):
             nu_ref = nu_ref.view_as(y)
-        mmd_nu         = _mmd(y, nu_ref)
-        energy_dist_nu = _ed(y, nu_ref)
-        sinkhorn_div   = _sd(y, nu_ref)
+        # Rescale to original data space for cross-run comparability
+        y_scaled      = y      * s
+        nu_ref_scaled = nu_ref * s
+        mmd_nu         = _mmd(y_scaled, nu_ref_scaled)
+        energy_dist_nu = _ed(y_scaled,  nu_ref_scaled)
+        sinkhorn_div   = _sd(y_scaled,  nu_ref_scaled)
 
         # Ground-truth map errors — only compute for the direction trained this step.
         # For BidirectionalStrategy: skip fwd error on backward steps and vice versa
@@ -214,7 +217,7 @@ class _LoggingMixin:
                 y_hat = (evolved[:, : x_eval.shape[1], :, :]
                          if is_image_tensor(x_eval)
                          else evolved[:, : trainer.strategy.config.dimension])
-            map_err_fwd = _map_err(x_eval.cpu(), y_hat.cpu(), self._transport_map)
+            map_err_fwd = _map_err((x_eval * s).cpu(), (y_hat * s).cpu(), self._transport_map)
         else:
             map_err_fwd = ""
 
@@ -226,7 +229,7 @@ class _LoggingMixin:
                 x_hat = (evolved[:, : y_eval.shape[1], :, :]
                          if is_image_tensor(y_eval)
                          else evolved[:, : trainer.strategy.config.dimension])
-            map_err_bwd = _map_err(y_eval.cpu(), x_hat.cpu(), self._inverse_transport_map)
+            map_err_bwd = _map_err((y_eval * s).cpu(), (x_hat * s).cpu(), self._inverse_transport_map)
         else:
             map_err_bwd = ""
 
@@ -240,8 +243,8 @@ class _LoggingMixin:
                 x_bw, y_bw     = trainer.current_coupling.coupling_sample(n_bw)
                 x_ref, y_ref_b = trainer.initial_coupling.coupling_sample(n_bw)
             bw2_val = _joint_bw2(
-                x_bw.float().cpu(), y_bw.float().cpu(),
-                x_ref.float().cpu(), y_ref_b.float().cpu(),
+                (x_bw   * s).float().cpu(), (y_bw   * s).float().cpu(),
+                (x_ref  * s).float().cpu(), (y_ref_b * s).float().cpu(),
             )
 
         # Image-specific metrics (FID / KID) — provided by subclass hook

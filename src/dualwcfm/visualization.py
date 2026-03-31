@@ -349,12 +349,15 @@ class Visualizer:
             x_coupling = x_coupling.to(device)
             y_coupling = y_coupling.to(device)
 
+        # Rescale to original data space so metrics are comparable across runs
+        # with different scale_factor values (all internal tensors are / scale).
+        s = getattr(trainer, "scale", 1.0)
         n_x = x_coupling.shape[0]
         n_y = y_coupling.shape[0]
-        mu_t_flat = mu_t.view(n_samples, -1).float()
-        nu_t_flat = nu_t.view(n_samples, -1).float()
-        x_flat = x_coupling.view(n_x, -1).float()
-        y_flat = y_coupling.view(n_y, -1).float()
+        mu_t_flat = (mu_t * s).view(n_samples, -1).float()
+        nu_t_flat = (nu_t * s).view(n_samples, -1).float()
+        x_flat = (x_coupling * s).view(n_x, -1).float()
+        y_flat = (y_coupling * s).view(n_y, -1).float()
 
         return {
             "W1_mu": self._sliced_wasserstein(mu_t_flat, x_flat, n_proj=n_proj, p=1),
