@@ -54,7 +54,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── Experiment selection ─────────────────────────────────────────────────
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
-        "--mode", choices=["2d", "3d", "image", "image-v2", "color", "gushchin"],
+        "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color", "gushchin"],
         help="Experiment mode.  Required unless --all is given.",
     )
     sel.add_argument(
@@ -245,17 +245,19 @@ def main() -> None:
     parser = _build_parser()
     args   = parser.parse_args()
 
-    from dualwcfm.experiments.exp_2d       import make_2d_experiments
-    from dualwcfm.experiments.exp_3d       import make_3d_experiments
-    from dualwcfm.experiments.exp_image    import make_image_experiments, make_image_experiments_v2
-    from dualwcfm.experiments.exp_color    import make_color_experiments
-    from dualwcfm.experiments.exp_gushchin import make_gushchin_experiments
-    from dualwcfm.experiments.base         import run_experiment
+    from dualwcfm.experiments.exp_2d            import make_2d_experiments
+    from dualwcfm.experiments.exp_3d            import make_3d_experiments
+    from dualwcfm.experiments.exp_3d_manifold   import make_3d_manifold_experiments
+    from dualwcfm.experiments.exp_image         import make_image_experiments, make_image_experiments_v2
+    from dualwcfm.experiments.exp_color         import make_color_experiments
+    from dualwcfm.experiments.exp_gushchin      import make_gushchin_experiments
+    from dualwcfm.experiments.base              import run_experiment
 
     # ── Catalogue factory ────────────────────────────────────────────────────
     catalogue_factories = {
         "2d":       make_2d_experiments,
         "3d":       make_3d_experiments,
+        "manifold": make_3d_manifold_experiments,
         "image":    make_image_experiments,
         "image-v2": make_image_experiments_v2,
         "color":    make_color_experiments,

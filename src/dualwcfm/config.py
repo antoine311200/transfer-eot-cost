@@ -80,4 +80,7 @@ class VisualizeConfig:
     show_each_marginal: int = 0  # During marginal flow training
     show_each_pretrain: int = 0  # During pretraining
     trajectory_stride: int = 2  # Plot one trajectory point every N steps (0 = only start/end)
+    # 3-D camera angle (elevation and azimuth in degrees)
+    camera_elev: float = 22.0
+    camera_azim: float = -55.0
 

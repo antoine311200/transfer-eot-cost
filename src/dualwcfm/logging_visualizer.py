@@ -773,25 +773,68 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
         pad = (hi - lo) * 0.10 + 0.1
         L_lo, L_hi = lo - pad, hi + pad
 
+        from mpl_toolkits.mplot3d.art3d import Line3DCollection
+        from matplotlib.colors import Normalize
+        import matplotlib.cm as cm
+
+        # --- palette ---
+        C_MU   = "#2166AC"   # blue  – μ_t cloud
+        C_NU   = "#D6604D"   # red   – ν_t cloud
+        C_PI1  = "#4DAC26"   # green – coupling μ side
+        C_PI2  = "#F4A736"   # amber – coupling ν side
+        C_FLOW = "#762A83"   # purple – flow-evolved
+
         fig = plt.figure(figsize=(8, 8))
         ax = fig.add_subplot(111, projection="3d")
-        ax.scatter(mu_s[:, 0], mu_s[:, 1], mu_s[:, 2], c="blue", alpha=0.1, depthshade=True, s=3, label=r"$\mu_t$")
-        ax.scatter(nu_s[:, 0], nu_s[:, 1], nu_s[:, 2], c="red", alpha=0.1, depthshade=True, s=3, label=r"$\nu_t$")
-        ax.scatter(mu_cpu[:, 0], mu_cpu[:, 1], mu_cpu[:, 2], c="purple", marker="x", alpha=0.75, depthshade=True, label=r"$\pi_t^{(1)}$")
-        ax.scatter(nu_cpu[:, 0], nu_cpu[:, 1], nu_cpu[:, 2], c="orange", marker="x", alpha=0.75, depthshade=True, label=r"$\pi_t^{(2)}$")
+        fig.patch.set_facecolor("#FAFAFA")
+        ax.set_facecolor("#FAFAFA")
+        for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+            pane.fill = False
+            pane.set_edgecolor("#CCCCCC")
+
+        kw = dict(depthshade=True, edgecolors="none")
+        ax.scatter(mu_s[:, 0], mu_s[:, 1], mu_s[:, 2],
+                   c=C_MU, alpha=0.12, s=4, label=r"$\mu_t$ (sample)", **kw)
+        ax.scatter(nu_s[:, 0], nu_s[:, 1], nu_s[:, 2],
+                   c=C_NU, alpha=0.12, s=4, label=r"$\nu_t$ (sample)", **kw)
+        ax.scatter(mu_cpu[:, 0], mu_cpu[:, 1], mu_cpu[:, 2],
+                   c=C_PI1, marker="o", s=18, alpha=0.85, label=r"$\pi_t^{(1)}$", **kw)
+        ax.scatter(nu_cpu[:, 0], nu_cpu[:, 1], nu_cpu[:, 2],
+                   c=C_PI2, marker="o", s=18, alpha=0.85, label=r"$\pi_t^{(2)}$", **kw)
         ax.scatter(nu_flow_cpu[:, 0], nu_flow_cpu[:, 1], nu_flow_cpu[:, 2],
-                   c="green", marker="o", alpha=0.75, depthshade=True, s=50, label="Flow evolved")
-        dist = torch.norm(nu_cpu - mu_cpu, dim=1)
+                   c=C_FLOW, marker="^", s=22, alpha=0.80, label="Flow-evolved", **kw)
+
+        # Coupling lines colored by transport distance
+        dist = torch.norm(nu_cpu - mu_cpu, dim=1).numpy()
+        d_norm = Normalize(vmin=dist.min(), vmax=dist.max())
+        cmap_coup = cm.get_cmap("YlOrRd")
         for j in range(mu_cpu.shape[0]):
-            ax.plot([mu_cpu[j, 0], nu_cpu[j, 0]], [mu_cpu[j, 1], nu_cpu[j, 1]],
-                    [mu_cpu[j, 2], nu_cpu[j, 2]], color="gray", alpha=0.8)
+            col = cmap_coup(d_norm(dist[j]))
+            ax.plot([mu_cpu[j, 0].item(), nu_cpu[j, 0].item()],
+                    [mu_cpu[j, 1].item(), nu_cpu[j, 1].item()],
+                    [mu_cpu[j, 2].item(), nu_cpu[j, 2].item()],
+                    color=col, alpha=0.55, linewidth=0.8)
+
         ax.set_xlim([L_lo, L_hi]); ax.set_ylim([L_lo, L_hi]); ax.set_zlim([L_lo, L_hi])
-        ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
-        ax.legend(fontsize=7, loc="upper left")
-        sm_cb = plt.cm.ScalarMappable(cmap="viridis")
-        sm_cb.set_array(dist.numpy())
-        plt.colorbar(sm_cb, ax=ax, shrink=0.6, label="Transport length")
-        ax.set_title(f"Distributions after Advancing Step {iteration+1}")
+        ax.set_xlabel(r"$x_1$", labelpad=3, fontsize=9)
+        ax.set_ylabel(r"$x_2$", labelpad=3, fontsize=9)
+        ax.set_zlabel(r"$x_3$", labelpad=3, fontsize=9)
+        ax.tick_params(labelsize=7, pad=1)
+        ax.grid(True, alpha=0.15, linewidth=0.5)
+        ax.view_init(elev=self.config.camera_elev, azim=self.config.camera_azim)
+        ax.set_box_aspect([1, 1, 1])
+        ax.set_title(f"Distributions — step {iteration + 1}", fontsize=10, pad=10)
+
+        leg = ax.legend(fontsize=7, loc="upper left", framealpha=0.88,
+                        edgecolor="#CCCCCC", markerscale=1.4)
+        leg.get_frame().set_linewidth(0.5)
+
+        sm_cb = cm.ScalarMappable(cmap="YlOrRd", norm=d_norm)
+        sm_cb.set_array(dist)
+        cbar = fig.colorbar(sm_cb, ax=ax, shrink=0.42, pad=0.10, aspect=22)
+        cbar.set_label("Transport length", fontsize=8)
+        cbar.ax.tick_params(labelsize=7)
+
         self.save_fig(fig, "marginals", f"distributions_{iteration:04d}.png")
 
     def _save_marginals_plot(self, time_step, mu_t, nu_t, x_coup, y_coup):
