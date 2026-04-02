@@ -112,6 +112,11 @@ def _build_parser() -> argparse.ArgumentParser:
                           "(skip pretraining).  When running multiple specs this must contain "
                           "weights valid for every spec — prefer --reuse-from for the "
                           "multi-experiment case.")
+    sel.add_argument("--skip-existing", action="store_true", dest="skip_existing",
+                     help="Skip runs that already completed.  Checks W&B first "
+                          "(requires --wandb-project), then falls back to a local "
+                          "check for saved final models.  Safe to use when "
+                          "relaunching a killed grid search.")
     sel.add_argument("--reuse-from",  default="", metavar="DIR",
                      help="Root results dir to scan for pre-existing {name}/models/ weights "
                           "per spec (opt-in, disabled by default).  Each spec looks up its "
@@ -315,6 +320,53 @@ def _ensure_pretrain(
 
 
 # ---------------------------------------------------------------------------
+# Skip-existing helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_finished_wandb_runs(
+    wandb_project: Optional[str],
+    wandb_entity:  Optional[str],
+) -> set:
+    """Return the set of run *names* that are in state 'finished' on W&B.
+
+    Returns an empty set (and logs a warning) if W&B is unavailable or the
+    project cannot be reached.
+    """
+    if not wandb_project:
+        return set()
+    try:
+        import wandb as _wandb
+        api  = _wandb.Api()
+        path = f"{wandb_entity}/{wandb_project}" if wandb_entity else wandb_project
+        runs = api.runs(path, filters={"state": "finished"})
+        names = {r.name for r in runs}
+        logger.info("  W&B: found %d finished runs in %s", len(names), path)
+        return names
+    except Exception as exc:
+        logger.warning("  Could not query W&B for finished runs (%s) — "
+                       "falling back to local check only.", exc)
+        return set()
+
+
+def _is_run_complete(
+    run_name:            str,
+    output_root:         str,
+    finished_wandb_names: set,
+) -> bool:
+    """Return True if this run already completed successfully.
+
+    Priority:
+    1. W&B state == 'finished'  (authoritative when W&B is available)
+    2. Local: forward_model.pth exists in the run's models/ dir
+       (saved only at the very end of trainer.train — reliable completion marker)
+    """
+    if run_name in finished_wandb_names:
+        return True
+    local_marker = os.path.join(output_root, run_name, "models", "forward_model.pth")
+    return os.path.exists(local_marker)
+
+
+# ---------------------------------------------------------------------------
 # Local grid search (no wandb agent)
 # ---------------------------------------------------------------------------
 
@@ -397,11 +449,19 @@ def run_grid_search(
     pretrain_dir:   Optional[str],
     wandb_project:  Optional[str],
     wandb_entity:   Optional[str],
-    reuse_from:     str = "results",
+    reuse_from:     str = "",
     seeds:          List[int] = (0,),
+    skip_existing:  bool = False,
 ) -> None:
-    failed = []
+    failed  = []
+    skipped = []
     multi_seed = len(seeds) > 1
+
+    # Fetch finished run names from W&B once upfront (single API call)
+    finished_wandb = (
+        _fetch_finished_wandb_runs(wandb_project, wandb_entity)
+        if skip_existing else set()
+    )
 
     for spec in specs:
         n_total = len(combos) * len(seeds)
@@ -421,6 +481,12 @@ def run_grid_search(
             for seed in seeds:
                 run_idx += 1
                 run_name = _seed_run_name(base_name, seed, multi_seed)
+
+                if skip_existing and _is_run_complete(run_name, output_root, finished_wandb):
+                    logger.info("  [%d/%d] SKIP (already finished): %s", run_idx, n_total, run_name)
+                    skipped.append(run_name)
+                    continue
+
                 logger.info("  [%d/%d] %s  (seed=%d)", run_idx, n_total, run_name, seed)
 
                 gs_spec = _apply_combo(spec, combo)
@@ -656,6 +722,7 @@ def main() -> None:
             wandb_entity  = args.wandb_entity,
             reuse_from    = args.reuse_from,
             seeds         = args.seeds,
+            skip_existing = args.skip_existing,
         )
 
 

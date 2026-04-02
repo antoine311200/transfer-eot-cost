@@ -233,18 +233,19 @@ class _LoggingMixin:
         else:
             map_err_bwd = ""
 
-        # Gushchin BW₂: joint Bures-Wasserstein distance between learned coupling
-        # and the reference (initial) coupling — measures transport plan quality.
-        # Skipped for images (too expensive on pixel vectors).
+        # Gushchin BW₂: joint Bures-Wasserstein distance between the learned
+        # coupling and the ground-truth coupling π*(μ', ν') = {(x, T(x)) : x~μ'}.
+        # Requires a known transport map; skipped for images or when unavailable.
         bw2_val: "str | float" = ""
-        if not is_image_tensor(x):
+        if not is_image_tensor(x) and self._transport_map is not None:
             n_bw = min(n, 2_000)
             with torch.no_grad():
-                x_bw, y_bw     = trainer.current_coupling.coupling_sample(n_bw)
-                x_ref, y_ref_b = trainer.initial_coupling.coupling_sample(n_bw)
+                x_bw, y_bw = trainer.current_coupling.coupling_sample(n_bw)
+                x_gt = trainer.new_source.sample(n_bw).to(device)
+                y_gt = self._transport_map((x_gt * s).cpu()).to(x_gt.device) / s
             bw2_val = _joint_bw2(
-                (x_bw   * s).float().cpu(), (y_bw   * s).float().cpu(),
-                (x_ref  * s).float().cpu(), (y_ref_b * s).float().cpu(),
+                (x_bw * s).float().cpu(), (y_bw * s).float().cpu(),
+                (x_gt * s).float().cpu(), (y_gt * s).float().cpu(),
             )
 
         # Image-specific metrics (FID / KID) — provided by subclass hook
