@@ -318,7 +318,7 @@ def main() -> None:
     # ── Single experiment ────────────────────────────────────────────────────
     for spec in matching:
         _apply_train_overrides(spec, args)
-        spec.method_cfg = _build_method_cfg(args.method, args)
+        # spec.method_cfg = _build_method_cfg(args.method, args)
         run_experiment(
             spec,
             retrain          = not args.load_pretrained,

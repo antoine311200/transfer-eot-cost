@@ -50,12 +50,14 @@ class ModelConfig:
     mu_learning_rate: float = 1e-3
     nu_learning_rate: float = 1e-3
     flow_learning_rate: float = 5e-3
+    dual_l2_reg: float = 0.0  # L2 regularization strength for dual networks (default: no regularization)
 
 
 @dataclass
 class FeedForwardConfig(ModelConfig):
     dimension: int = 2
     hidden_size: int = 64
+    num_layers: int = 2  # Number of hidden layers in the MLP (bridges, duals, flow models)
     # For image models
     image_shape: Optional[Tuple[int, int, int]] = None  # (C, H, W)
     num_res_blocks: int = 1  # UNet residual blocks per resolution level

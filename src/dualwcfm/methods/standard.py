@@ -125,8 +125,8 @@ class StandardMethod(Method):
                 logger.info(f"Marginal flow matching phase {i + 1}/{trainer.config.num_rectified_flow + 1}")
 
                 n_epochs = trainer.config.marginal_epochs if i == 0 else trainer.config.marginal_epochs // 10
-                mu_scheduler = lr_scheduler.CosineAnnealingLR(mu_optimizer, T_max=n_epochs, eta_min=1e-6)
-                nu_scheduler = lr_scheduler.CosineAnnealingLR(nu_optimizer, T_max=n_epochs, eta_min=1e-6)
+                mu_scheduler = lr_scheduler.CosineAnnealingLR(mu_optimizer, T_max=n_epochs, eta_min=1e-5)
+                nu_scheduler = lr_scheduler.CosineAnnealingLR(nu_optimizer, T_max=n_epochs, eta_min=1e-5)
 
                 pbar = trange(n_epochs, desc="Marginal Flow Matching")
                 for epoch in pbar:
@@ -143,8 +143,8 @@ class StandardMethod(Method):
                         y0 = trainer.initial_coupling.sample_target(batch_size).to(device)
                         previous_mu_model.eval()
                         previous_nu_model.eval()
-                        x1 = trainer.flow_matching.evolve(x0, previous_mu_model, num_steps=50, extend=False)
-                        y1 = trainer.flow_matching.evolve(y0, previous_nu_model, num_steps=50, extend=False)
+                        x1 = trainer.flow_matching.evolve(x0, previous_mu_model, num_steps=trainer.config.advance_steps, extend=False)
+                        y1 = trainer.flow_matching.evolve(y0, previous_nu_model, num_steps=trainer.config.advance_steps, extend=False)
                         previous_mu_model.train()
                         previous_nu_model.train()
 
@@ -226,7 +226,13 @@ class StandardMethod(Method):
         loss_fn = nn.MSELoss()
         model.train()
 
-        pbar = trange(trainer.config.pretrain_epochs, desc="Pretraining")
+        n_epochs = trainer.config.pretrain_epochs
+        # Decay to lr_min_factor of the base LR — matches the floor used in tuning iterations.
+        base_lr = trainer.strategy.config.flow_learning_rate
+        eta_min = base_lr * self.config.lr_min_factor
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=n_epochs, eta_min=eta_min)
+
+        pbar = trange(n_epochs, desc="Pretraining")
         for epoch in pbar:
             x0, x1 = trainer.initial_coupling.coupling_sample(batch_size)
             x0, x1 = x0.to(device), x1.to(device)
@@ -238,12 +244,13 @@ class StandardMethod(Method):
 
             optimizer.zero_grad()
             u_s = model(s, x_s, x0)
-            u_s_true = trainer.flow_matching.vector_field(x_s, s, x0, x1, noisy=self.config.use_noisy_field)
+            u_s_true = trainer.flow_matching.vector_field(x_s, s, x0, x1, noisy=True)#self.config.use_noisy_field)
             loss = loss_fn(u_s, u_s_true)
             loss.backward()
             optimizer.step()
+            scheduler.step()
 
-            pbar.set_postfix({"Pretrain Loss": loss.item()})
+            pbar.set_postfix({"Pretrain Loss": loss.item(), "lr": scheduler.get_last_lr()[0]})
             trainer.visualizer.during_pretrain(
                 epoch,
                 trainer,
@@ -319,6 +326,7 @@ class StandardMethod(Method):
 
         use_ema_gauge = batch_size < 512
         ema_a_mean = torch.tensor(0.0, device=device)
+        ema_b_mean = torch.tensor(0.0, device=device)
         gauge_mom = self.config.gauge_ema_momentum
 
         warmup = self.config.dual_warmup_epochs if iteration == 0 else 0
@@ -345,11 +353,15 @@ class StandardMethod(Method):
             # With small batches the batch mean is too noisy; use an EMA instead.
             if use_ema_gauge:
                 ema_a_mean = gauge_mom * ema_a_mean + (1 - gauge_mom) * a.detach().mean()
+                ema_b_mean = gauge_mom * ema_b_mean + (1 - gauge_mom) * b.detach().mean()
                 a_mean = ema_a_mean
+                b_mean = ema_b_mean
             else:
-                a_mean = a.mean()
-            a = a - a_mean
-            a_mu = a_mu - a_mean
+                a_mean = a.detach().mean()
+                b_mean = b.detach().mean()
+
+            a, a_mu = a - a_mean, a_mu - a_mean
+            b, b_nu = b - b_mean, b_nu - b_mean
 
             # Coupling term (with optional change_of_measure)
             # com = trainer.strategy.change_of_measure
@@ -368,38 +380,77 @@ class StandardMethod(Method):
             if is_image:
                 a_term = torch.mean((grad_a * u_t).sum(dim=[1, 2, 3]))
                 b_term = torch.mean((grad_b * v_t).sum(dim=[1, 2, 3]))
-                gp_f = ((grad_a.view(batch_size, -1).norm(2, dim=1) - 1) ** 2).mean()
-                gp_g = ((grad_b.view(batch_size, -1).norm(2, dim=1) - 1) ** 2).mean()
+                # gp_f = ((grad_a.view(batch_size, -1).norm(2, dim=1) - 1) ** 2).mean()
+                # gp_g = ((grad_b.view(batch_size, -1).norm(2, dim=1) - 1) ** 2).mean()
             else:
                 a_term = torch.mean(torch.sum(grad_a * u_t, dim=1))
                 b_term = torch.mean(torch.sum(grad_b * v_t, dim=1))
-                gp_f = ((grad_a.norm(2, dim=1) - 1) ** 2).mean()
-                gp_g = ((grad_b.norm(2, dim=1) - 1) ** 2).mean()
+                # gp_f = ((grad_a.norm(2, dim=1) - 1) ** 2).mean()
+                # gp_g = ((grad_b.norm(2, dim=1) - 1) ** 2).mean()
 
             # Regularization terms
+            # penalty = torch.tensor(0.0, device=device)
+            # if self.config.l2_reg > 0 or self.config.lip_reg > 0 or self.config.mean_reg > 0:
+            #     mean_a = torch.mean(a)
+            #     mean_b = torch.mean(b)
+            #     mean_a_sq = torch.mean(a**2)
+            #     mean_b_sq = torch.mean(b**2)
+            #     mean_a_mu_sq = torch.mean(a_mu**2)
+            #     mean_b_nu_sq = torch.mean(b_nu**2)
+            #     var_a = mean_a_sq - mean_a**2
+            #     var_b = mean_b_sq - mean_b**2
+
+            #     l2_reg = self.config.l2_reg * (mean_a_sq + mean_b_sq + mean_a_mu_sq + mean_b_nu_sq)
+            #     lip_reg = self.config.lip_reg * (gp_f + gp_g)
+            #     drift_penalty = self.config.mean_reg * (mean_a**2 + mean_b**2)
+            #     var_penalty = self.config.mean_reg * (var_a + var_b)
+
+            #     penalty = l2_reg + lip_reg + drift_penalty + var_penalty
             penalty = torch.tensor(0.0, device=device)
-            if self.config.l2_reg > 0 or self.config.lip_reg > 0 or self.config.mean_reg > 0:
-                mean_a = torch.mean(a)
-                mean_b = torch.mean(b)
-                mean_a_sq = torch.mean(a**2)
-                mean_b_sq = torch.mean(b**2)
-                mean_a_mu_sq = torch.mean(a_mu**2)
-                mean_b_nu_sq = torch.mean(b_nu**2)
-                var_a = mean_a_sq - mean_a**2
-                var_b = mean_b_sq - mean_b**2
+            if self.config.l2_reg > 0 or self.config.lip_reg > 0:
+                l2_val = (a**2).mean() + (b**2).mean() + (a_mu**2).mean() + (b_nu**2).mean()
 
-                l2_reg = self.config.l2_reg * (mean_a_sq + mean_b_sq + mean_a_mu_sq + mean_b_nu_sq)
-                lip_reg = self.config.lip_reg * (gp_f + gp_g)
-                drift_penalty = self.config.mean_reg * (mean_a**2 + mean_b**2)
-                var_penalty = self.config.mean_reg * (var_a + var_b)
+                # grad_energy = (grad_a.pow(2).sum(dim=1).mean() + grad_b.pow(2).sum(dim=1).mean())
+                # Create interpolated samples to "fill the gaps" between modes
+                # alpha = torch.rand(batch_size, 1, 1, 1, device=device) # Adjust dims for images
+                # x_interp = (alpha * x + (1 - alpha) * x_mu).requires_grad_(True)
+                # a_interp = f_dual(x_interp)
 
-                penalty = l2_reg + lip_reg + drift_penalty + var_penalty
+                # grad_interp = torch.autograd.grad(a_interp.sum(), x_interp, create_graph=True)[0]
+                # grad_energy = (grad_interp.norm(2, dim=1)**2).mean()
+                # This forces the "bridge" to be smooth even between the modes.
+
+                alpha = torch.rand(batch_size, 1, device=device)
+                if is_image:
+                    alpha = alpha.view(-1, 1, 1, 1)
+
+                # We detach the base points to ensure we only backprop through f_dual
+                x_hat = (alpha * x.detach() + (1 - alpha) * x_mu.detach()).requires_grad_(True)
+                y_hat = (alpha * y.detach() + (1 - alpha) * y_nu.detach()).requires_grad_(True)
+
+                # 2. Forward pass at interpolated points
+                a_hat = f_dual(x_hat)
+                b_hat = g_dual(y_hat)
+
+                # 3. The "Stable" Gradient Calculation
+                # Note: Use a_hat.sum() for the graph, and create_graph=True for the penalty
+                grad_a_hat = torch.autograd.grad(a_hat.sum(), x_hat, create_graph=True, only_inputs=True)[0]
+                grad_b_hat = torch.autograd.grad(b_hat.sum(), y_hat, create_graph=True, only_inputs=True)[0]
+
+                # 4. Final Penalty (Squared Norm centered at 0)
+                gp_f = grad_a_hat.view(batch_size, -1).pow(2).sum(dim=1).mean()
+                gp_g = grad_b_hat.view(batch_size, -1).pow(2).sum(dim=1).mean()
+
+                grad_energy = gp_f + gp_g
+
+                penalty = (self.config.l2_reg * l2_val) + (self.config.lip_reg * grad_energy)
 
             loss = coupling_term - 2 * a_term - 2 * b_term
             loss += penalty
 
             dual_optimizer.zero_grad()
             loss.backward()
+            nn.utils.clip_grad_norm_(list(f_dual.parameters()) + list(g_dual.parameters()), max_norm=1.0)
             dual_optimizer.step()
 
             pbar.set_postfix({"Dual Loss": loss.item()})
@@ -621,18 +672,15 @@ class StandardMethod(Method):
     ):
         """Evolve one chunk through the flow model. Returns (x_next, y_next)."""
         num_steps = trainer.config.advance_steps
-        # sigma2 = trainer._sigma2
         dim = trainer.strategy.config.dimension
 
         if not backward:
             x_flow = x_mu_next.clone()
             _evolved = trainer.flow_matching.evolve(x_flow, flow_fwd, num_steps=num_steps, extend=True)
             y_flow = _evolved[:, : x_flow.shape[1], :, :] if is_image_tensor(x_flow) else _evolved[:, :dim]
-            # y_flow = y_flow + sigma2 * torch.randn_like(y_flow)
             return x_flow, y_flow
         else:
             y_flow = y_nu_next.clone()
             _evolved = trainer.flow_matching.evolve(y_flow, flow_bwd, num_steps=num_steps, extend=True)
             x_flow = _evolved[:, : y_flow.shape[1], :, :] if is_image_tensor(y_flow) else _evolved[:, :dim]
-            # x_flow = x_flow + sigma2 * torch.randn_like(x_flow)
             return x_flow, y_flow

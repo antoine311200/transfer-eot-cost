@@ -102,10 +102,12 @@ class Visualizer:
                     (start * s).cpu(), (end * s).cpu(), (target * s).cpu(),
                     trajectories=traj_2d, trajectory_stride=stride,
                 )
-                plt.suptitle(f"{label} Marginal Flow — Epoch {epoch} Phase {phase_idx}")
+                phase_tag = "Rectified " if phase_idx > 0 else ""
+                plt.suptitle(f"{label} {phase_tag}Marginal Flow — Epoch {epoch} Phase {phase_idx}")
+                rectified_suffix = "_rectified" if phase_idx > 0 else ""
                 self.save_fig(
                     plt.gcf(), "pretrain",
-                    f"{label.lower()}_bridge_{epoch:05d}_p{phase_idx}.png",
+                    f"{label.lower()}_bridge{rectified_suffix}_{epoch:05d}_p{phase_idx}.png",
                 )
 
         elif phase == "flow":
@@ -149,7 +151,7 @@ class Visualizer:
             model.eval()
             with torch.no_grad():
                 end = trainer.flow_matching.evolve(
-                    start, model, num_steps=50, sigma=trainer._sigma, extend=False
+                    start, model, num_steps=trainer.config.advance_steps, extend=False
                 )
             target = getattr(trainer, tgt_attr).sample(samples).to(trainer.device)
             self._display_evolution(
@@ -429,7 +431,7 @@ class Visualizer:
         target_2d = _project(target_points) if target_points is not None else None
         if target_2d is not None:
             ax.scatter(target_2d[:, 0], target_2d[:, 1], c="orange", s=20, alpha=0.5, zorder=4, label="Target", edgecolors='k')
-        ax.scatter(mid_points_2d[:n_traj, 0], mid_points_2d[:n_traj, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
+        # ax.scatter(mid_points_2d[:n_traj, 0], mid_points_2d[:n_traj, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
         ax.scatter(start_2d[:n_traj, 0], start_2d[:n_traj, 1], c="red", s=20, alpha=0.5, zorder=4, label="Start", edgecolors='k')
         ax.scatter(end_2d[:n_traj, 0], end_2d[:n_traj, 1], c="green", s=20, alpha=0.5, zorder=4, label="End", edgecolors='k')
         # ax.xaxis.set_major_locator(MultipleLocator(0.25))
@@ -512,8 +514,8 @@ class Visualizer3D(Visualizer):
                    c=C_SRC, s=14, alpha=0.75, label=r"Source $\mu$", zorder=6, **kw_s)
         ax.scatter(end_points[:n_traj, 0], end_points[:n_traj, 1], end_points[:n_traj, 2],
                    c=C_END, s=14, alpha=0.75, label="Transported", zorder=6, **kw_s)
-        ax.scatter(mid_points[:, 0], mid_points[:, 1], mid_points[:, 2],
-                   c=C_MID, s=8, alpha=0.55, label="Mid-point", zorder=5, **kw_s)
+        # ax.scatter(mid_points[:, 0], mid_points[:, 1], mid_points[:, 2],
+        #            c=C_MID, s=8, alpha=0.55, label="Mid-point", zorder=5, **kw_s)
 
         ax.set_xlim([L_lo, L_hi]); ax.set_ylim([L_lo, L_hi]); ax.set_zlim([L_lo, L_hi])
         ax.set_xlabel(r"$x_1$", labelpad=3, fontsize=9)
@@ -758,7 +760,7 @@ def plot_2d_flow_trajectories(
     ax.scatter(start_points[:, 0], start_points[:, 1], c="red", s=5, alpha=0.5, zorder=4, label="Start")
     ax.scatter(end_points[:, 0], end_points[:, 1], c="green", s=5, alpha=0.5, zorder=4, label="End")
     mid_points = trajectories_np[trajectories_np.shape[0] // 2, :, :2]
-    ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=5, alpha=0.5, zorder=4, label="Mid")
+    # ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=5, alpha=0.5, zorder=4, label="Mid")
     ax.grid(True, alpha=0.2)
     ax.set_title(title)
     lc = LineCollection(segments, colors="gray", alpha=0.5, linewidths=0.8, zorder=1)

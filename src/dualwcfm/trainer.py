@@ -39,6 +39,13 @@ class Trainer:
         self.device = device
         self.method = method
 
+        # Log the configurations for reproducibility
+        logger.info("Training configuration:")
+        for key, value in vars(config).items():
+            logger.info(f"  {key}: {value}")
+        for key, value in vars(method.config).items():
+            logger.info(f"  method.{key}: {value}")
+
         # Compute normalization scale: max absolute value across a probe batch
         # of all four marginals so every sample lies in [-1, 1] after scaling.
         if self.config.scale_factor > 0:
