@@ -44,15 +44,15 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
         device                   = device,
         dataset_size             = 1_000_000,
         marginal_epochs          = 10_000,
-        pretrain_epochs          = 10_000,
+        pretrain_epochs          = 5_000,
         dual_epochs              = 100,
         cfm_epochs               = 500,
         advance_steps            = 100,
         iterations               = 50,
-        num_rectified_flow       = 1,
-        scale_factor             = 100.0,
+        num_rectified_flow       = 2,
+        scale_factor             = 50,
         batch_size               = 2_048 * 4,
-        coupling_chunk_size      = 1_000,
+        coupling_chunk_size      = 100_000,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
     )
@@ -60,18 +60,30 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma          = 0.01,
-        sigma2         = 0.01,
+        sigma          = 0.05, # t time
+        sigma2         = 0.1, # s time
         loss           = "weighted",
-        l2_reg         = 0,
-        lip_reg        = 0,
+        l2_reg         = 1e-2,
+        lip_reg        = 1.0,
         mean_reg       = 0,
-        use_noisy_field= False,
+        use_noisy_field= True,
         particle_ratio = 0.1,
         lr_cosine_decay = False,
         lr_min_factor   = 0.5,
+        dual_warmup_epochs = 0,
     )
 
+def _default_model_cfg(dimension: int = 2, hidden_size: int = 32, num_layers: int = 2) -> FeedForwardConfig:
+    return FeedForwardConfig(
+        dimension=dimension,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        flow_learning_rate=1e-3,
+        nu_learning_rate=1e-3,
+        mu_learning_rate=1e-3,
+        dual_learning_rate=1e-3,
+        dual_l2_reg=0,#1e-3,
+    )
 
 # ---------------------------------------------------------------------------
 # simple – anticorrelation map
@@ -117,8 +129,8 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=2, hidden_size=32)
-    vis_cfg    = VisualizeConfig(show_each=10, n_trajectories=500, trajectory_stride=2)
+    model_cfg  = _default_model_cfg()
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"2d_simple{'_perturbed' if perturbed else ''}",
@@ -180,8 +192,8 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg              = _default_train_cfg(device)
     train_cfg.iterations   = 100
     method_cfg             = _default_method_cfg()
-    model_cfg              = FeedForwardConfig(dimension=2, hidden_size=32)
-    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=2_000, trajectory_stride=2)
+    model_cfg              = _default_model_cfg()
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"2d_medium{'_perturbed' if perturbed else ''}",
@@ -213,7 +225,7 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     """
     device = get_device()
     r0     = 1.5
-    r1     = 4.5
+    r1     = 10.0
 
     ref_centers = [[0, 0], [r0, 0], [-r0, 0], [0, r0], [0, -r0]]
     coupling = RotatedShapeCoupling(
@@ -221,9 +233,9 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
         rotation_degrees=45.0, device=device,
     )
     new_centers = [[0, 0], [r1, 0], [-r1, 0], [0, r1], [0, -r1]]
-    new_src = GMMShapeDistribution(new_centers, scale=0.4, device=device)
+    new_src = GMMShapeDistribution(new_centers, scale=0.15, device=device)
     new_tgt = GMMShapeDistribution(
-        new_centers, scale=0.4,
+        new_centers, scale=0.15,
         rotation_degrees=45.0 + (10.0 if perturbed else 0.0),
         device=device,
     )
@@ -240,12 +252,12 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
         return y @ _R_cpx.to(y.device, y.dtype)
 
     train_cfg                = _default_train_cfg(device)
-    train_cfg.iterations     = 150
-    train_cfg.dual_epochs    = 200
-    train_cfg.cfm_epochs     = 300
+    # train_cfg.iterations     = 150
+    # train_cfg.dual_epochs    = 200
+    # train_cfg.cfm_epochs     = 300
     method_cfg               = _default_method_cfg()
-    model_cfg                = FeedForwardConfig(dimension=2, hidden_size=32)
-    vis_cfg                  = VisualizeConfig(show_each=1, n_trajectories=400, trajectory_stride=2)
+    model_cfg                = _default_model_cfg(hidden_size=128)
+    vis_cfg                  = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"2d_complex{'_perturbed' if perturbed else ''}",

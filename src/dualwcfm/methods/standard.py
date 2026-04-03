@@ -125,8 +125,11 @@ class StandardMethod(Method):
                 logger.info(f"Marginal flow matching phase {i + 1}/{trainer.config.num_rectified_flow + 1}")
 
                 n_epochs = trainer.config.marginal_epochs if i == 0 else trainer.config.marginal_epochs // 10
-                mu_scheduler = lr_scheduler.CosineAnnealingLR(mu_optimizer, T_max=n_epochs, eta_min=1e-5)
-                nu_scheduler = lr_scheduler.CosineAnnealingLR(nu_optimizer, T_max=n_epochs, eta_min=1e-5)
+                # Keep a constant eta_min floor across rectified-flow phases so subsequent
+                # phases still have enough LR to correct residual bridge errors.
+                eta_min = 1e-4
+                mu_scheduler = lr_scheduler.CosineAnnealingLR(mu_optimizer, T_max=n_epochs, eta_min=eta_min)
+                nu_scheduler = lr_scheduler.CosineAnnealingLR(nu_optimizer, T_max=n_epochs, eta_min=eta_min)
 
                 pbar = trange(n_epochs, desc="Marginal Flow Matching")
                 for epoch in pbar:
@@ -143,10 +146,9 @@ class StandardMethod(Method):
                         y0 = trainer.initial_coupling.sample_target(batch_size).to(device)
                         previous_mu_model.eval()
                         previous_nu_model.eval()
-                        x1 = trainer.flow_matching.evolve(x0, previous_mu_model, num_steps=trainer.config.advance_steps, extend=False)
-                        y1 = trainer.flow_matching.evolve(y0, previous_nu_model, num_steps=trainer.config.advance_steps, extend=False)
-                        previous_mu_model.train()
-                        previous_nu_model.train()
+                        with torch.no_grad():
+                            x1 = trainer.flow_matching.evolve(x0, previous_mu_model, num_steps=trainer.config.advance_steps, extend=False)
+                            y1 = trainer.flow_matching.evolve(y0, previous_nu_model, num_steps=trainer.config.advance_steps, extend=False)
 
                     x0, x1, y0, y1 = (
                         x0.to(device),
@@ -165,18 +167,20 @@ class StandardMethod(Method):
 
                     ut = mu_model(t, xt)
                     ut_true = trainer.flow_matching.vector_field(
-                        xt, t, x0, x1, extend=False, noisy=self.use_noisy_field
+                        xt, t, x0, x1, extend=False, noisy=sigma > 0
                     )
                     loss_mu = loss_fn(ut, ut_true)
                     loss_mu.backward()
+                    nn.utils.clip_grad_norm_(mu_model.parameters(), max_norm=1.0)
                     mu_optimizer.step()
 
                     vt = nu_model(t, yt)
                     vt_true = trainer.flow_matching.vector_field(
-                        yt, t, y0, y1, extend=False, noisy=self.use_noisy_field
+                        yt, t, y0, y1, extend=False, noisy=sigma > 0
                     )
                     loss_nu = loss_fn(vt, vt_true)
                     loss_nu.backward()
+                    nn.utils.clip_grad_norm_(nu_model.parameters(), max_norm=1.0)
                     nu_optimizer.step()
 
                     mu_scheduler.step()

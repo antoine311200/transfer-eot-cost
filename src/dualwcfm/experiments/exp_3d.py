@@ -138,9 +138,10 @@ class GMM3DCoupling(CouplingDistribution):
         self.K      = self.src.shape[0]
 
     def coupling_sample(self, n: int):
-        idx  = torch.randint(self.K, (n,), device=self._dev)
-        x    = self.src[idx] + torch.randn(n, 3, device=self._dev) * self.scale
-        y    = self.tgt[idx] + torch.randn(n, 3, device=self._dev) * self.scale
+        idx   = torch.randint(self.K, (n,), device=self._dev)
+        noise = torch.randn(n, 3, device=self._dev) * self.scale
+        x     = self.src[idx] + noise
+        y     = self.tgt[idx] + noise   # same noise → velocity y-x = tgt[k]-src[k] exactly
         return x, y
 
     def sample_init(self, n: int) -> torch.Tensor:
@@ -190,14 +191,15 @@ class GMM3DDistribution(Distribution):
 def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 200_000,
-        marginal_epochs          = 10_000,
-        pretrain_epochs          = 20_000,
-        dual_epochs              = 500,
-        cfm_epochs               = 1000,
+        dataset_size             = 500_000,
+        marginal_epochs          = 20_000,
+        pretrain_epochs          = 5_000,
+        dual_epochs              = 100,
+        cfm_epochs               = 500,
         advance_steps            = 100,
         iterations               = 50,
-        scale_factor             = 100.0,
+        num_rectified_flow       = 1,
+        scale_factor             = 10,
         batch_size               = 2_048 * 8,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
@@ -206,15 +208,29 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma           = 0.05,
-        sigma2          = 0.05,
+        sigma           = 0.1,
+        sigma2          = 0.1,
         loss            = "weighted",
-        l2_reg          = 0,
-        lip_reg         = 0,
+        l2_reg          = 1e-1,
+        lip_reg         = 10,
         mean_reg        = 0,
-        use_noisy_field = False,
-        particle_ratio  = 0.25,
-        lr_min_factor   = 0.1,
+        use_noisy_field    = False,
+        particle_ratio     = 0.25,
+        lr_cosine_decay    = False,
+        lr_min_factor      = 0.1,
+        dual_warmup_epochs = 0,
+    )
+
+def default_model_cfg(dimension: int = 3, hidden_size: int = 64, num_layers: int = 3) -> FeedForwardConfig:
+    return FeedForwardConfig(
+        dimension=dimension,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        flow_learning_rate=1e-3,
+        nu_learning_rate=1e-3,
+        mu_learning_rate=1e-3,
+        dual_learning_rate=1e-3,
+        dual_l2_reg=1e-3,
     )
 
 
@@ -247,8 +263,8 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=128, num_layers=3)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"3d_simple{'_perturbed' if perturbed else ''}",
@@ -301,8 +317,8 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=64, num_layers=3)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"3d_medium{'_perturbed' if perturbed else ''}",
@@ -358,8 +374,8 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg              = _default_train_cfg(device)
     train_cfg.iterations   = 200
     method_cfg             = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
-    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=64, num_layers=3)
+    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"3d_complex{'_perturbed' if perturbed else ''}",

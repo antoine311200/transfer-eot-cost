@@ -385,7 +385,7 @@ def _swiss_roll(output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128, num_layers=3, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
         show_each_marginal=1000, show_each_pretrain=1000,
@@ -443,11 +443,11 @@ def _helices(output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, num_layers=3, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
         show_each_marginal=1000, show_each_pretrain=1000,
-        camera_elev=18, camera_azim=30,   # side view to appreciate helical structure
+        camera_elev=18, camera_azim=30,   # side view to appreciate helical structure (linear T, 64 sufficient)
     )
 
     return ExperimentSpec(
@@ -498,7 +498,7 @@ def _sphere_twist_exp(output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=256, num_layers=3, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
         show_each_marginal=1000, show_each_pretrain=1000,
@@ -562,7 +562,7 @@ def _rings_to_helix(output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128, num_layers=3, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
         show_each_marginal=1000, show_each_pretrain=1000,
