@@ -94,10 +94,12 @@ def _make_transport_maps(rot_z_deg: float, perturbed: bool):
         M   = Rz
 
     def transport_map(x: torch.Tensor) -> torch.Tensor:
-        return x @ M.T
+        M_local = M.to(x.device)
+        return x @ M_local.T
 
     def inverse_transport_map(y: torch.Tensor) -> torch.Tensor:
-        return y @ M        # M.T is the inverse; (M.T).T = M
+        M_local = M.to(y.device)
+        return y @ M_local        # M.T is the inverse; (M.T).T = M
 
     return transport_map, inverse_transport_map
 
@@ -189,14 +191,14 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
         dataset_size             = 200_000,
-        marginal_epochs          = 5_000,
-        pretrain_epochs          = 10_000,
-        dual_epochs              = 200,
-        cfm_epochs               = 300,
+        marginal_epochs          = 10_000,
+        pretrain_epochs          = 20_000,
+        dual_epochs              = 500,
+        cfm_epochs               = 1000,
         advance_steps            = 100,
-        iterations               = 200,
+        iterations               = 50,
         scale_factor             = 100.0,
-        batch_size               = 2_048,
+        batch_size               = 2_048 * 8,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
     )
@@ -212,6 +214,7 @@ def _default_method_cfg() -> MixtureConfig:
         mean_reg        = 0,
         use_noisy_field = False,
         particle_ratio  = 0.25,
+        lr_min_factor   = 0.1,
     )
 
 
@@ -244,7 +247,7 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128)
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
 
     return ExperimentSpec(
@@ -298,7 +301,7 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     train_cfg  = _default_train_cfg(device)
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128)
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
 
     return ExperimentSpec(
@@ -355,7 +358,7 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg              = _default_train_cfg(device)
     train_cfg.iterations   = 200
     method_cfg             = _default_method_cfg()
-    model_cfg              = FeedForwardConfig(dimension=3, hidden_size=256)
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
 
     return ExperimentSpec(

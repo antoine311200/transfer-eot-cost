@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import dataclasses
 import itertools
 import logging
@@ -42,6 +43,7 @@ import os
 import shutil
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 
 from dualwcfm.config import FeedForwardConfig, TrainingConfig, VisualizeConfig
@@ -93,15 +95,33 @@ def _build_parser() -> argparse.ArgumentParser:
     sel = p.add_argument_group("experiment selection")
     sel.add_argument("--mode",   choices=["2d", "3d"], default="2d",
                      help="Experiment catalogue to search.")
-    sel.add_argument("--level",  default=None,
-                     help="Substring filter on experiment name (e.g. 'simple', 'medium').")
+    sel.add_argument("--level", nargs="+", default=None, metavar="SUBSTR",
+                     help="One or more substring filters on experiment name. "
+                          "A spec matches if ANY substring is found in its name. "
+                          "E.g. --level simple medium  runs both levels with the same grid.")
+    sel.add_argument("--perturbed", action="store_true",
+                     help="Run only the perturbed variant(s) of the matched experiments.")
+    sel.add_argument("--both", action="store_true",
+                     help="Run both perturbed and non-perturbed variants. "
+                          "Each gets its own pretrain phase (run once per variant, "
+                          "reused across all combos of that variant).")
     sel.add_argument("--output", default="results_grid",
                      help="Root output directory for grid-search results.")
     sel.add_argument("--pretrain-dir", default=None, metavar="DIR",
-                     help="Path to an existing models/ directory to reuse (skip pretraining).")
-    sel.add_argument("--reuse-from",  default="results", metavar="DIR",
+                     help="Path to a models/ directory to reuse for ALL selected specs "
+                          "(skip pretraining).  When running multiple specs this must contain "
+                          "weights valid for every spec — prefer --reuse-from for the "
+                          "multi-experiment case.")
+    sel.add_argument("--skip-existing", action="store_true", dest="skip_existing",
+                     help="Skip runs that already completed.  Checks W&B first "
+                          "(requires --wandb-project), then falls back to a local "
+                          "check for saved final models.  Safe to use when "
+                          "relaunching a killed grid search.")
+    sel.add_argument("--reuse-from",  default="", metavar="DIR",
                      help="Root results dir to scan for pre-existing {name}/models/ weights "
-                          "(default: results).  Set to '' to always retrain.")
+                          "per spec (opt-in, disabled by default).  Each spec looks up its "
+                          "own subdir independently.  The grid output dir is always checked "
+                          "first regardless of this flag.")
 
     # ── W&B ───────────────────────────────────────────────────────────
     wb = p.add_argument_group("Weights & Biases")
@@ -123,9 +143,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "Comma-separated lists of values.  All combinations are tried (grid search).",
     )
     g.add_argument("--sigma",           type=_floats, default=[0.01, 0.05],
-                   metavar="F[,F…]",    help="EOT regularisation σ. (default: 0.01,0.05)")
+                   metavar="F[,F…]",    help="Bridge noise σ (method_cfg.sigma). (default: 0.01,0.05)")
+    g.add_argument("--sigma2",          type=_floats, default=None,
+                   metavar="F[,F…]",
+                   help="CFM interpolation noise σ₂ (method_cfg.sigma2). "
+                        "If omitted, mirrors --sigma values.")
     g.add_argument("--particle-ratio",  type=_floats, default=[0.1, 0.25],
                    metavar="F[,F…]",    help="New-marginal particle fraction. (default: 0.1,0.25)")
+    g.add_argument("--scale-factor",    type=_floats, default=[1.0],
+                   metavar="F[,F…]",    help="Data scale factor (train_cfg.scale_factor). (default: 1.0)")
+    g.add_argument("--use-noisy-field", type=_bools,  default=[False],
+                   metavar="B[,B…]",    help="Noisy vector field (method_cfg.use_noisy_field). (default: false)")
     g.add_argument("--dual-epochs",     type=_ints,   default=[100],
                    metavar="N[,N…]",    help="Dual potential training epochs/iter. (default: 100)")
     g.add_argument("--cfm-epochs",      type=_ints,   default=[250],
@@ -138,6 +166,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    metavar="B[,B…]",    help="Enable cosine LR decay. (default: false)")
     g.add_argument("--batch-size",      type=_ints,   default=[8192],
                    metavar="N[,N…]",    help="Training batch size. (default: 8192)")
+    g.add_argument("--seeds",           type=_ints,   default=[0],
+                   metavar="N[,N…]",
+                   help="Random seeds.  Multiple seeds run each combo N times and "
+                        "aggregate metrics (mean ± std).  (default: 0)")
 
     return p
 
@@ -147,15 +179,21 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 _GRID_KEYS = [
-    "sigma", "particle_ratio", "dual_epochs", "cfm_epochs",
-    "advance_steps", "iterations", "lr_cosine_decay", "batch_size",
+    "sigma", "sigma2", "particle_ratio", "scale_factor", "use_noisy_field",
+    "dual_epochs", "cfm_epochs", "advance_steps", "iterations",
+    "lr_cosine_decay", "batch_size",
 ]
 
 def _build_grid(args: argparse.Namespace) -> List[Dict[str, Any]]:
     """Return a list of hyperparameter dicts — one per grid point."""
+    # sigma2 mirrors sigma when not specified explicitly
+    sigma2_vals = args.sigma2 if args.sigma2 is not None else args.sigma
     grid = {
         "sigma":           args.sigma,
+        "sigma2":          sigma2_vals,
         "particle_ratio":  args.particle_ratio,
+        "scale_factor":    args.scale_factor,
+        "use_noisy_field": args.use_noisy_field,
         "dual_epochs":     args.dual_epochs,
         "cfm_epochs":      args.cfm_epochs,
         "advance_steps":   args.advance_steps,
@@ -210,10 +248,12 @@ def _apply_combo(spec: ExperimentSpec, combo: Dict[str, Any]) -> ExperimentSpec:
     new_spec.train_cfg.advance_steps  = combo["advance_steps"]
     new_spec.train_cfg.iterations     = combo["iterations"]
     new_spec.train_cfg.batch_size     = combo["batch_size"]
-    new_spec.method_cfg.sigma         = combo["sigma"]
-    new_spec.method_cfg.sigma2        = combo["sigma"]
-    new_spec.method_cfg.particle_ratio= combo["particle_ratio"]
-    new_spec.method_cfg.lr_cosine_decay = combo["lr_cosine_decay"]
+    new_spec.train_cfg.scale_factor   = combo["scale_factor"]
+    new_spec.method_cfg.sigma          = combo["sigma"]
+    new_spec.method_cfg.sigma2         = combo["sigma2"]
+    new_spec.method_cfg.particle_ratio = combo["particle_ratio"]
+    new_spec.method_cfg.lr_cosine_decay= combo["lr_cosine_decay"]
+    new_spec.method_cfg.use_noisy_field= combo["use_noisy_field"]
 
     return new_spec
 
@@ -222,34 +262,50 @@ def _apply_combo(spec: ExperimentSpec, combo: Dict[str, Any]) -> ExperimentSpec:
 # Pretraining helper
 # ---------------------------------------------------------------------------
 
+def _has_pth(directory: str) -> bool:
+    return os.path.isdir(directory) and any(f.endswith(".pth") for f in os.listdir(directory))
+
+
 def _ensure_pretrain(
     spec:          ExperimentSpec,
     pretrain_dir:  Optional[str],
     wandb_project: Optional[str],
     wandb_entity:  Optional[str],
-    reuse_from:    str = "results",
+    reuse_from:    str = "",
 ) -> str:
-    """Run pretraining for *spec* if *pretrain_dir* is not given; return path.
+    """Ensure pretrained weights exist for *spec* and return their directory.
 
     Resolution order
     ----------------
-    1. ``pretrain_dir`` (explicit path from --pretrain-dir)
-    2. ``{reuse_from}/{spec.name}/models/`` — auto-detected existing weights
-    3. Fresh pretrain run (saves into ``spec.output_dir/models/``)
+    1. Grid output dir  ``{spec.output_dir}/models/`` — self-contained reuse.
+       If a previous grid run already trained this spec, reuse those weights.
+    2. ``--pretrain-dir`` — explicit path given by the user (applies to ALL specs
+       when ``--both`` is used; only safe when a single spec is selected).
+    3. ``--reuse-from/{spec.name}/models/`` — opt-in reuse from another results
+       folder (disabled by default; pass ``--reuse-from <dir>`` to enable).
+    4. Fresh pretrain run, saved into ``{spec.output_dir}/models/``.
     """
+    # 1. Self-contained reuse within the grid output folder
+    own_dir = os.path.join(spec.output_dir, "models")
+    if _has_pth(own_dir):
+        logger.info("  Reusing pretrained models from grid output dir: %s", own_dir)
+        return own_dir
+
+    # 2. Explicit --pretrain-dir
     if pretrain_dir is not None:
         if not os.path.isdir(pretrain_dir):
             raise FileNotFoundError(f"--pretrain-dir not found: {pretrain_dir}")
-        logger.info("  Re-using pretrained models from %s", pretrain_dir)
+        logger.info("  Reusing pretrained models from --pretrain-dir: %s", pretrain_dir)
         return pretrain_dir
 
-    # Auto-detect from a previous full-experiment run
+    # 3. --reuse-from (opt-in)
     if reuse_from:
         candidate = os.path.join(reuse_from, spec.name, "models")
-        if os.path.isdir(candidate) and any(f.endswith(".pth") for f in os.listdir(candidate)):
-            logger.info("  Auto-detected pretrained models at %s", candidate)
+        if _has_pth(candidate):
+            logger.info("  Reusing pretrained models from --reuse-from: %s", candidate)
             return candidate
 
+    # 4. Fresh pretrain
     logger.info("  Pretraining base experiment: %s", spec.name)
     run_experiment(
         spec,
@@ -260,12 +316,131 @@ def _ensure_pretrain(
         wandb_run_name= f"{spec.name}__pretrain",
         wandb_group   = f"grid__{spec.name}",
     )
-    return os.path.join(spec.output_dir, "models")
+    return own_dir
+
+
+# ---------------------------------------------------------------------------
+# Skip-existing helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_finished_wandb_runs(
+    wandb_project: Optional[str],
+    wandb_entity:  Optional[str],
+) -> set:
+    """Return the set of run *names* that are in state 'finished' on W&B.
+
+    Returns an empty set (and logs a warning) if W&B is unavailable or the
+    project cannot be reached.
+    """
+    if not wandb_project:
+        return set()
+    try:
+        import wandb as _wandb
+        api  = _wandb.Api()
+        path = f"{wandb_entity}/{wandb_project}" if wandb_entity else wandb_project
+        runs = api.runs(path, filters={"state": "finished"})
+        names = {r.name for r in runs}
+        logger.info("  W&B: found %d finished runs in %s", len(names), path)
+        return names
+    except Exception as exc:
+        logger.warning("  Could not query W&B for finished runs (%s) — "
+                       "falling back to local check only.", exc)
+        return set()
+
+
+def _is_run_complete(
+    run_name:            str,
+    output_root:         str,
+    finished_wandb_names: set,
+) -> bool:
+    """Return True if this run already completed successfully.
+
+    Priority:
+    1. W&B state == 'finished'  (authoritative when W&B is available)
+    2. Local: forward_model.pth exists in the run's models/ dir
+       (saved only at the very end of trainer.train — reliable completion marker)
+    """
+    if run_name in finished_wandb_names:
+        return True
+    local_marker = os.path.join(output_root, run_name, "models", "forward_model.pth")
+    return os.path.exists(local_marker)
 
 
 # ---------------------------------------------------------------------------
 # Local grid search (no wandb agent)
 # ---------------------------------------------------------------------------
+
+def _seed_run_name(base_run_name: str, seed: int, multi_seed: bool) -> str:
+    """Append seed suffix only when running multiple seeds."""
+    return f"{base_run_name}__s{seed}" if multi_seed else base_run_name
+
+
+def _aggregate_seed_metrics(
+    output_root: str,
+    spec_name:   str,
+    combo_base_names: List[str],
+    seeds:       List[int],
+) -> None:
+    """Read final-iteration metrics for all (combo × seed) runs and write a
+    seed_summary.csv with mean ± std per combo into output_root/{spec_name}__summary/.
+    """
+    multi_seed = len(seeds) > 1
+    summary_dir = os.path.join(output_root, f"{spec_name}__summary")
+    os.makedirs(summary_dir, exist_ok=True)
+
+    rows = []
+    for base_name in combo_base_names:
+        seed_rows: List[Dict[str, float]] = []
+        for seed in seeds:
+            run_name = _seed_run_name(base_name, seed, multi_seed)
+            csv_path = os.path.join(output_root, run_name, "metrics.csv")
+            if not os.path.exists(csv_path):
+                logger.warning("  Missing metrics.csv for %s — skipping in aggregation", run_name)
+                continue
+            with open(csv_path, newline="") as f:
+                reader = csv.DictReader(f)
+                all_rows = list(reader)
+            if all_rows:
+                # Use last row = final iteration metrics
+                last = {k: float(v) for k, v in all_rows[-1].items()
+                        if v not in ("", None) and k != "iteration"}
+                seed_rows.append(last)
+
+        if not seed_rows:
+            continue
+
+        # Aggregate across seeds
+        keys = seed_rows[0].keys()
+        agg: Dict[str, Any] = {"combo": base_name, "n_seeds": len(seed_rows)}
+        for k in keys:
+            vals = np.array([r[k] for r in seed_rows if k in r], dtype=float)
+            agg[f"{k}_mean"] = float(vals.mean())
+            agg[f"{k}_std"]  = float(vals.std())
+        rows.append(agg)
+
+    if not rows:
+        return
+
+    out_path = os.path.join(summary_dir, "seed_summary.csv")
+    fieldnames = list(rows[0].keys())
+    with open(out_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    logger.info("  Seed aggregation summary -> %s", out_path)
+
+    # Also print a compact table to stdout
+    metric_cols = [c for c in fieldnames if c.endswith("_mean")]
+    header = f"{'combo':<55}" + "".join(f"  {c[:-5]:>18}" for c in metric_cols)
+    logger.info("\n%s\n%s", header, "-" * len(header))
+    for row in rows:
+        line = f"{row['combo']:<55}"
+        for c in metric_cols:
+            std_key = c[:-4] + "std"
+            line += f"  {row[c]:>8.4f}±{row.get(std_key, 0.0):>6.4f}"
+        logger.info(line)
+
 
 def run_grid_search(
     specs:          List[ExperimentSpec],
@@ -274,44 +449,75 @@ def run_grid_search(
     pretrain_dir:   Optional[str],
     wandb_project:  Optional[str],
     wandb_entity:   Optional[str],
-    reuse_from:     str = "results",
+    reuse_from:     str = "",
+    seeds:          List[int] = (0,),
+    skip_existing:  bool = False,
 ) -> None:
-    failed = []
+    failed  = []
+    skipped = []
+    multi_seed = len(seeds) > 1
+
+    # Fetch finished run names from W&B once upfront (single API call)
+    finished_wandb = (
+        _fetch_finished_wandb_runs(wandb_project, wandb_entity)
+        if skip_existing else set()
+    )
 
     for spec in specs:
-        logger.info("\n%s\nGrid search: %s  (%d combos)\n%s",
-                    "=" * 68, spec.name, len(combos), "=" * 68)
+        n_total = len(combos) * len(seeds)
+        logger.info("\n%s\nGrid search: %s  (%d combos × %d seeds = %d runs)\n%s",
+                    "=" * 68, spec.name, len(combos), len(seeds), n_total, "=" * 68)
 
         # 1. Pretrain once (or reuse)
         pt_dir = _ensure_pretrain(spec, pretrain_dir, wandb_project, wandb_entity, reuse_from)
 
-        # 2. Iterate over combos
-        for i, combo in enumerate(combos, 1):
-            run_name = _run_name(spec.name, combo)
-            logger.info("  [%d/%d] %s", i, len(combos), run_name)
+        # 2. Iterate over combos × seeds
+        combo_base_names = []
+        run_idx = 0
+        for combo in combos:
+            base_name = _run_name(spec.name, combo)
+            combo_base_names.append(base_name)
 
-            gs_spec          = _apply_combo(spec, combo)
-            gs_spec.output_root = output_root
-            # Override name so each combo gets its own subdir
-            gs_spec          = dataclasses.replace(gs_spec, name=run_name,
-                                                    output_root=output_root)
+            for seed in seeds:
+                run_idx += 1
+                run_name = _seed_run_name(base_name, seed, multi_seed)
 
-            try:
-                run_experiment(
-                    gs_spec,
-                    retrain             = False,
-                    save_models         = True,
-                    pretrain_dir        = pt_dir,
-                    wandb_project       = wandb_project,
-                    wandb_entity        = wandb_entity,
-                    wandb_run_name      = run_name,
-                    wandb_group         = f"grid__{spec.name}",
-                    wandb_extra_config  = {"base_experiment": spec.name},
-                    wandb_tags          = [spec.name],
-                )
-            except Exception as exc:
-                logger.error("  FAILED %s: %s", run_name, exc)
-                failed.append(run_name)
+                if skip_existing and _is_run_complete(run_name, output_root, finished_wandb):
+                    logger.info("  [%d/%d] SKIP (already finished): %s", run_idx, n_total, run_name)
+                    skipped.append(run_name)
+                    continue
+
+                logger.info("  [%d/%d] %s  (seed=%d)", run_idx, n_total, run_name, seed)
+
+                gs_spec = _apply_combo(spec, combo)
+                gs_spec = dataclasses.replace(gs_spec, name=run_name, output_root=output_root)
+
+                torch.manual_seed(seed)
+                np.random.seed(seed)
+
+                try:
+                    run_experiment(
+                        gs_spec,
+                        retrain             = False,
+                        save_models         = True,
+                        pretrain_dir        = pt_dir,
+                        wandb_project       = wandb_project,
+                        wandb_entity        = wandb_entity,
+                        wandb_run_name      = run_name,
+                        wandb_group         = f"grid__{spec.name}",
+                        wandb_extra_config  = {"base_experiment": spec.name,
+                                               "seed": seed,
+                                               **combo},
+                        wandb_tags          = [spec.name],
+                    )
+                except Exception as exc:
+                    logger.error("  FAILED %s: %s", run_name, exc)
+                    failed.append(run_name)
+
+        # 3. Aggregate across seeds (if multiple seeds were used)
+        if multi_seed:
+            logger.info("\nAggregating metrics across %d seeds...", len(seeds))
+            _aggregate_seed_metrics(output_root, spec.name, combo_base_names, seeds)
 
     if failed:
         logger.warning("Failed runs:\n  %s", "\n  ".join(failed))
@@ -465,10 +671,26 @@ def main() -> None:
     # ── Select experiments ───────────────────────────────────────────────
     factory = make_2d_experiments if args.mode == "2d" else make_3d_experiments
     all_specs = factory(args.output)
+
+    # Filter by level substrings (any match)
     if args.level:
-        all_specs = [s for s in all_specs if args.level in s.name]
+        all_specs = [s for s in all_specs if any(lvl in s.name for lvl in args.level)]
+
+    # Filter by perturbed/non-perturbed:
+    # --both       → keep all (perturbed + non-perturbed); each gets its own pretrain
+    # --perturbed  → keep only specs whose name contains "perturbed"
+    # (default)    → keep only specs whose name does NOT contain "perturbed"
+    if not args.both:
+        if args.perturbed:
+            all_specs = [s for s in all_specs if "perturbed" in s.name]
+        else:
+            all_specs = [s for s in all_specs if "perturbed" not in s.name]
+
     if not all_specs:
-        raise SystemExit(f"No experiments match --level={args.level!r} for --mode={args.mode}")
+        raise SystemExit(
+            f"No experiments match --level={args.level!r}, --mode={args.mode}, "
+            f"perturbed={args.perturbed}"
+        )
 
     logger.info("Selected experiments: %s", [s.name for s in all_specs])
 
@@ -499,6 +721,8 @@ def main() -> None:
             wandb_project = args.wandb_project,
             wandb_entity  = args.wandb_entity,
             reuse_from    = args.reuse_from,
+            seeds         = args.seeds,
+            skip_existing = args.skip_existing,
         )
 
 

@@ -48,6 +48,7 @@ class StandardConfig(MethodConfig):
     lr_cosine_decay: bool = False
     lr_min_factor: float = 1.0  # 1.0 = no change; 0.5 = half the base flow_lr
     gauge_ema_momentum: float = 0.99  # EMA momentum for gauge fix (used when batch_size < 512)
+    dual_warmup_epochs: int = 0       # Extra dual epochs at iteration 0 to warm-start f and g (0 = disabled)
 
 class StandardMethod(Method):
     """Standard DualWCFM method: interpolation-based marginals, weighted/implicit CFM.
@@ -320,7 +321,9 @@ class StandardMethod(Method):
         ema_a_mean = torch.tensor(0.0, device=device)
         gauge_mom = self.config.gauge_ema_momentum
 
-        pbar = trange(trainer.config.dual_epochs, desc="Dual Training")
+        warmup = self.config.dual_warmup_epochs if iteration == 0 else 0
+        n_dual_epochs = trainer.config.dual_epochs + warmup
+        pbar = trange(n_dual_epochs, desc="Dual Training" + (" (warmup)" if warmup else ""))
         for _ in pbar:
             x, y = trainer.current_coupling.coupling_sample(batch_size)
             x, y = x.to(device), y.to(device)

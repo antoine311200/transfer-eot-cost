@@ -256,14 +256,14 @@ def _default_train_cfg_mnist(device: torch.device) -> TrainingConfig:
         dataset_size             = 2_000,
         marginal_epochs          = 10_000,
         pretrain_epochs          = 5_001,
-        dual_epochs              = 1000,
+        dual_epochs              = 100,
         cfm_epochs               = 1000,
         advance_steps            = 200,
         iterations               = 21,
         num_rectified_flow       = 0,
         scale_factor             = 1.0,
         batch_size               = 128,
-        use_disk_coupling        = True,
+        use_disk_coupling        = False,
         coupling_chunk_size      = 256,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
@@ -302,6 +302,7 @@ def _default_method_cfg() -> MixtureConfig:
         particle_ratio  = 0.25,
         lr_cosine_decay = False,
         lr_min_factor   = 0.1,
+        dual_warmup_epochs = 1000
     )
 
 

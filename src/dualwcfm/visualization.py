@@ -349,12 +349,15 @@ class Visualizer:
             x_coupling = x_coupling.to(device)
             y_coupling = y_coupling.to(device)
 
+        # Rescale to original data space so metrics are comparable across runs
+        # with different scale_factor values (all internal tensors are / scale).
+        s = getattr(trainer, "scale", 1.0)
         n_x = x_coupling.shape[0]
         n_y = y_coupling.shape[0]
-        mu_t_flat = mu_t.view(n_samples, -1).float()
-        nu_t_flat = nu_t.view(n_samples, -1).float()
-        x_flat = x_coupling.view(n_x, -1).float()
-        y_flat = y_coupling.view(n_y, -1).float()
+        mu_t_flat = (mu_t * s).view(n_samples, -1).float()
+        nu_t_flat = (nu_t * s).view(n_samples, -1).float()
+        x_flat = (x_coupling * s).view(n_x, -1).float()
+        y_flat = (y_coupling * s).view(n_y, -1).float()
 
         return {
             "W1_mu": self._sliced_wasserstein(mu_t_flat, x_flat, n_proj=n_proj, p=1),
@@ -451,44 +454,86 @@ class Visualizer3D(Visualizer):
         trajectory_stride: int = 1,
     ):
         from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+        from mpl_toolkits.mplot3d.art3d import Line3DCollection
+        from matplotlib.colors import Normalize
+        import matplotlib.cm as cm
 
-        fig = plt.figure(figsize=(8, 8))
+        # --- publication palette ---
+        C_SRC  = "#2166AC"   # blue   – source μ
+        C_MID  = "#762A83"   # purple – mid-point
+        C_END  = "#D6604D"   # red    – transported end
+        C_TGT  = "#4DAC26"   # green  – reference target ν
+        TRAJ_CMAP = "plasma"
+
+        fig = plt.figure(figsize=(7, 7))
         ax = fig.add_subplot(111, projection="3d")
+        fig.patch.set_facecolor("#FAFAFA")
+        ax.set_facecolor("#FAFAFA")
+        # transparent panes with subtle edges
+        for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+            pane.fill = False
+            pane.set_edgecolor("#CCCCCC")
+
         n_traj = min(self.config.n_trajectories, start_points.shape[0])
 
         if trajectories is not None:
             traj_np = trajectories[::max(1, trajectory_stride), :n_traj, :3].numpy()
+            T = traj_np.shape[0]
+            norm = Normalize(vmin=0, vmax=max(T - 2, 1))
             for j in range(n_traj):
-                pts = traj_np[:, j, :]
-                ax.plot(pts[:, 0], pts[:, 1], pts[:, 2], c="black", alpha=0.25, linewidth=0.8, zorder=10)
-            mid_points = torch.from_numpy(traj_np[len(traj_np) // 2])
+                pts = traj_np[:, j, :]          # (T, 3)
+                segs = np.stack([pts[:-1], pts[1:]], axis=1)   # (T-1, 2, 3)
+                lc = Line3DCollection(segs, cmap=TRAJ_CMAP, norm=norm,
+                                      linewidth=0.9, alpha=0.45, zorder=5)
+                lc.set_array(np.arange(T - 1).astype(float))
+                ax.add_collection(lc)  # type: ignore
+            mid_points = torch.from_numpy(traj_np[T // 2])
         else:
+            T, norm = None, None
             for j in range(n_traj):
-                points = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
-                ax.plot(points[:, 0], points[:, 1], points[:, 2], c="black", alpha=0.25, linewidth=0.8, zorder=10)
-            mid_points = (start_points + end_points) / 2
+                pts = torch.stack([start_points[j], end_points[j]], dim=0).numpy()
+                ax.plot(pts[:, 0], pts[:, 1], pts[:, 2],
+                        c="#999999", alpha=0.30, linewidth=0.7, zorder=5)
+            mid_points = (start_points[:n_traj] + end_points[:n_traj]) / 2
 
+        # data-adaptive limits
+        all_pts = torch.cat([start_points[:n_traj], end_points[:n_traj]], dim=0)
+        if target_points is not None:
+            all_pts = torch.cat([all_pts, target_points], dim=0)
+        lo = all_pts.min().item(); hi = all_pts.max().item()
+        pad = (hi - lo) * 0.12 + 0.15
+        L_lo, L_hi = lo - pad, hi + pad
+
+        kw_s: dict = dict(depthshade=True, edgecolors="none")
         if target_points is not None:
             ax.scatter(target_points[:, 0], target_points[:, 1], target_points[:, 2],
-                       c="orange", s=3, alpha=0.5, zorder=4, label="Target")
-        ax.scatter(start_points[:, 0], start_points[:, 1], start_points[:, 2],
-                   c="red", s=3, alpha=0.5, zorder=4, label="Start")
-        ax.scatter(end_points[:, 0], end_points[:, 1], end_points[:, 2],
-                   c="green", s=3, alpha=0.5, zorder=4, label="End")
+                       c=C_TGT, s=8, alpha=0.30, label=r"Target $\nu$", zorder=2, **kw_s)
+        ax.scatter(start_points[:n_traj, 0], start_points[:n_traj, 1], start_points[:n_traj, 2],
+                   c=C_SRC, s=14, alpha=0.75, label=r"Source $\mu$", zorder=6, **kw_s)
+        ax.scatter(end_points[:n_traj, 0], end_points[:n_traj, 1], end_points[:n_traj, 2],
+                   c=C_END, s=14, alpha=0.75, label="Transported", zorder=6, **kw_s)
         ax.scatter(mid_points[:, 0], mid_points[:, 1], mid_points[:, 2],
-                   c="blue", s=3, alpha=0.5, zorder=4, label="Mid")
-        # ax.xaxis.set_major_locator(MultipleLocator(0.25))
-        # ax.yaxis.set_major_locator(MultipleLocator(0.25))
-        # ax.zaxis.set_major_locator(MultipleLocator(0.25))
-        ax.grid(True, alpha=0.2)
-        L = 3
-        ax.plot([-L, L], [0, 0], [0, 0], color="k", linewidth=1)
-        ax.plot([0, 0], [-L, L], [0, 0], color="k", linewidth=1)
-        ax.plot([0, 0], [0, 0], [-L, L], color="k", linewidth=1)
-        ax.set_xlim([-L, L]); ax.set_ylim([-L, L]); ax.set_zlim([-L, L])
-        ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")  # type: ignore
-        ax.legend()
+                   c=C_MID, s=8, alpha=0.55, label="Mid-point", zorder=5, **kw_s)
+
+        ax.set_xlim([L_lo, L_hi]); ax.set_ylim([L_lo, L_hi]); ax.set_zlim([L_lo, L_hi])
+        ax.set_xlabel(r"$x_1$", labelpad=3, fontsize=9)
+        ax.set_ylabel(r"$x_2$", labelpad=3, fontsize=9)
+        ax.set_zlabel(r"$x_3$", labelpad=3, fontsize=9)  # type: ignore
+        ax.tick_params(labelsize=7, pad=1)
+        ax.grid(True, alpha=0.15, linewidth=0.5)
+        ax.view_init(elev=self.config.camera_elev, azim=self.config.camera_azim)  # type: ignore
         ax.set_box_aspect([1, 1, 1])  # type: ignore
+
+        leg = ax.legend(fontsize=8, loc="upper left", framealpha=0.88,
+                        edgecolor="#CCCCCC", markerscale=1.6)
+        leg.get_frame().set_linewidth(0.5)
+
+        if trajectories is not None and T is not None and norm is not None:
+            sm = cm.ScalarMappable(cmap=TRAJ_CMAP, norm=norm)
+            sm.set_array([])
+            cbar = fig.colorbar(sm, ax=ax, shrink=0.42, pad=0.10, aspect=22)
+            cbar.set_label(r"Flow time $t$", fontsize=8)
+            cbar.ax.tick_params(labelsize=7)
 
 
 class VisualizerImage(Visualizer):

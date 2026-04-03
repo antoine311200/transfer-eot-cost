@@ -249,7 +249,13 @@ def run_experiment(
     }
     # Always tag the run with the experiment name so runs are filterable in
     # the W&B UI even when the run display-name encodes hyperparameters.
-    _wb_tags = list(dict.fromkeys([spec.name] + (wandb_tags or [])))
+    # When wandb_tags is provided (e.g. from grid search) it already contains
+    # the base experiment name — don't prepend spec.name (which may be a long
+    # combo string). W&B enforces a 64-char limit; guard against that too.
+    _extra = wandb_tags or []
+    _base_tag = spec.name if not _extra else None  # skip if caller already supplies tags
+    _raw_tags = ([_base_tag] if _base_tag else []) + _extra
+    _wb_tags = list(dict.fromkeys(t[:64] for t in _raw_tags))
     wandb_run = _wl.init(
         project = _wb_project,
         name    = _wb_name,

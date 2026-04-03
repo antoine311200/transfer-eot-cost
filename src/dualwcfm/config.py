@@ -26,7 +26,8 @@ class TrainingConfig:
     image_shape: Optional[Tuple[int, int, int]] = None  # (C, H, W) if working with images
 
     # Disk-based coupling for memory efficiency with images
-    use_disk_coupling: bool = False  # Set True for large image datasets
+    # None = auto (disk when image_shape set + dataset_size > 1000), True = force disk, False = force RAM
+    use_disk_coupling: Optional[bool] = None
     coupling_save_dir: Optional[str] = None  # Directory for disk coupling (None = temp dir)
     coupling_chunk_size: int = 256  # Samples per chunk file
 
@@ -79,4 +80,7 @@ class VisualizeConfig:
     show_each_marginal: int = 0  # During marginal flow training
     show_each_pretrain: int = 0  # During pretraining
     trajectory_stride: int = 2  # Plot one trajectory point every N steps (0 = only start/end)
+    # 3-D camera angle (elevation and azimuth in degrees)
+    camera_elev: float = 22.0
+    camera_azim: float = -55.0
 
