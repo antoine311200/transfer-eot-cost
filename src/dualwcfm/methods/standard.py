@@ -127,7 +127,7 @@ class StandardMethod(Method):
                 n_epochs = trainer.config.marginal_epochs if i == 0 else trainer.config.marginal_epochs // 10
                 # Keep a constant eta_min floor across rectified-flow phases so subsequent
                 # phases still have enough LR to correct residual bridge errors.
-                eta_min = 1e-4
+                eta_min = 1e-5
                 mu_scheduler = lr_scheduler.CosineAnnealingLR(mu_optimizer, T_max=n_epochs, eta_min=eta_min)
                 nu_scheduler = lr_scheduler.CosineAnnealingLR(nu_optimizer, T_max=n_epochs, eta_min=eta_min)
 
@@ -159,15 +159,15 @@ class StandardMethod(Method):
 
                     # Sample random time and interpolate to get (x_t, y_t) representing μ_t and ν_t
                     t = trainer.flow_matching.random_time(batch_size, device)
-                    xt = trainer.flow_matching.interpolate(x0, x1, t, sigma)
-                    yt = trainer.flow_matching.interpolate(y0, y1, t, sigma)
+                    xt = trainer.flow_matching.interpolate(x0, x1, t, sigma / (1 if i == 0 else 10))
+                    yt = trainer.flow_matching.interpolate(y0, y1, t, sigma / (1 if i == 0 else 10))
 
                     mu_optimizer.zero_grad()
                     nu_optimizer.zero_grad()
 
                     ut = mu_model(t, xt)
                     ut_true = trainer.flow_matching.vector_field(
-                        xt, t, x0, x1, extend=False, noisy=sigma > 0
+                        xt, t, x0, x1, extend=False, noisy=self.use_noisy_field#sigma > 0
                     )
                     loss_mu = loss_fn(ut, ut_true)
                     loss_mu.backward()
@@ -176,7 +176,7 @@ class StandardMethod(Method):
 
                     vt = nu_model(t, yt)
                     vt_true = trainer.flow_matching.vector_field(
-                        yt, t, y0, y1, extend=False, noisy=sigma > 0
+                        yt, t, y0, y1, extend=False, noisy=self.use_noisy_field#sigma > 0
                     )
                     loss_nu = loss_fn(vt, vt_true)
                     loss_nu.backward()

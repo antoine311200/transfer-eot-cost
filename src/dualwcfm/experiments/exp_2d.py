@@ -43,13 +43,13 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
         dataset_size             = 1_000_000,
-        marginal_epochs          = 10_000,
+        marginal_epochs          = 40_000,
         pretrain_epochs          = 5_000,
         dual_epochs              = 100,
         cfm_epochs               = 500,
         advance_steps            = 100,
         iterations               = 50,
-        num_rectified_flow       = 2,
+        num_rectified_flow       = 0,
         scale_factor             = 50,
         batch_size               = 2_048 * 4,
         coupling_chunk_size      = 100_000,
@@ -60,13 +60,13 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma          = 0.05, # t time
-        sigma2         = 0.1, # s time
+        sigma          = 0.01, # t time
+        sigma2         = 0.01, # s time
         loss           = "weighted",
         l2_reg         = 1e-2,
         lip_reg        = 1.0,
         mean_reg       = 0,
-        use_noisy_field= True,
+        use_noisy_field= False,
         particle_ratio = 0.1,
         lr_cosine_decay = False,
         lr_min_factor   = 0.5,
@@ -128,7 +128,10 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     inverse_transport_map = transport_map
 
     train_cfg  = _default_train_cfg(device)
+    train_cfg.marginal_epochs    = 5_000   # linear transport converges fast; fewer phases needed
+    # train_cfg.num_rectified_flow = 1       # one rectification pass is sufficient for a linear map
     method_cfg = _default_method_cfg()
+    method_cfg.sigma = 0.03                # blobs are narrow (std=0.5) and far apart (loc=10); small σ avoids over-spreading
     model_cfg  = _default_model_cfg()
     vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
@@ -192,7 +195,7 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg              = _default_train_cfg(device)
     train_cfg.iterations   = 100
     method_cfg             = _default_method_cfg()
-    model_cfg              = _default_model_cfg()
+    model_cfg              = _default_model_cfg(hidden_size=64)   # 4-blob target needs more capacity than simple
     vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     return ExperimentSpec(
@@ -252,11 +255,17 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
         return y @ _R_cpx.to(y.device, y.dtype)
 
     train_cfg                = _default_train_cfg(device)
-    # train_cfg.iterations     = 150
-    # train_cfg.dual_epochs    = 200
-    # train_cfg.cfm_epochs     = 300
+    train_cfg.iterations     = 100              # complex needs more iterations than simple
+    train_cfg.pretrain_epochs = 8_000           # larger flow pretraining for 5-blob cross with 6.7× scale jump
+    train_cfg.dual_epochs    = 150              # duals need more steps for complex geometry
+    train_cfg.scale_factor   = 30              # blobs at r1=10; scale_factor=50 over-normalises
     method_cfg               = _default_method_cfg()
-    model_cfg                = _default_model_cfg(hidden_size=128)
+    method_cfg.l2_reg        = 5e-3            # less dual potential regularisation for complex geometry
+    method_cfg.lip_reg       = 1.0             # stronger Lipschitz stability for large scale jumps
+    method_cfg.particle_ratio = 0.2            # more particle mixing for 5-blob cross
+    method_cfg.lr_min_factor  = 0.3            # more LR headroom per iteration
+    method_cfg.dual_warmup_epochs = 50         # warm-start duals for hard geometry
+    model_cfg                = _default_model_cfg(hidden_size=128, num_layers=3)  # deeper network for complex transport
     vis_cfg                  = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
 
     return ExperimentSpec(

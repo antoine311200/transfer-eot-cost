@@ -138,27 +138,28 @@ class Visualizer:
 
     def at_pretrain_end(self, trainer: "Trainer", ctx: dict) -> None:
         """Visualize final bridge quality (mu and nu bridges)."""
-        samples = 2500
-        s = trainer.scale
-        for model_attr, src_attr, tgt_attr, title, fname in [
-            ("mu_bridge", "mu_distribution", "new_source",
-             "Mu bridge: source distribution flow", "mu_bridge_final.png"),
-            ("nu_bridge", "nu_distribution", "new_target",
-             "Nu bridge: target distribution flow", "nu_bridge_final.png"),
-        ]:
-            model = getattr(trainer.strategy, model_attr)
-            start = getattr(trainer, src_attr).sample(samples).to(trainer.device)
-            model.eval()
-            with torch.no_grad():
-                end = trainer.flow_matching.evolve(
-                    start, model, num_steps=trainer.config.advance_steps, extend=False
-                )
-            target = getattr(trainer, tgt_attr).sample(samples).to(trainer.device)
-            self._display_evolution(
-                (start * s).cpu(), (end * s).cpu(), (target * s).cpu()
-            )
-            plt.suptitle(title)
-            self.save_fig(plt.gcf(), "marginals", fname)
+        pass
+        # samples = 2500
+        # s = trainer.scale
+        # for model_attr, src_attr, tgt_attr, title, fname in [
+        #     ("mu_bridge", "mu_distribution", "new_source",
+        #      "Mu bridge: source distribution flow", "mu_bridge_final.png"),
+        #     ("nu_bridge", "nu_distribution", "new_target",
+        #      "Nu bridge: target distribution flow", "nu_bridge_final.png"),
+        # ]:
+        #     model = getattr(trainer.strategy, model_attr)
+        #     start = getattr(trainer, src_attr).sample(samples).to(trainer.device)
+        #     model.eval()
+        #     with torch.no_grad():
+        #         end = trainer.flow_matching.evolve(
+        #             start, model, num_steps=trainer.config.advance_steps, extend=False
+        #         )
+        #     target = getattr(trainer, tgt_attr).sample(samples).to(trainer.device)
+        #     self._display_evolution(
+        #         (start * s).cpu(), (end * s).cpu(), (target * s).cpu()
+        #     )
+        #     plt.suptitle(title)
+        #     self.save_fig(plt.gcf(), "marginals", fname)
 
     def at_flow_pretrain_end(self, trainer: "Trainer", ctx: dict) -> None:
         """Visualize the pretrained forward (and backward) flows on the new marginals.
