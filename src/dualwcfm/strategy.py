@@ -58,8 +58,11 @@ class Strategy:
         """Create all models. Override this method for custom architectures."""
         self._device = None  # Reset so next to_device() call actually moves models
         wrapper = self.wrapper
-        self.mu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
-        self.nu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        # When use_conditional_bridge=True the bridge model takes cat([xt, x0]) as
+        # input, so its MLP input dimension is 2*dim instead of dim.
+        bridge_dim = 2 * dim if getattr(self.config, "use_conditional_bridge", False) else dim
+        self.mu_bridge = wrapper(MLP(dim=bridge_dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.nu_bridge = wrapper(MLP(dim=bridge_dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
         self.f_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, n_layers=num_layers, time_varying=False))
         self.g_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, n_layers=num_layers, time_varying=False))
         self.h_dual = MLP(dim=2*dim, out_dim=1, w=hidden_size, n_layers=num_layers, time_varying=False)
@@ -67,8 +70,8 @@ class Strategy:
         self.previous_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
 
         # Save initial state
-        self.initial_mu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
-        self.initial_nu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.initial_mu_bridge = wrapper(MLP(dim=bridge_dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.initial_nu_bridge = wrapper(MLP(dim=bridge_dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
         self.initial_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
 
     def to_device(self, device: torch.device):

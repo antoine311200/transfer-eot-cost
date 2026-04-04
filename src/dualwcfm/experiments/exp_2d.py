@@ -43,7 +43,7 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
         dataset_size             = 1_000_000,
-        marginal_epochs          = 40_000,
+        marginal_epochs          = 2_000,
         pretrain_epochs          = 5_000,
         dual_epochs              = 100,
         cfm_epochs               = 500,
@@ -51,7 +51,7 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
         iterations               = 50,
         num_rectified_flow       = 0,
         scale_factor             = 50,
-        batch_size               = 2_048 * 4,
+        batch_size               = 256 * 4,
         coupling_chunk_size      = 100_000,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
@@ -60,8 +60,8 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma          = 0.01, # t time
-        sigma2         = 0.01, # s time
+        sigma          = 0.1, # t time
+        sigma2         = 0.1, # s time
         loss           = "weighted",
         l2_reg         = 1e-2,
         lip_reg        = 1.0,
@@ -260,13 +260,15 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg.dual_epochs    = 150              # duals need more steps for complex geometry
     train_cfg.scale_factor   = 30              # blobs at r1=10; scale_factor=50 over-normalises
     method_cfg               = _default_method_cfg()
+    method_cfg.sigma         = 0.005           # blob_scale/scale_factor = 0.15/30 = 0.005; default 0.1 is 20× too large
+    method_cfg.sigma2        = 0.005           # same reasoning for the s-time interpolation
     method_cfg.l2_reg        = 5e-3            # less dual potential regularisation for complex geometry
     method_cfg.lip_reg       = 1.0             # stronger Lipschitz stability for large scale jumps
     method_cfg.particle_ratio = 0.2            # more particle mixing for 5-blob cross
     method_cfg.lr_min_factor  = 0.3            # more LR headroom per iteration
     method_cfg.dual_warmup_epochs = 50         # warm-start duals for hard geometry
     model_cfg                = _default_model_cfg(hidden_size=128, num_layers=3)  # deeper network for complex transport
-    vis_cfg                  = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
+    vis_cfg                  = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"2d_complex{'_perturbed' if perturbed else ''}",

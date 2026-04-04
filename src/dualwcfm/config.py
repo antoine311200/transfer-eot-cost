@@ -61,6 +61,10 @@ class FeedForwardConfig(ModelConfig):
     # For image models
     image_shape: Optional[Tuple[int, int, int]] = None  # (C, H, W)
     num_res_blocks: int = 1  # UNet residual blocks per resolution level
+    # Bridge conditioning: if True, mu/nu bridge models accept x0 as a second input
+    # (model(t, xt, x0)) so each particle's velocity is conditioned on its starting
+    # point.  This eliminates crossing-path ambiguity and stabilises bridge training.
+    use_conditional_bridge: bool = False
 
     @property
     def is_image_model(self) -> bool:

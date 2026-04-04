@@ -86,16 +86,21 @@ class Visualizer:
             n = min(self.config.n_trajectories, 500)
             s = trainer.scale
             stride = self.config.trajectory_stride
+            conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
             for model, source_dist, target_dist, label in [
                 (mu_model, trainer.mu_distribution, trainer.new_source, "Mu"),
                 (nu_model, trainer.nu_distribution, trainer.new_target, "Nu"),
             ]:
                 start = source_dist.sample(n).to(trainer.device)
                 with torch.no_grad():
+                    # Conditional bridge: use extend=True so the frozen condition is
+                    # embedded in the second half of xt, matching the flow model convention.
                     traj = trainer.flow_matching.evolve_trajectory(
-                        start, model, num_steps=50, sigma=trainer._sigma, extend=False
+                        start, model, num_steps=50, sigma=trainer._sigma, extend=conditional,
                     )
-                end = traj[-1]
+                # When extend=True the trajectory tensor is (T, N, 2*D); slice state half.
+                dim = start.shape[1]
+                end = traj[-1][:, :dim]
                 target = target_dist.sample(n).to(trainer.device)
                 traj_2d = (traj[:, :, :self.dim] * s).cpu() if stride > 0 else None
                 self._display_evolution(
@@ -574,15 +579,19 @@ class VisualizerImage(Visualizer):
             phase_idx = ctx.get("phase_idx", 0)
             n = min(self.config.n_trajectories, 6)
             s = trainer.scale
+            conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
             for model, source_dist, target_dist, label in [
                 (mu_model, trainer.mu_distribution, trainer.new_source, "Mu"),
                 (nu_model, trainer.nu_distribution, trainer.new_target, "Nu"),
             ]:
                 start = source_dist.sample(n).to(trainer.device)
+                C = start.shape[1]
                 with torch.no_grad():
-                    end = trainer.flow_matching.evolve(
-                        start, model, num_steps=50, sigma=trainer._sigma, extend=False
+                    evolved = trainer.flow_matching.evolve(
+                        start, model, num_steps=50, sigma=trainer._sigma, extend=conditional,
                     )
+                # When extend=True the output has 2*C channels; take the state half.
+                end = evolved[:, :C, :, :] if conditional else evolved
                 target = target_dist.sample(n).to(trainer.device)
                 self._display_evolution((start * s).cpu(), (end * s).cpu(), (target * s).cpu())
                 plt.suptitle(f"{label} Marginal Flow — Epoch {epoch} Phase {phase_idx}")
@@ -622,6 +631,7 @@ class VisualizerImage(Visualizer):
         """Image-specific: uses evolve and 6 samples."""
         n = min(self.config.n_trajectories, 6)
         s = trainer.scale
+        conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
         for model_attr, src_attr, tgt_attr, title, fname in [
             ("mu_bridge", "mu_distribution", "new_source",
              "Mu bridge: source distribution flow", "mu_bridge_final.png"),
@@ -630,11 +640,13 @@ class VisualizerImage(Visualizer):
         ]:
             model = getattr(trainer.strategy, model_attr)
             start = getattr(trainer, src_attr).sample(n).to(trainer.device)
+            C = start.shape[1]
             model.eval()
             with torch.no_grad():
-                end = trainer.flow_matching.evolve(
-                    start, model, num_steps=50, sigma=trainer._sigma, extend=False
+                evolved = trainer.flow_matching.evolve(
+                    start, model, num_steps=50, sigma=trainer._sigma, extend=conditional,
                 )
+            end = evolved[:, :C, :, :] if conditional else evolved
             target = getattr(trainer, tgt_attr).sample(n).to(trainer.device)
             self._display_evolution((start * s).cpu(), (end * s).cpu(), (target * s).cpu())
             plt.suptitle(title)

@@ -57,18 +57,23 @@ def _compute_ksd(z: torch.Tensor, score: torch.Tensor, n_sub: int = 200) -> torc
 
 
 def _hutchinson_div(
-    model: nn.Module, t: torch.Tensor, x: torch.Tensor, n_probes: int = 1
+    model: nn.Module, t: torch.Tensor, x: torch.Tensor, n_probes: int = 1,
+    condition: torch.Tensor = None,
 ) -> torch.Tensor:
     """Estimate tr(∂ model(t,x) / ∂x) via Hutchinson's trace estimator.
 
-    Returns shape (B,).
+    When *condition* is provided the model is called as model(t, x, condition),
+    otherwise as model(t, x).  Returns shape (B,).
     """
     total = torch.zeros(x.shape[0], device=x.device)
     for _ in range(n_probes):
         v = torch.randn_like(x)
         x_req = x.detach().requires_grad_(True)
         with torch.enable_grad():
-            out = model(t.detach(), x_req)
+            if condition is not None:
+                out = model(t.detach(), x_req, condition)
+            else:
+                out = model(t.detach(), x_req)
             vjp = torch.autograd.grad((out * v).sum(), x_req, create_graph=False)[0]
         total = total + (vjp.detach() * v).sum(dim=1)
     return total / n_probes
@@ -207,8 +212,11 @@ class ScoreMethod(StandardMethod):
                     x = trainer.current_coupling.dataset[0][i : i + actual].to(device)
                     y = trainer.current_coupling.dataset[1][i : i + actual].to(device)
 
-                x_new = x + delta * mu_model(t_chunk, x)
-                y_new = y + delta * nu_model(t_chunk, y)
+                # Advance uses the current position as a self-conditioning proxy
+                # when use_conditional_bridge=True; t=0 origins are not stored.
+                conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
+                x_new = x + delta * self._bridge_call(mu_model, t_chunk, x, x, conditional)
+                y_new = y + delta * self._bridge_call(nu_model, t_chunk, y, y, conditional)
                 trainer.current_coupling.update_chunk(i, x_new.cpu(), y_new.cpu())
 
         trainer.visualizer.at_postprocess_end(iteration, trainer, ctx)
@@ -277,8 +285,9 @@ class ScoreMethod(StandardMethod):
             if iteration > 0:
                 # Δ [ u_{t-Δ}·S^x_{t-Δ} + v_{t-Δ}·S^y_{t-Δ} ]
                 with torch.no_grad():
-                    u_prev = mu_model(t_prev_tensor, x0)
-                    v_prev = nu_model(t_prev_tensor, x1)
+                    conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
+                    u_prev = self._bridge_call(mu_model, t_prev_tensor, x0, x0, conditional)
+                    v_prev = self._bridge_call(nu_model, t_prev_tensor, x1, x1, conditional)
                     xy = torch.cat([x0, x1], dim=1)
                     score_prev = self.previous_score_model(xy)
                     s_x = score_prev[:, : x0.shape[1]]
@@ -286,8 +295,10 @@ class ScoreMethod(StandardMethod):
                     dot = (u_prev * s_x).sum(dim=1) + (v_prev * s_y).sum(dim=1)  # (B,)
 
                 # ∇·V_{t-Δ} = ∇_x·u_{t-Δ}(x) + ∇_y·v_{t-Δ}(y)  via Hutchinson
-                div_u = _hutchinson_div(mu_model, t_prev_tensor, x0)  # (B,)
-                div_v = _hutchinson_div(nu_model, t_prev_tensor, x1)  # (B,)
+                cond_x0 = x0 if conditional else None
+                cond_x1 = x1 if conditional else None
+                div_u = _hutchinson_div(mu_model, t_prev_tensor, x0, condition=cond_x0)  # (B,)
+                div_v = _hutchinson_div(nu_model, t_prev_tensor, x1, condition=cond_x1)  # (B,)
 
                 with torch.no_grad():
                     log_w = log_w + delta * (dot + div_u.detach() + div_v.detach())

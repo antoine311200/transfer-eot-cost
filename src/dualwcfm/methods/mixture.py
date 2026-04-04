@@ -69,8 +69,12 @@ class MixtureMethod(StandardMethod):
                     else:
                         x_prev = trainer.current_coupling.dataset[0][i : i + n_particle].to(device)
                         y_prev = trainer.current_coupling.dataset[1][i : i + n_particle].to(device)
-                    x_par = x_prev + mu_model(t_par, x_prev) * (1 / trainer.config.iterations)
-                    y_par = y_prev + nu_model(t_par, y_prev) * (1 / trainer.config.iterations)
+                    # Particle advance uses the current position as a self-conditioning
+                    # proxy when use_conditional_bridge=True; the t=0 origin is not
+                    # stored in the coupling so a full conditional call is not possible.
+                    conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
+                    x_par = x_prev + self._bridge_call(mu_model, t_par, x_prev, x_prev, conditional) * (1 / trainer.config.iterations)
+                    y_par = y_prev + self._bridge_call(nu_model, t_par, y_prev, y_prev, conditional) * (1 / trainer.config.iterations)
 
                 # --- Flow pairs: standard transport ---
                 t_next = torch.full(

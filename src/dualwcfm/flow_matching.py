@@ -53,11 +53,16 @@ class ConditionalFlowMatching:
         return self.interpolate(x_corr, x1, t_shrink, sigma)
 
     def evolve(
-        self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_index: int = 0, start_time: float = 0.0, verbose: bool = False
+        self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_index: int = 0, start_time: float = 0.0, verbose: bool = False,
+        condition: torch.Tensor = None,
     ) -> torch.Tensor:
         """Evolve the points x_init over time t using Euler integration.
 
         Handles both vector (N, D) and image (N, C, H, W) tensors.
+
+        When *condition* is provided the model is called as model(t, xt, condition)
+        with the condition tensor held fixed throughout integration (e.g. the t=0
+        starting point for a conditional bridge model).
         """
         device = x_init.device
         dt = 1.0 / num_steps
@@ -70,7 +75,10 @@ class ConditionalFlowMatching:
 
             for i in range(num_steps - start_index):
                 t = torch.full((xt.shape[0], 1), i * dt + start_time, device=device)
-                vt = model(t, xt)
+                if condition is not None:
+                    vt = model(t, xt, condition)
+                else:
+                    vt = model(t, xt)
 
                 if extend:
                     xt = torch.cat([xt[:, :x_init.shape[1]] + vt[:, :x_init.shape[1]] * dt, xt[:, x_init.shape[1]:]], dim=1)
@@ -82,12 +90,16 @@ class ConditionalFlowMatching:
         return xt
 
     def evolve_trajectory(
-        self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_index: int = 0, start_time: float = 0.0
+        self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_index: int = 0, start_time: float = 0.0,
+        condition: torch.Tensor = None,
     ) -> torch.Tensor:
         """Like evolve, but returns all intermediate states as (num_steps+1, N, D).
 
         When extend=True the full doubled tensor is stored; slice [:, :, :D] to get
         only the evolved half.
+
+        When *condition* is provided the model is called as model(t, xt, condition)
+        with the condition tensor held fixed throughout (e.g. x0 for conditional bridges).
         """
         device = x_init.device
         dt = 1.0 / num_steps
@@ -101,7 +113,10 @@ class ConditionalFlowMatching:
             states = [xt.clone()]
             for i in range(num_steps - start_index):
                 t = torch.full((xt.shape[0], 1), i * dt + start_time, device=device)
-                vt = model(t, xt)
+                if condition is not None:
+                    vt = model(t, xt, condition)
+                else:
+                    vt = model(t, xt)
 
                 if extend:
                     xt = torch.cat([xt[:, :x_init.shape[1]] + vt[:, :x_init.shape[1]] * dt, xt[:, x_init.shape[1]:]], dim=1)

@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 import copy
 from dataclasses import dataclass
+from typing import Optional, TYPE_CHECKING
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim.lr_scheduler as lr_scheduler
@@ -14,12 +16,108 @@ from dualwcfm.strategy import BidirectionalStrategy
 from dualwcfm.utils import is_image_tensor
 from dualwcfm.distributions.coupling import DiskCouplingDistribution
 from dualwcfm.methods.base import Method, MethodConfig
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from dualwcfm.trainer import Trainer
 
 logger = logging.getLogger("dualwcfm")
+
+
+
+class OTPlanSampler:
+    """Mini-batch OT plan sampler following Tong et al. (2023).
+
+    Computes the Wasserstein-2 optimal transport plan between two mini-batches
+    using the POT library and resamples pairs (x0[i], x1[j]) according to the plan.
+
+    This avoids the degenerate fixed point that arises when (x0, x1) are sampled
+    independently for conditional bridge training: with OT coupling,
+    E[x1 - x0 | x0] = T_OT(x0) - x0 ≠ 0, so the model learns a non-trivial
+    velocity at the ODE starting condition xt = x0.
+
+    Reference: A. Tong et al., "Improving and Generalizing Flow Matching", NeurIPS 2023.
+               https://github.com/atong01/conditional-flow-matching
+    """
+
+    def __init__(self, method: str = "exact", reg: float = 0.05, normalize_cost: bool = False):
+        """
+        Parameters
+        ----------
+        method : "exact" | "sinkhorn"
+            "exact"    – Wasserstein-2 via POT ``ot.emd`` (LP, deterministic).
+            "sinkhorn" – Entropic regularised OT via ``ot.sinkhorn`` (faster, approximate).
+        reg : float
+            Entropic regularisation strength (only used when method="sinkhorn").
+        normalize_cost : bool
+            Divide the cost matrix by its maximum before solving (improves numerical
+            stability for large-scale data).
+        """
+        try:
+            import ot as pot
+        except ImportError:
+            raise ImportError(
+                "POT (Python Optimal Transport) is required for OT pretraining. "
+                "Install it with:  pip install POT"
+            )
+        self._pot = pot
+        self.method = method
+        self.reg = reg
+        self.normalize_cost = normalize_cost
+
+        if method == "exact":
+            self._ot_fn = lambda a, b, M: pot.emd(a, b, M)
+        elif method == "sinkhorn":
+            self._ot_fn = lambda a, b, M: pot.sinkhorn(a, b, M, reg=reg)
+        else:
+            raise ValueError(f"Unknown OT method '{method}'. Choose 'exact' or 'sinkhorn'.")
+
+    def get_plan(self, x0: torch.Tensor, x1: torch.Tensor) -> np.ndarray:
+        """Return the OT transport plan π of shape (N, N).
+
+        Cost is squared Euclidean (W2 ground metric).  Multi-dimensional inputs
+        (e.g. images) are automatically flattened for the cost computation.
+        """
+        n = x0.shape[0]
+        a = self._pot.unif(n)
+        b = self._pot.unif(n)
+
+        x0_flat = x0.detach().view(n, -1).float()
+        x1_flat = x1.detach().view(n, -1).float()
+
+        M = torch.cdist(x0_flat, x1_flat) ** 2
+        if self.normalize_cost:
+            M = M / (M.max() + 1e-8)
+        M_np = M.cpu().numpy()
+
+        try:
+            pi = self._ot_fn(a, b, M_np)
+        except Exception as e:
+            logger.warning("OT solver failed (%s); falling back to uniform plan.", e)
+            pi = np.outer(a, b)
+
+        if not np.isfinite(pi).all():
+            logger.warning("OT plan contained non-finite values; falling back to uniform plan.")
+            pi = np.outer(a, b)
+
+        return pi
+
+    def sample_plan(self, x0: torch.Tensor, x1: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Resample N pairs (x0[i], x1[j]) drawn from the OT plan π.
+
+        Sampling is with replacement (standard mini-batch OT CFM).  Each returned
+        batch has the same size N as the inputs, but pairs are now approximately
+        OT-coupled rather than independent.
+        """
+        n = x0.shape[0]
+        pi = self.get_plan(x0, x1)
+
+        p = pi.flatten()
+        p = p / p.sum()
+
+        choices = np.random.choice(n * n, p=p, size=n, replace=True)
+        i, j = np.divmod(choices, n)
+
+        return x0[i], x1[j]
 
 @dataclass
 class StandardConfig(MethodConfig):
@@ -49,6 +147,17 @@ class StandardConfig(MethodConfig):
     lr_min_factor: float = 1.0  # 1.0 = no change; 0.5 = half the base flow_lr
     gauge_ema_momentum: float = 0.99  # EMA momentum for gauge fix (used when batch_size < 512)
     dual_warmup_epochs: int = 0       # Extra dual epochs at iteration 0 to warm-start f and g (0 = disabled)
+
+    # Mini-batch OT pretraining (Tong et al., 2023).
+    # When True, (x0, x1) and (y0, y1) pairs in bridge pretraining are resampled
+    # from the W2 optimal transport plan instead of being drawn independently.
+    # This ensures E[x1-x0 | x0] ≠ 0 and gives the bridge a well-defined
+    # non-trivial target velocity, which is especially important with conditional
+    # bridges but also speeds up convergence for unconditional ones.
+    use_ot_pretrain: bool = True
+    ot_method: str = "exact"          # "exact" (W2 via EMD) or "sinkhorn" (entropic OT)
+    ot_reg: float = 0.05              # Entropic regularisation (only used when ot_method="sinkhorn")
+    ot_normalize_cost: bool = False   # Normalise cost matrix by its max before solving
 
 class StandardMethod(Method):
     """Standard DualWCFM method: interpolation-based marginals, weighted/implicit CFM.
@@ -105,12 +214,93 @@ class StandardMethod(Method):
     # Pretrain marginal flow matching
     # ------------------------------------------------------------------
 
+    @property
+    def _use_conditional_bridge(self) -> bool:
+        """Read the conditional-bridge flag from the strategy config at call time."""
+        # Accessed lazily so no trainer reference is needed at construction time.
+        return False  # overridden per-call via trainer.strategy.config
+
+    def _bridge_call(self, model, t, xt, x0, conditional: bool):
+        """Call a bridge model with or without x0 conditioning.
+
+        When conditional, uses the extend convention: cat([xt, x0]) is passed as
+        a single 2-arg input, mirroring how the flow model receives cat([x, cond]).
+        The model wrapper then appends t, giving MLP input cat([xt, x0, t]).
+        """
+        if conditional:
+            return model(t, torch.cat([xt, x0], dim=1))
+        return model(t, xt)
+
+    @staticmethod
+    def _ot_pair(a: torch.Tensor, b: torch.Tensor) -> tuple:
+        """Approximately OT-pair two batches via random-projection sorting.
+
+        Projects both onto a shared random direction, ranks them, and pairs
+        samples with matching ranks.  This creates an approximate bijection
+        that is O(N log N) and fully GPU-compatible.
+
+        With OT-coupled pairs the conditional bridge model learns
+        E[b - a | a, yt, t] = T_approx(a) - a ≠ 0 at t=0,
+        avoiding the degenerate zero-velocity fixed point that arises when
+        a and b are sampled independently (where the model reduces to
+        computing (yt - a)/t, which is 0 at the ODE starting point yt=a).
+        """
+        n = a.shape[0]
+        d = a.view(n, -1).shape[1]
+        direction = torch.randn(d, device=a.device)
+        direction = direction / direction.norm()
+
+        proj_a = a.view(n, -1) @ direction   # [N]
+        proj_b = b.view(n, -1) @ direction   # [N]
+
+        a_rank = proj_a.argsort()            # indices that sort a
+        b_rank = proj_b.argsort()            # indices that sort b
+        a_inv_rank = a_rank.argsort()        # rank of each a[i]
+
+        b_paired = b[b_rank[a_inv_rank]]     # b sample with same projection rank as a[i]
+        return a, b_paired
+
+    @staticmethod
+    def _evolve_bridge_conditional(x0: torch.Tensor, model, num_steps: int, device) -> torch.Tensor:
+        """Euler-integrate a *conditional* bridge ODE using the extend convention.
+
+        Mirrors how the forward/backward flow models are evolved: the extended
+        state is cat([x_state, x0_frozen], dim=1), the model is called 2-arg as
+        model(t, xt_full), and only the first half (the state) is updated.
+        """
+        n_ch = x0.shape[1]                            # C for images, D for vectors
+        xt = torch.cat([x0, x0], dim=1)               # [state=x0, condition=x0]
+        dt = 1.0 / num_steps
+        with torch.no_grad():
+            for i in range(num_steps):
+                t = torch.full((x0.shape[0], 1), i * dt, device=device)
+                vt = model(t, xt)                     # 2-arg call, outputs n_ch channels
+                state = xt[:, :n_ch] + vt[:, :n_ch] * dt
+                xt = torch.cat([state, xt[:, n_ch:]], dim=1)  # condition stays frozen
+        return xt[:, :n_ch]
+
     def _pretrain_bridges(self, trainer: Trainer, retrain: bool = True, save: str = None) -> None:
         """Train (or load) mu/nu bridge models for marginal flow matching."""
         sigma = trainer._sigma
         batch_size = trainer.config.batch_size
         device = trainer.device
         loss_fn = nn.MSELoss()
+        conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
+
+        # Build OT sampler once if requested (POT import validated at construction).
+        use_ot = self.config.use_ot_pretrain
+        ot_sampler: Optional[OTPlanSampler] = None
+        if use_ot:
+            ot_sampler = OTPlanSampler(
+                method=self.config.ot_method,
+                reg=self.config.ot_reg,
+                normalize_cost=self.config.ot_normalize_cost,
+            )
+            logger.info(
+                "OT pretraining enabled (method=%s). Pairs will be resampled from "
+                "the mini-batch W2 OT plan each epoch.",
+                self.config.ot_method,
+            )
 
         (mu_model, mu_optimizer), (nu_model, nu_optimizer) = trainer.strategy.get_bridges(device)
         initial_mu_model, initial_nu_model = trainer.strategy.get_initial_bridges(device)
@@ -127,7 +317,7 @@ class StandardMethod(Method):
                 n_epochs = trainer.config.marginal_epochs if i == 0 else trainer.config.marginal_epochs // 10
                 # Keep a constant eta_min floor across rectified-flow phases so subsequent
                 # phases still have enough LR to correct residual bridge errors.
-                eta_min = 1e-5
+                eta_min = 1e-6
                 mu_scheduler = lr_scheduler.CosineAnnealingLR(mu_optimizer, T_max=n_epochs, eta_min=eta_min)
                 nu_scheduler = lr_scheduler.CosineAnnealingLR(nu_optimizer, T_max=n_epochs, eta_min=eta_min)
 
@@ -146,9 +336,18 @@ class StandardMethod(Method):
                         y0 = trainer.initial_coupling.sample_target(batch_size).to(device)
                         previous_mu_model.eval()
                         previous_nu_model.eval()
+                        # if conditional:
+                        #     # For conditional bridges, integrate with x0 fixed as context.
+                        #     x1 = self._evolve_bridge_conditional(x0, previous_mu_model, trainer.config.advance_steps, device)
+                        #     y1 = self._evolve_bridge_conditional(y0, previous_nu_model, trainer.config.advance_steps, device)
+                        # else:
                         with torch.no_grad():
-                            x1 = trainer.flow_matching.evolve(x0, previous_mu_model, num_steps=trainer.config.advance_steps, extend=False)
-                            y1 = trainer.flow_matching.evolve(y0, previous_nu_model, num_steps=trainer.config.advance_steps, extend=False)
+                            x1 = trainer.flow_matching.evolve(x0, previous_mu_model, num_steps=trainer.config.advance_steps, extend=conditional)
+                            y1 = trainer.flow_matching.evolve(y0, previous_nu_model, num_steps=trainer.config.advance_steps, extend=conditional)
+                            # evolve() with extend=True returns [N, 2*dim]; extract state half.
+                            if conditional:
+                                x1 = x1[:, :x0.shape[1]]
+                                y1 = y1[:, :y0.shape[1]]
 
                     x0, x1, y0, y1 = (
                         x0.to(device),
@@ -156,6 +355,28 @@ class StandardMethod(Method):
                         y0.to(device),
                         y1.to(device),
                     )
+
+                    # Pair (x0,x1) and (y0,y1) so the bridge learns a non-trivial
+                    # non-degenerate conditional velocity.  Two modes:
+                    #
+                    #   use_ot_pretrain=True  – W2 OT plan via POT (Tong et al. 2023).
+                    #                          Applies every epoch and to all RF phases.
+                    #                          Works for both conditional and unconditional bridges.
+                    #
+                    #   use_conditional_bridge=True, use_ot_pretrain=False
+                    #                        – Cheap random-projection sorting fallback.
+                    #                          Only applied in phase i=0 (sufficient for RF=0).
+                    #
+                    # Without any pairing + conditional=True, independent sampling causes
+                    # the model to learn v ≈ (yt-y0)/t, which equals 0 at yt=y0 (ODE start).
+                    if use_ot and ot_sampler is not None:
+                        with torch.no_grad():
+                            x0, x1 = ot_sampler.sample_plan(x0, x1)
+                            y0, y1 = ot_sampler.sample_plan(y0, y1)
+                    elif conditional and i == 0:
+                        with torch.no_grad():
+                            x0, x1 = self._ot_pair(x0, x1)
+                            y0, y1 = self._ot_pair(y0, y1)
 
                     # Sample random time and interpolate to get (x_t, y_t) representing μ_t and ν_t
                     t = trainer.flow_matching.random_time(batch_size, device)
@@ -165,18 +386,18 @@ class StandardMethod(Method):
                     mu_optimizer.zero_grad()
                     nu_optimizer.zero_grad()
 
-                    ut = mu_model(t, xt)
+                    ut = self._bridge_call(mu_model, t, xt, x0, conditional)
                     ut_true = trainer.flow_matching.vector_field(
-                        xt, t, x0, x1, extend=False, noisy=self.use_noisy_field#sigma > 0
+                        xt, t, x0, x1, extend=False, noisy=self.use_noisy_field
                     )
                     loss_mu = loss_fn(ut, ut_true)
                     loss_mu.backward()
                     nn.utils.clip_grad_norm_(mu_model.parameters(), max_norm=1.0)
                     mu_optimizer.step()
 
-                    vt = nu_model(t, yt)
+                    vt = self._bridge_call(nu_model, t, yt, y0, conditional)
                     vt_true = trainer.flow_matching.vector_field(
-                        yt, t, y0, y1, extend=False, noisy=self.use_noisy_field#sigma > 0
+                        yt, t, y0, y1, extend=False, noisy=self.use_noisy_field
                     )
                     loss_nu = loss_fn(vt, vt_true)
                     loss_nu.backward()
@@ -341,11 +562,13 @@ class StandardMethod(Method):
             x, y = x.to(device), y.to(device)
 
             # Sample marginals at time t, (x_mu, y_nu) ~ (μ_t, ν_t)
-            x_mu, y_nu = self._sample_marginals(trainer, t_tensor, backward, batch_size, device)
+            # x0/y0 are the un-interpolated starting points used by conditional bridges.
+            x_mu, y_nu, x0_bridge, y0_bridge = self._sample_marginals(trainer, t_tensor, backward, batch_size, device)
+            conditional = x0_bridge is not None
 
             with torch.no_grad():
-                u_t = mu_model(t_tensor, x_mu)
-                v_t = nu_model(t_tensor, y_nu)
+                u_t = self._bridge_call(mu_model, t_tensor, x_mu, x0_bridge, conditional)
+                v_t = self._bridge_call(nu_model, t_tensor, y_nu, y0_bridge, conditional)
 
             x, y = x.requires_grad_(True), y.requires_grad_(True)
             x_mu, y_nu = x_mu.requires_grad_(True), y_nu.requires_grad_(True)
@@ -477,20 +700,22 @@ class StandardMethod(Method):
         )
 
     def _sample_marginals(self, trainer: Trainer, t_tensor, backward, batch_size, device):
-        """Return (x_mu, y_nu) samples representing μ_t and ν_t."""
-        x_mu = trainer.flow_matching.interpolate(
-            trainer.initial_coupling.sample_init(batch_size).to(device),
-            trainer.new_source.sample(batch_size).to(device),
-            t_tensor,
-            sigma=trainer._sigma,
-        )
-        y_nu = trainer.flow_matching.interpolate(
-            trainer.initial_coupling.sample_target(batch_size).to(device),
-            trainer.new_target.sample(batch_size).to(device),
-            t_tensor,
-            sigma=trainer._sigma,
-        )
-        return x_mu, y_nu
+        """Return (x_mu, y_nu, x0, y0) samples representing μ_t and ν_t.
+
+        x0 / y0 are the un-interpolated starting points; they are needed when
+        use_conditional_bridge=True so the bridge can be called as model(t, xt, x0).
+        They are returned as None when conditional bridges are not in use.
+        """
+        conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
+        x0 = trainer.initial_coupling.sample_init(batch_size).to(device)
+        x1 = trainer.new_source.sample(batch_size).to(device)
+        y0 = trainer.initial_coupling.sample_target(batch_size).to(device)
+        y1 = trainer.new_target.sample(batch_size).to(device)
+        x_mu = trainer.flow_matching.interpolate(x0, x1, t_tensor, sigma=trainer._sigma)
+        y_nu = trainer.flow_matching.interpolate(y0, y1, t_tensor, sigma=trainer._sigma)
+        if conditional:
+            return x_mu, y_nu, x0, y0
+        return x_mu, y_nu, None, None
 
     def _interpolate(self, initial_dist, final_dist, trainer, batch_size, t_tensor, sigma, device):
         """Helper to interpolate between two distributions."""
