@@ -282,7 +282,7 @@ class StandardMethod(Method):
     def _pretrain_bridges(self, trainer: Trainer, retrain: bool = True, save: str = None) -> None:
         """Train (or load) mu/nu bridge models for marginal flow matching."""
         sigma = trainer._sigma
-        batch_size = trainer.config.batch_size
+        batch_size = trainer.config.batch_size if not self.config.use_ot_pretrain else min(trainer.config.batch_size, 512)
         device = trainer.device
         loss_fn = nn.MSELoss()
         conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)

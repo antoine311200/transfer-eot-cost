@@ -384,7 +384,7 @@ def _swiss_roll(output_root: str) -> ExperimentSpec:
     new_tgt = _TransportedDist(new_src, transport_map)
 
     train_cfg  = _default_train_cfg(device)
-    train_cfg.marginal_epochs    = 25_000          # continuous manifold needs more bridge training than GMM
+    train_cfg.marginal_epochs    = 2_000          # continuous manifold needs more bridge training than GMM
     train_cfg.num_rectified_flow = 2               # extra rectification for curved roll geometry
     train_cfg.pretrain_epochs    = 8_000
     train_cfg.dual_epochs        = 150
@@ -396,7 +396,7 @@ def _swiss_roll(output_root: str) -> ExperimentSpec:
     model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128, num_layers=3, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
-        show_each_marginal=1000, show_each_pretrain=1000,
+        show_each_marginal=100, show_each_pretrain=1000,
         camera_elev=38, camera_azim=30,   # top-ish view to see roll structure
     )
 
@@ -456,7 +456,7 @@ def _helices(output_root: str) -> ExperimentSpec:
     model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, num_layers=3, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
-        show_each_marginal=1000, show_each_pretrain=1000,
+        show_each_marginal=100, show_each_pretrain=1000,
         camera_elev=18, camera_azim=30,   # side view to appreciate helical structure (linear T, 64 sufficient)
     )
 
@@ -507,7 +507,7 @@ def _sphere_twist_exp(output_root: str) -> ExperimentSpec:
     new_tgt = _TransportedDist(new_src, transport_map)
 
     train_cfg  = _default_train_cfg(device)
-    train_cfg.marginal_epochs    = 30_000          # latitude-dependent twist is the hardest bridge learning task
+    train_cfg.marginal_epochs    = 3_000          # latitude-dependent twist is the hardest bridge learning task
     train_cfg.num_rectified_flow = 3               # nonlinear twist requires the most trajectory straightening
     train_cfg.pretrain_epochs    = 10_000
     train_cfg.dual_epochs        = 200
@@ -523,7 +523,7 @@ def _sphere_twist_exp(output_root: str) -> ExperimentSpec:
     model_cfg  = FeedForwardConfig(dimension=3, hidden_size=256, num_layers=4, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
-        show_each_marginal=1000, show_each_pretrain=1000,
+        show_each_marginal=100, show_each_pretrain=1000,
         camera_elev=28, camera_azim=20,
     )
 
@@ -583,7 +583,7 @@ def _rings_to_helix(output_root: str) -> ExperimentSpec:
         return torch.stack([y[:, 0], y[:, 1], torch.zeros_like(y[:, 2])], dim=1)
 
     train_cfg  = _default_train_cfg(device)
-    train_cfg.marginal_epochs    = 25_000          # 40-blob GMM with tiny blob_scale=0.07 needs long bridge training
+    train_cfg.marginal_epochs    = 2_000          # 40-blob GMM with tiny blob_scale=0.07 needs long bridge training
     train_cfg.num_rectified_flow = 2
     train_cfg.pretrain_epochs    = 8_000
     train_cfg.dual_epochs        = 150
@@ -599,7 +599,7 @@ def _rings_to_helix(output_root: str) -> ExperimentSpec:
     model_cfg  = FeedForwardConfig(dimension=3, hidden_size=256, num_layers=4, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
-        show_each_marginal=1000, show_each_pretrain=1000,
+        show_each_marginal=100, show_each_pretrain=1000,
         camera_elev=25, camera_azim=15,   # see both z-lift and ring structure
     )
 

@@ -192,14 +192,14 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
         dataset_size             = 500_000,
-        marginal_epochs          = 20_000,
+        marginal_epochs          = 2_000,
         pretrain_epochs          = 5_000,
         dual_epochs              = 100,
         cfm_epochs               = 500,
         advance_steps            = 100,
         iterations               = 50,
         num_rectified_flow       = 0,
-        scale_factor             = 10,
+        scale_factor             = 50,
         batch_size               = 2_048 * 8,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
@@ -208,13 +208,13 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma           = 0.01,
-        sigma2          = 0.01,
+        sigma           = 0.1,
+        sigma2          = 0.1,
         loss            = "weighted",
         l2_reg          = 1e-2,
-        lip_reg         = 1,
+        lip_reg         = 1.0,
         mean_reg        = 0,
-        use_noisy_field    = False,
+        use_noisy_field    = True,
         particle_ratio     = 0.25,
         lr_cosine_decay    = False,
         lr_min_factor      = 0.4,   # 0.1 was too aggressive: flow ran at 1e-4 every iteration
@@ -262,10 +262,14 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     transport_map, inverse_transport_map = _make_transport_maps(90.0, perturbed)
 
     train_cfg  = _default_train_cfg(device)
-    train_cfg.marginal_epochs = 10_000          # 2-blob reference is simple; 20k is overkill
+    train_cfg.marginal_epochs = 2_000          # 2-blob reference is simple; 20k is overkill
+    train_cfg.iterations     = 100              # complex needs more iterations than simple
+    train_cfg.pretrain_epochs = 8_000           # larger flow pretraining for 5-blob cross with 6.7× scale jump
+    train_cfg.dual_epochs    = 150
     method_cfg = _default_method_cfg()
-    model_cfg  = default_model_cfg(dimension=3, hidden_size=64, num_layers=3)   # 128 is oversized for 2→3 blobs
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
+    method_cfg.dual_warmup_epochs = 50         # warm-start duals for hard geometry
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=256, num_layers=4)   # 128 is oversized for 2→3 blobs
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"3d_simple{'_perturbed' if perturbed else ''}",
@@ -317,12 +321,12 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     transport_map, inverse_transport_map = _make_transport_maps(120.0, perturbed)
 
     train_cfg  = _default_train_cfg(device)
-    train_cfg.marginal_epochs    = 15_000       # 3→4 blob case benefits from more bridge training
+    train_cfg.marginal_epochs    = 2_000       # 3→4 blob case benefits from more bridge training
     # train_cfg.num_rectified_flow = 1            # extra rectification pass improves trajectory straightness
     method_cfg = _default_method_cfg()
     method_cfg.dual_warmup_epochs = 50          # warm-start duals for 4-blob target
-    model_cfg  = default_model_cfg(dimension=3, hidden_size=64, num_layers=3)
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=256, num_layers=4)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"3d_medium{'_perturbed' if perturbed else ''}",
@@ -386,8 +390,8 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     method_cfg.dual_warmup_epochs = 100            # larger warmup for hardest 3D geometry
     method_cfg.lip_reg           = 15              # stronger Lipschitz for 6-blob hexagonal potential
     method_cfg.particle_ratio    = 0.35            # more particle mixing for complex multi-mode case
-    model_cfg  = default_model_cfg(dimension=3, hidden_size=128, num_layers=4)  # deeper for 6-blob hexagon
-    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=256, num_layers=4)  # deeper for 6-blob hexagon
+    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"3d_complex{'_perturbed' if perturbed else ''}",

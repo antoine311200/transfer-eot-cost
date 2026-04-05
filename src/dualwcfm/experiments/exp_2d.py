@@ -51,7 +51,7 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
         iterations               = 50,
         num_rectified_flow       = 0,
         scale_factor             = 50,
-        batch_size               = 256 * 4,
+        batch_size               = 2048 * 4,
         coupling_chunk_size      = 100_000,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
@@ -128,12 +128,12 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     inverse_transport_map = transport_map
 
     train_cfg  = _default_train_cfg(device)
-    train_cfg.marginal_epochs    = 5_000   # linear transport converges fast; fewer phases needed
+    train_cfg.marginal_epochs    = 2_000   # linear transport converges fast; fewer phases needed
     # train_cfg.num_rectified_flow = 1       # one rectification pass is sufficient for a linear map
     method_cfg = _default_method_cfg()
     method_cfg.sigma = 0.03                # blobs are narrow (std=0.5) and far apart (loc=10); small σ avoids over-spreading
     model_cfg  = _default_model_cfg()
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"2d_simple{'_perturbed' if perturbed else ''}",
@@ -196,7 +196,7 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg.iterations   = 100
     method_cfg             = _default_method_cfg()
     model_cfg              = _default_model_cfg(hidden_size=64)   # 4-blob target needs more capacity than simple
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=1000, show_each_pretrain=1000)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"2d_medium{'_perturbed' if perturbed else ''}",
@@ -260,8 +260,6 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg.dual_epochs    = 150              # duals need more steps for complex geometry
     train_cfg.scale_factor   = 30              # blobs at r1=10; scale_factor=50 over-normalises
     method_cfg               = _default_method_cfg()
-    method_cfg.sigma         = 0.005           # blob_scale/scale_factor = 0.15/30 = 0.005; default 0.1 is 20× too large
-    method_cfg.sigma2        = 0.005           # same reasoning for the s-time interpolation
     method_cfg.l2_reg        = 5e-3            # less dual potential regularisation for complex geometry
     method_cfg.lip_reg       = 1.0             # stronger Lipschitz stability for large scale jumps
     method_cfg.particle_ratio = 0.2            # more particle mixing for 5-blob cross

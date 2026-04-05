@@ -40,8 +40,8 @@ class ScaledDistribution(Distribution):
         """Multiply a tensor by scale (normalized → raw)."""
         return x * self.scale
 
-    def clone(self) -> ScaledDistribution:
-        return self.base.clone()
+    def clone(self) -> "ScaledDistribution":
+        return ScaledDistribution(self.base.clone(), self.scale)
 
 class ScaledCouplingDistribution(CouplingDistribution):
     """Wraps a CouplingDistribution, dividing samples by `scale` (normalization).
