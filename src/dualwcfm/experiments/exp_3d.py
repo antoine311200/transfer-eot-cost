@@ -9,11 +9,20 @@ by θ° applied to Gaussian blobs at positions S₀.  The new source μ' and
 new target ν' live at *different* 3-D positions S₁ and follow the **same**
 rotation dynamic.
 
+Critical design rule
+--------------------
+The reference coupling MUST have the **same number of modes** as the new
+distributions.  An unconditional flow matching bridge can only learn a
+deterministic velocity field v(t, y_t); with N_ref < N_new it would need
+to "split" one source blob into multiple target blobs — impossible for a
+deterministic map.  OT mini-batch pairing then provides clean 1-to-1 mode
+assignments.
+
 Experiments
 -----------
-simple  – 90° z-rotation of a 2-blob GMM → generalised to a 3-blob GMM
-medium  – 120° z-rotation of an equilateral-triangle GMM → 4-blob rectangle
-complex – 60° z-rotation of a 4-blob square → 6-blob hexagonal pattern
+simple  – 90° z-rotation of a 3-blob GMM → generalised to a 3-blob GMM
+medium  – 120° z-rotation of a 4-blob GMM → 4-blob rectangle
+complex – 60° z-rotation of a 6-blob hexagonal GMM → 6-blob hexagonal pattern
 
 Each experiment exists in a *standard* and *perturbed* variant.  The perturbed
 variant adds an extra 30° tilt around the x-axis on the new target, probing
@@ -219,6 +228,9 @@ def _default_method_cfg() -> MixtureConfig:
         lr_cosine_decay    = False,
         lr_min_factor      = 0.4,   # 0.1 was too aggressive: flow ran at 1e-4 every iteration
         dual_warmup_epochs = 0,
+        use_ot_pretrain=True #(default): OT pairing gives each sample a consistent
+        # (y0, y1) assignment so the conditional bridge model can learn per-sample
+        # transport rather than the dataset mean velocity.
     )
 
 def default_model_cfg(dimension: int = 3, hidden_size: int = 64, num_layers: int = 3) -> FeedForwardConfig:
@@ -231,25 +243,37 @@ def default_model_cfg(dimension: int = 3, hidden_size: int = 64, num_layers: int
         mu_learning_rate=1e-3,
         dual_learning_rate=1e-3,
         dual_l2_reg=1e-3,
+        # 3D reference couplings always have fewer modes than the new distributions
+        # (2→3, 3→4, 4→6 blobs across simple/medium/complex).  An unconditional
+        # bridge with independent (y0,y1) sampling can only learn the mean velocity
+        # E[y1-y0] — it cannot split blobs.  With use_conditional_bridge=True the
+        # model receives cat([yt, y0]) so OT-assigned starting points determine
+        # which target blob each particle goes to.  The architecture fix in base.py
+        # ensures bridge MLPs are built with bridge_dim=2*dim input from the start.
+        use_conditional_bridge=True,
     )
 
 
 # ---------------------------------------------------------------------------
-# simple – 90° z-rotation, 2 blobs → 3 blobs
+# simple – 90° z-rotation, 3 blobs → 3 blobs
 # ---------------------------------------------------------------------------
 
 def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
-    """90° z-rotation on 2 source blobs generalised to 3 new blobs.
+    """90° z-rotation on 3 source blobs generalised to 3 new blobs.
 
     Reference coupling
-        2 blobs at [±1.5, 0, 0], transport = R_z(90°).
+        3 blobs with slight y-offset: [[1.5,±0.5,0], [-1.5,0,0]].
+        The y-offset breaks the x-axis symmetry so that R_z(90°) maps each
+        ref_src blob to a *distinct* ref_tgt position, giving OT a clean
+        1-to-1 assignment.
+        ref_tgt = R_z(90°) → [[-0.5,1.5,0], [0.5,1.5,0], [0,-1.5,0]]
     New marginals
         3 blobs at different 3-D positions;  target = R_z(90°) of source
         (+ R_x(30°) extra tilt if perturbed).
     """
     device   = get_device()
-    ref_src  = [[-1.5, 0.0, 0.0], [1.5, 0.0, 0.0]]
-    ref_tgt  = _rot_z(ref_src, 90.0)
+    ref_src  = [[1.5, 0.5, 0.0], [1.5, -0.5, 0.0], [-1.5, 0.0, 0.0]]
+    ref_tgt  = _rot_z(ref_src, 90.0)   # → [[-0.5,1.5,0],[0.5,1.5,0],[0,-1.5,0]]
     coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.25, device=device)
 
     new_src_c = [[3.0, 1.0, 1.0], [3.0, -1.0, 1.0], [-3.0, 0.0, 1.0]]
@@ -268,7 +292,7 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg.dual_epochs    = 150
     method_cfg = _default_method_cfg()
     method_cfg.dual_warmup_epochs = 50         # warm-start duals for hard geometry
-    model_cfg  = default_model_cfg(dimension=3, hidden_size=256, num_layers=4)   # 128 is oversized for 2→3 blobs
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=128, num_layers=4)   # 128 is oversized for 2→3 blobs
     vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
@@ -288,25 +312,26 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
 
 
 # ---------------------------------------------------------------------------
-# medium – 120° z-rotation, equilateral triangle → 4-blob rectangle
+# medium – 120° z-rotation, 4 blobs → 4 blobs
 # ---------------------------------------------------------------------------
 
 def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
-    """120° z-rotation on an equilateral-triangle GMM generalised to a 4-blob GMM.
+    """120° z-rotation on a 4-blob rectangular GMM generalised to a 4-blob GMM.
 
     Reference coupling
-        3 blobs at the vertices of an equilateral triangle (r=2), transport = R_z(120°)
-        so that each vertex maps to the next (v₀→v₁→v₂→v₀).
+        4 blobs at [±2, ±1, 0] (small rectangle), transport = R_z(120°).
+        Rectangle aspect ratio 2:1 ensures all 4 blobs are distinct under
+        R_z(120°), giving OT a clean 1-to-1 assignment (no symmetric degeneracy).
     New marginals
         4-blob rectangle at [±4, ±2, 1];  target = R_z(120°) of source
         (+ R_x(30°) if perturbed).
     """
     device = get_device()
-    r      = 2.0
     ref_src = [
-        [r, 0.0, 0.0],
-        [r * math.cos(2 * math.pi / 3), r * math.sin(2 * math.pi / 3), 0.0],
-        [r * math.cos(4 * math.pi / 3), r * math.sin(4 * math.pi / 3), 0.0],
+        [ 2.0,  1.0, 0.0],
+        [ 2.0, -1.0, 0.0],
+        [-2.0,  1.0, 0.0],
+        [-2.0, -1.0, 0.0],
     ]
     ref_tgt  = _rot_z(ref_src, 120.0)
     coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.3, device=device)
@@ -345,25 +370,27 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
 
 
 # ---------------------------------------------------------------------------
-# complex – 60° z-rotation, 4-blob square → 6-blob hexagon
+# complex – 60° z-rotation, 6-blob hexagon → 6-blob hexagon
 # ---------------------------------------------------------------------------
 
 def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
-    """60° z-rotation on a 4-blob square generalised to a 6-blob hexagonal pattern.
+    """60° z-rotation on a 6-blob hexagonal GMM generalised to a larger hexagonal pattern.
 
     Reference coupling
-        4-blob axis-aligned square at r=2 in the z=0 plane, transport = R_z(60°).
+        6-blob hexagon at r=1.5 in the z=0 plane, transport = R_z(60°).
+        Under a 60° rotation a regular hexagon maps each vertex to the next,
+        giving a clean 1-to-1 OT assignment.
     New marginals
         6-blob hexagon at r=4 in the z=2 plane;  target = R_z(60°) of source
         (+ R_x(30°) if perturbed).
     """
     device = get_device()
-    r0     = 2.0
+    r0     = 1.5
     ref_src = [
-        [ r0,  0.0, 0.0], [0.0,  r0, 0.0],
-        [-r0,  0.0, 0.0], [0.0, -r0, 0.0],
+        [r0 * math.cos(k * math.pi / 3), r0 * math.sin(k * math.pi / 3), 0.0]
+        for k in range(6)
     ]
-    ref_tgt  = _rot_z(ref_src, 60.0)
+    ref_tgt  = _rot_z(ref_src, 60.0)   # maps vertex k → vertex k+1 (mod 6)
     coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.25, device=device)
 
     r1, z1 = 4.0, 2.0

@@ -387,8 +387,14 @@ class StandardMethod(Method):
                     nu_optimizer.zero_grad()
 
                     ut = self._bridge_call(mu_model, t, xt, x0, conditional)
+                    # Bridge pretrain uses plain flow matching (noisy=False) regardless of
+                    # self.use_noisy_field.  The noisy correction term (1-2t)/(2t(1-t))*sigma*noise
+                    # has std ≈ sigma_normalized / (2*sqrt(eps)) near t=0, which can equal or exceed
+                    # the drift x1-x0 when normalized data spans small coordinates (e.g. 3D with
+                    # scale_factor=50).  The result is SNR ≈ 1:1, making the bridge fail to converge.
+                    # The score correction is only meaningful for the main SDE-based CFM training.
                     ut_true = trainer.flow_matching.vector_field(
-                        xt, t, x0, x1, extend=False, noisy=self.use_noisy_field
+                        xt, t, x0, x1, extend=False, noisy=False
                     )
                     loss_mu = loss_fn(ut, ut_true)
                     loss_mu.backward()
@@ -397,7 +403,7 @@ class StandardMethod(Method):
 
                     vt = self._bridge_call(nu_model, t, yt, y0, conditional)
                     vt_true = trainer.flow_matching.vector_field(
-                        yt, t, y0, y1, extend=False, noisy=self.use_noisy_field
+                        yt, t, y0, y1, extend=False, noisy=False
                     )
                     loss_nu = loss_fn(vt, vt_true)
                     loss_nu.backward()
@@ -806,25 +812,33 @@ class StandardMethod(Method):
 
         trainer.visualizer.at_flow_matching_end(iteration, trainer, flow_ctx, start_ctx)
 
-        # Transport cost diagnostic — always evaluate on new marginal samples so
-        # that T(x) is well-defined and the metric tracks adaptation progress.
+        # Map-error diagnostic — same metric as map_err_fwd / map_err_bwd in W&B.
+        # Evaluates sqrt(E[||T(x) - y_hat||²]) or sqrt(E[||T^{-1}(y) - x_hat||²])
+        # in original (denormalized) coordinates on new-marginal samples.
         n_diag = 10000 if not is_image else min(256, batch_size)
-        if backward:
-            xt_tc = trainer.new_target.sample(n_diag).to(device)
-        else:
-            xt_tc = trainer.new_source.sample(n_diag).to(device)
-
-        model.eval()
-        _evolved = trainer.flow_matching.evolve(xt_tc, model, num_steps=100, sigma=trainer._sigma, extend=True)
-        yt = (
-            _evolved[:, : xt_tc.shape[1], :, :]
-            if is_image_tensor(xt_tc)
-            else _evolved[:, : trainer.strategy.config.dimension]
+        direction = "backward" if backward else "forward"
+        transport_fn = (
+            getattr(trainer.visualizer, "_inverse_transport_map", None)
+            if backward
+            else getattr(trainer.visualizer, "_transport_map", None)
         )
-        transport_cost = trainer.visualizer.transport_cost(xt_tc.cpu(), yt.cpu())
-        if transport_cost is not None:
-            cost_flat = transport_cost.view(transport_cost.shape[0], -1)
-            logger.info(f"Cost error {torch.norm(cost_flat, dim=1).mean().item():.6f}")
+        if transport_fn is not None:
+            from dualwcfm.metrics import map_error as _map_err
+            s = trainer.scale
+            if backward:
+                xt_diag = trainer.new_target.sample(n_diag).to(device)
+            else:
+                xt_diag = trainer.new_source.sample(n_diag).to(device)
+            model.eval()
+            _evolved = trainer.flow_matching.evolve(xt_diag, model, num_steps=100, sigma=trainer._sigma, extend=True)
+            dim = trainer.strategy.config.dimension
+            yt_diag = (
+                _evolved[:, : xt_diag.shape[1], :, :]
+                if is_image_tensor(xt_diag)
+                else _evolved[:, :dim]
+            )
+            err = _map_err((xt_diag * s).cpu(), (yt_diag * s).cpu(), transport_fn)
+            logger.info(f"Map error ({direction}): {err:.6f}")
 
     # ------------------------------------------------------------------
     # Advance step (postprocess)
