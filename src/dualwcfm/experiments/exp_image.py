@@ -131,7 +131,7 @@ class BidirectionalUnetStrategy(BidirectionalStrategy):
     ``(C, H, W)`` tuple set by the caller before ``_create_models`` is invoked.
     """
 
-    def _create_models(self, dim: int, hidden_size: int) -> None:  # noqa: D102
+    def _create_models(self, dim: int, hidden_size: int, num_layers: int = 2) -> None:  # noqa: D102
         self._device = None  # Reset so the next to_device() call moves the new models.
         C, H, W = self.config.image_shape
         num_channels   = hidden_size if hidden_size > 0 else _NUM_CHANNELS

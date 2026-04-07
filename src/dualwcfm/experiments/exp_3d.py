@@ -272,8 +272,10 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
         (+ R_x(30°) extra tilt if perturbed).
     """
     device   = get_device()
-    ref_src  = [[1.5, 0.5, 0.0], [1.5, -0.5, 0.0], [-1.5, 0.0, 0.0]]
-    ref_tgt  = _rot_z(ref_src, 90.0)   # → [[-0.5,1.5,0],[0.5,1.5,0],[0,-1.5,0]]
+    # y-offset ±1.0 matches new_src's ±1.0 offset → same blob separation ratio (8σ).
+    # ±0.5 gave only 4σ separation, causing OT cross-assignment and mode drift over epochs.
+    ref_src  = [[1.5, 1.0, 0.0], [1.5, -1.0, 0.0], [-1.5, 0.0, 0.0]]
+    ref_tgt  = _rot_z(ref_src, 90.0)   # → [[-1.0,1.5,0],[1.0,1.5,0],[0,-1.5,0]]
     coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.25, device=device)
 
     new_src_c = [[3.0, 1.0, 1.0], [3.0, -1.0, 1.0], [-3.0, 0.0, 1.0]]
