@@ -171,6 +171,15 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Random seeds.  Multiple seeds run each combo N times and "
                         "aggregate metrics (mean ± std).  (default: 0)")
 
+    # ── Checkpointing ──────────────────────────────────────────────────
+    ck = p.add_argument_group("checkpointing")
+    ck.add_argument("--checkpoint-every", type=int, default=0, metavar="N",
+                    help="Save model (and coupling) checkpoints every N iterations, "
+                         "plus the first and last iteration.  0 = disabled (default).")
+    ck.add_argument("--checkpoint-coupling", action="store_true",
+                    help="Also checkpoint the coupling dataset at each checkpoint iteration "
+                         "(can be large; disabled by default).")
+
     return p
 
 
@@ -693,6 +702,14 @@ def main() -> None:
         )
 
     logger.info("Selected experiments: %s", [s.name for s in all_specs])
+
+    # Apply checkpoint settings to all specs
+    if args.checkpoint_every > 0:
+        for spec in all_specs:
+            spec.train_cfg.save_model_checkpoints  = True
+            spec.train_cfg.checkpoint_every        = args.checkpoint_every
+            if args.checkpoint_coupling:
+                spec.train_cfg.save_coupling_checkpoints = True
 
     combos = _build_grid(args)
     logger.info("Grid: %d combinations", len(combos))

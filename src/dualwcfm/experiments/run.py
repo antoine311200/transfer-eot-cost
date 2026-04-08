@@ -120,6 +120,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-save-models", action="store_false", dest="save_models",
         help="Do not write model checkpoints to disk.",
     )
+    train.add_argument(
+        "--checkpoint-every", type=int, default=0, dest="checkpoint_every", metavar="N",
+        help=(
+            "Save model checkpoints every N iterations, plus the first and last. "
+            "0 = disabled (default)."
+        ),
+    )
+    train.add_argument(
+        "--checkpoint-coupling", action="store_true", dest="checkpoint_coupling",
+        help="Also checkpoint the coupling dataset at each checkpoint iteration (can be large).",
+    )
 
     # ── Ablation ─────────────────────────────────────────────────────────────
     abl = parser.add_argument_group("ablation study")
@@ -331,11 +342,16 @@ def main() -> None:
 
 
 def _apply_train_overrides(spec, args: argparse.Namespace) -> None:
-    """Apply CLI training overrides (iterations, batch_size) to *spec* in place."""
+    """Apply CLI training overrides (iterations, batch_size, checkpointing) to *spec* in place."""
     if args.iterations is not None:
         spec.train_cfg.iterations = args.iterations
     if args.batch_size is not None:
         spec.train_cfg.batch_size = args.batch_size
+    if args.checkpoint_every > 0:
+        spec.train_cfg.save_model_checkpoints   = True
+        spec.train_cfg.checkpoint_every         = args.checkpoint_every
+        if args.checkpoint_coupling:
+            spec.train_cfg.save_coupling_checkpoints = True
 
 
 def _run_ablation(args: argparse.Namespace, base_specs) -> None:

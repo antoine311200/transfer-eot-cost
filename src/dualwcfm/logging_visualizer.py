@@ -147,7 +147,9 @@ class _LoggingMixin:
 
         device = trainer.device
         n = min(n_samples, trainer.config.batch_size)
-        t = time_step / trainer.config.iterations
+        # step_postprocess has already advanced the coupling to (time_step+1)/N,
+        # so mu_t / nu_t must be evaluated at the same interpolation time.
+        t = (time_step + 1) / trainer.config.iterations
         t_tensor = torch.full((n, 1), t, device=device)
         s = trainer.scale
 

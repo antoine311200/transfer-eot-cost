@@ -181,7 +181,13 @@ class Trainer:
             self.method.step_postprocess(self, iteration, ctx)
 
             if save_checkpoints and (self.config.save_coupling_checkpoints or self.config.save_model_checkpoints):
-                self._save_iteration_checkpoint(iteration, save_checkpoints)
+                n = self.config.checkpoint_every
+                if n > 0:
+                    is_first = iteration == 0
+                    is_last  = iteration == self.config.iterations - 1
+                    is_nth   = (iteration + 1) % n == 0
+                    if is_first or is_last or is_nth:
+                        self._save_iteration_checkpoint(iteration, save_checkpoints)
 
             self.visualizer.display(iteration, self)
             distances = self.visualizer.analyse(iteration, self)

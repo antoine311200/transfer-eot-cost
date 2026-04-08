@@ -31,10 +31,12 @@ class TrainingConfig:
     coupling_save_dir: Optional[str] = None  # Directory for disk coupling (None = temp dir)
     coupling_chunk_size: int = 256  # Samples per chunk file
 
-    # Checkpointing: save state at every iteration for later visualization / analysis.
+    # Checkpointing: save state periodically for later visualization / analysis.
     # Files land in <model_dir>/checkpoints/coupling/  and  <model_dir>/checkpoints/models/
-    save_coupling_checkpoints: bool = False  # Save coupling dataset after each advance step
-    save_model_checkpoints: bool = False     # Save CFM forward/backward weights after each iteration
+    save_coupling_checkpoints: bool = False  # Save coupling dataset at checkpoint iterations
+    save_model_checkpoints: bool = False     # Save CFM forward/backward weights at checkpoint iterations
+    # checkpoint_every=0 → disabled, N → save at iter 0, every N-th iter, and the last iter
+    checkpoint_every: int = 1
 
     # Final model persistence: save all learned models at the end of training.
     save_final_models: bool = True  # Save forward/backward/bridges/duals after all iterations
