@@ -264,7 +264,7 @@ def _default_train_cfg_mnist(device: torch.device) -> TrainingConfig:
         scale_factor             = 1.0,
         batch_size               = 128,
         use_disk_coupling        = False,
-        coupling_chunk_size      = 256,
+        coupling_chunk_size      = 128,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
     )
@@ -273,7 +273,7 @@ def _default_train_cfg_mnist(device: torch.device) -> TrainingConfig:
 def _default_train_cfg_cifar(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 50_000,
+        dataset_size             = 2_000,
         marginal_epochs          = 5_000,
         pretrain_epochs          = 1_000,
         dual_epochs              = 100,
@@ -292,8 +292,8 @@ def _default_train_cfg_cifar(device: torch.device) -> TrainingConfig:
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma           = 0.1,
-        sigma2          = 0.1,
+        sigma           = 0.05,
+        sigma2          = 0.05,
         loss            = "weighted",
         l2_reg          = 1e-2,
         lip_reg         = 1.0,
@@ -302,7 +302,7 @@ def _default_method_cfg() -> MixtureConfig:
         particle_ratio  = 0.25,
         lr_cosine_decay = False,
         lr_min_factor   = 0.5,
-        dual_warmup_epochs = 1000,
+        dual_warmup_epochs = 100,
         use_ot_pretrain=True
     )
 

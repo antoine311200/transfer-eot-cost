@@ -204,7 +204,9 @@ class _LoggingMixin:
         # Ground-truth map errors — only compute for the direction trained this step.
         # For BidirectionalStrategy: skip fwd error on backward steps and vice versa
         # to avoid flat segments in W&B graphs from an untrained model.
-        n_map = min(n, 2_000)
+        # For image tensors, cap at 256 to keep ODE integration (200 steps × batch) fast.
+        _is_img = is_image_tensor(x)
+        n_map = min(n, 256 if _is_img else 2_000)
         fwd_model = getattr(trainer.strategy, "forward_model",  None)
         bwd_model = getattr(trainer.strategy, "backward_model", None)
 

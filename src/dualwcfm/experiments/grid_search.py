@@ -56,6 +56,7 @@ from dualwcfm.experiments.base import (
 )
 from dualwcfm.experiments.exp_2d import make_2d_experiments
 from dualwcfm.experiments.exp_3d import make_3d_experiments
+from dualwcfm.experiments.exp_color import make_color_experiments
 from dualwcfm.methods.mixture import MixtureConfig
 
 logger = logging.getLogger("dualwcfm")
@@ -93,7 +94,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ── Experiment selection ────────────────────────────────────────────
     sel = p.add_argument_group("experiment selection")
-    sel.add_argument("--mode",   choices=["2d", "3d"], default="2d",
+    sel.add_argument("--mode",   choices=["2d", "3d", "color"], default="2d",
                      help="Experiment catalogue to search.")
     sel.add_argument("--level", nargs="+", default=None, metavar="SUBSTR",
                      help="One or more substring filters on experiment name. "
@@ -678,7 +679,12 @@ def main() -> None:
     setup_logging()
 
     # ── Select experiments ───────────────────────────────────────────────
-    factory = make_2d_experiments if args.mode == "2d" else make_3d_experiments
+    if args.mode == "2d":
+        factory = make_2d_experiments
+    elif args.mode == "3d":
+        factory = make_3d_experiments
+    else:
+        factory = make_color_experiments
     all_specs = factory(args.output)
 
     # Filter by level substrings (any match)
