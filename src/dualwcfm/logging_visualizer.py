@@ -143,6 +143,10 @@ class _LoggingMixin:
 
     def analyse(self, time_step: int, trainer: "Trainer",
                 n_samples: int = 2000, n_proj: int = 2000) -> dict:
+        # For image experiments cap sample/projection counts to avoid prohibitive cost.
+        if trainer.config.image_shape is not None:
+            n_samples = min(n_samples, 256)
+            n_proj    = min(n_proj, 500)
         distances = super().analyse(time_step, trainer, n_samples, n_proj)  # type: ignore[misc]
 
         device = trainer.device
