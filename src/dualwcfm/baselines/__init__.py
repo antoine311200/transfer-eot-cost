@@ -10,6 +10,7 @@ pretrained -- DualWCFM pretrained-only (no dual-potential adaptation) — ablati
 dsb        -- Diffusion Schrödinger Bridge via IPF (De Bortoli et al., NeurIPS 2021)
 lightsb    -- LightSB via dual potentials + stochastic interpolant (Korotin et al., ICML 2023)
 metaot     -- Neural W₂-OT map via ICNN potential (inner loop of MetaOT, Amos et al., NeurIPS 2022)
+genot      -- GENOT: Generalized Neural OT via conditional flow on mini-batch plans (Bunne et al., NeurIPS 2023)
 table      -- Aggregate results into LaTeX / CSV comparison tables
 run        -- CLI entry point  (python -m dualwcfm.baselines.run --help)
 
@@ -30,6 +31,7 @@ from dualwcfm.baselines.pretrained import PretrainedOnlyRunner
 from dualwcfm.baselines.dsb      import DSBRunner, DSBConfig
 from dualwcfm.baselines.lightsb  import LightSBRunner, LightSBConfig
 from dualwcfm.baselines.metaot   import MetaOTRunner, MetaOTConfig
+from dualwcfm.baselines.genot    import GENOTRunner, GENOTConfig
 from dualwcfm.baselines.table    import build_comparison_table, build_all_tables
 
 __all__ = [
@@ -44,6 +46,7 @@ __all__ = [
     "DSBRunner",       "DSBConfig",
     "LightSBRunner",   "LightSBConfig",
     "MetaOTRunner",    "MetaOTConfig",
+    "GENOTRunner",     "GENOTConfig",
     # Tables
     "build_comparison_table",
     "build_all_tables",

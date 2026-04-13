@@ -54,7 +54,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── Experiment selection ─────────────────────────────────────────────────
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
-        "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color", "gushchin"],
+        "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color", "gushchin", "scalability"],
         help="Experiment mode.  Required unless --all is given.",
     )
     sel.add_argument(
@@ -66,8 +66,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     sel.add_argument(
+        "--dims", nargs="+", type=int, default=[16, 32, 64, 128],
+        metavar="D",
+        help="Dimensions for scalability experiments (default: 16 32 64 128).",
+    )
+    sel.add_argument(
         "--perturbed", action="store_true",
         help="Use the perturbed variant of the experiment.",
+    )
+    sel.add_argument(
+        "--no-perturbed", action="store_true", dest="no_perturbed",
+        help="Exclude perturbed variants (run only non-perturbed experiments).",
     )
     sel.add_argument(
         "--all", action="store_true", dest="run_all",
@@ -233,18 +242,19 @@ def _build_method_cfg(method_name: str, args: argparse.Namespace):
 # Helpers: filter catalogue
 # ---------------------------------------------------------------------------
 
-def _filter_catalogue(catalogue, level, perturbed):
-    """Return specs matching *level* / *perturbed* filters."""
+def _filter_catalogue(catalogue, level, perturbed, no_perturbed=False):
+    """Return specs matching *level* / *perturbed* / *no_perturbed* filters."""
     parts = []
     if level:
         parts.append(level)
     if perturbed:
         parts.append("perturbed")
 
-    if not parts:
-        return catalogue
+    matching = catalogue if not parts else [s for s in catalogue if all(p in s.name for p in parts)]
 
-    matching = [s for s in catalogue if all(p in s.name for p in parts)]
+    if no_perturbed:
+        matching = [s for s in matching if "perturbed" not in s.name]
+
     return matching
 
 
@@ -262,17 +272,21 @@ def main() -> None:
     from dualwcfm.experiments.exp_image         import make_image_experiments, make_image_experiments_v2
     from dualwcfm.experiments.exp_color         import make_color_experiments
     from dualwcfm.experiments.exp_gushchin      import make_gushchin_experiments
+    from dualwcfm.experiments.exp_scalability   import make_scalability_experiments
     from dualwcfm.experiments.base              import run_experiment
+
+    dims = tuple(getattr(args, "dims", [16, 32, 64, 128]))
 
     # ── Catalogue factory ────────────────────────────────────────────────────
     catalogue_factories = {
-        "2d":       make_2d_experiments,
-        "3d":       make_3d_experiments,
-        "manifold": make_3d_manifold_experiments,
-        "image":    make_image_experiments,
-        "image-v2": make_image_experiments_v2,
-        "color":    make_color_experiments,
-        "gushchin": make_gushchin_experiments,
+        "2d":          make_2d_experiments,
+        "3d":          make_3d_experiments,
+        "manifold":    make_3d_manifold_experiments,
+        "image":       make_image_experiments,
+        "image-v2":    make_image_experiments_v2,
+        "color":       make_color_experiments,
+        "gushchin":    make_gushchin_experiments,
+        "scalability": lambda out: make_scalability_experiments(out, dims=dims),
     }
 
     # ── Run everything ───────────────────────────────────────────────────────
@@ -307,7 +321,7 @@ def main() -> None:
         sys.exit(1)
 
     catalogue = catalogue_factories[args.mode](args.output)
-    matching  = _filter_catalogue(catalogue, args.level, args.perturbed)
+    matching  = _filter_catalogue(catalogue, args.level, args.perturbed, getattr(args, "no_perturbed", False))
 
     if not matching:
         print(

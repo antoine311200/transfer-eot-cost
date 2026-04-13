@@ -64,7 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
     bl = parser.add_argument_group("baseline")
     bl.add_argument(
         "--baseline",
-        choices=["otcfm", "cfm", "pretrained", "dsb", "lightsb", "metaot", "all"],
+        choices=["otcfm", "cfm", "pretrained", "dsb", "lightsb", "metaot", "genot", "all"],
         default="otcfm",
         help=(
             "otcfm=OT-paired CFM from scratch, "
@@ -73,6 +73,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "dsb=Diffusion Schrödinger Bridge (IPF), "
             "lightsb=LightSB (dual potentials + interpolant), "
             "metaot=Neural W2 OT via ICNN (MetaOT inner loop), "
+            "genot=GENOT conditional flow on mini-batch plans (Bunne et al.), "
             "all=run every applicable baseline."
         ),
     )
@@ -263,6 +264,27 @@ def _run_metaot(args, exp_specs) -> None:
         logger.info("  %s | metaot -> W2_nu=%.4f", exp_spec.name, metrics["W2_nu"])
 
 
+def _run_genot(args, exp_specs) -> None:
+    from dualwcfm.baselines.genot import GENOTRunner, GENOTConfig
+
+    eps = args.ot_eps if args.ot_eps > 0 else 0.1
+    for exp_spec in exp_specs:
+        bl_spec   = _baseline_spec_from_exp(exp_spec, "genot", args.output)
+        wandb_run = _make_wandb_run(args, exp_spec.name, "genot")
+
+        cfg = GENOTConfig(
+            eps     = eps,
+            n_steps = args.epochs    or 20_000,
+            batch   = args.batch_size or 512,
+            hidden  = args.hidden,
+            n_layers= args.n_layers,
+        )
+        runner  = GENOTRunner(bl_spec, config=cfg, wandb_run=wandb_run)
+        metrics = runner.run(output_root=args.output)
+        wandb_run.finish()
+        logger.info("  %s | genot -> W2_nu=%.4f", exp_spec.name, metrics["W2_nu"])
+
+
 def _run_pretrained(args, exp_specs) -> None:
     from dualwcfm.baselines.pretrained import PretrainedOnlyRunner
 
@@ -351,6 +373,8 @@ def main() -> None:
         _run_lightsb(args, matching)
     if args.baseline in ("metaot", "all"):
         _run_metaot(args, matching)
+    if args.baseline in ("genot", "all"):
+        _run_genot(args, matching)
 
     # Auto-generate one comparison table per available metric
     from dualwcfm.baselines.table import build_all_tables

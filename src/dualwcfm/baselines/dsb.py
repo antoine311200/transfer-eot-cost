@@ -79,16 +79,17 @@ class _DriftMLP(nn.Module):
 @dataclass
 class DSBConfig:
     """Hyperparameters for the DSB-IPF baseline."""
-    n_ipf_iters:     int   = 10      # number of full IPF iterations (fwd + bwd each)
-    n_steps_per_half: int  = 2_000   # gradient steps per half-bridge training
-    batch_size:      int   = 512
-    lr:              float = 1e-3
-    hidden:          int   = 256
-    n_layers:        int   = 4
-    sigma:           float = 0.0     # SDE noise; 0 = deterministic ODE bridge
-    n_sim_steps:     int   = 50      # Euler steps when simulating trajectories
-    n_sim_samples:   int   = 2_000   # samples kept in the replay buffer per half
-    euler_steps:     int   = 100     # steps at inference
+    n_ipf_iters:      int   = 20     # number of full IPF iterations (fwd + bwd each)
+    n_steps_per_half: int   = 5_000  # gradient steps per half-bridge training
+    buffer_refreshes: int   = 2      # re-simulate buffer this many times per half
+    batch_size:       int   = 512
+    lr:               float = 1e-3
+    hidden:           int   = 256
+    n_layers:         int   = 4
+    sigma:            float = 0.0    # SDE noise; 0 = deterministic ODE bridge
+    n_sim_steps:      int   = 100    # Euler steps when simulating trajectories
+    n_sim_samples:    int   = 4_000  # samples per simulation
+    euler_steps:      int   = 100    # steps at inference
 
 
 # ---------------------------------------------------------------------------
@@ -195,50 +196,60 @@ class DSBRunner(BaselineRunner):
 
     def _train_half(
         self,
-        model:     _DriftMLP,
-        X_t:       torch.Tensor,   # (M, d)  — midpoint samples
-        t_vals:    torch.Tensor,   # (M, 1)  — corresponding times
-        X_target:  torch.Tensor,   # (M, d)  — terminal / initial endpoint
-        toward_future: bool,       # True → regress on (X_T - X_t)/(1-t), False → (X_0-X_t)/t
-        label:     str,
+        model:        _DriftMLP,
+        simulate_fn,                # callable() → (X_t, t_vals, X_target)
+        toward_future: bool,        # True → regress on (X_1-X_t)/(1-t), False → (X_0-X_t)/t
+        label:        str,
     ) -> None:
-        """Run n_steps_per_half gradient steps regressing the drift on X_t→X_target."""
-        cfg    = self.config
-        M      = X_t.shape[0]
-        opt    = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+        """Run n_steps_per_half gradient steps regressing the drift on X_t→X_target.
+
+        The simulation buffer is re-generated ``buffer_refreshes`` times during
+        training so the model does not overfit to a single fixed batch of trajectories.
+        """
+        cfg       = self.config
+        opt       = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+        steps_per_segment = cfg.n_steps_per_half // max(1, cfg.buffer_refreshes)
+        total_steps = steps_per_segment * cfg.buffer_refreshes
         sched  = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt, T_max=cfg.n_steps_per_half, eta_min=cfg.lr * 0.1
+            opt, T_max=total_steps, eta_min=cfg.lr * 0.05
         )
-        log_every = max(1, cfg.n_steps_per_half // 10)
+        log_every = max(1, total_steps // 10)
+        global_step = 0
 
-        for step in range(cfg.n_steps_per_half):
-            idx = torch.randint(M, (cfg.batch_size,), device=X_t.device)
-            xt = X_t[idx]
-            tt = t_vals[idx].squeeze(1)          # (B,)
-            xt_end = X_target[idx]
+        for seg in range(cfg.buffer_refreshes):
+            # Fresh simulation for this segment
+            X_t, t_vals, X_target = simulate_fn()
+            M = X_t.shape[0]
 
-            if toward_future:
-                # target = (X_1 - X_t) / (1 - t)
-                denom = (1.0 - tt).clamp(min=1e-3).unsqueeze(1)
-                target = (xt_end - xt) / denom
-            else:
-                # target = (X_0 - X_t) / t
-                denom = tt.clamp(min=1e-3).unsqueeze(1)
-                target = (xt_end - xt) / denom
+            for step in range(steps_per_segment):
+                idx = torch.randint(M, (cfg.batch_size,), device=X_t.device)
+                xt     = X_t[idx]
+                tt     = t_vals[idx].squeeze(1)   # (B,)
+                xt_end = X_target[idx]
 
-            pred = model(tt, xt)
-            loss = (pred - target).pow(2).mean()
+                if toward_future:
+                    # target = (X_1 - X_t) / (1 - t)
+                    denom  = (1.0 - tt).clamp(min=1e-2).unsqueeze(1)
+                    target = (xt_end - xt) / denom
+                else:
+                    # target = (X_0 - X_t) / t
+                    denom  = tt.clamp(min=1e-2).unsqueeze(1)
+                    target = (xt_end - xt) / denom
 
-            opt.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
-            sched.step()
+                pred = model(tt, xt)
+                loss = (pred - target).pow(2).mean()
 
-            if (step + 1) % log_every == 0:
-                logger.debug("  [DSB %s] %s step %4d loss=%.5f",
-                             self.spec.name, label, step + 1, loss.item())
-                self._wandb.log({f"dsb/{label}_loss": loss.item()})
+                opt.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+                sched.step()
+                global_step += 1
+
+                if global_step % log_every == 0:
+                    logger.debug("  [DSB %s] %s step %4d loss=%.5f",
+                                 self.spec.name, label, global_step, loss.item())
+                    self._wandb.log({f"dsb/{label}_loss": loss.item()})
 
     # ------------------------------------------------------------------
     # BaselineRunner interface
@@ -276,16 +287,19 @@ class DSBRunner(BaselineRunner):
             logger.info("  [DSB] IPF iter %d/%d", k + 1, cfg.n_ipf_iters)
 
             # ── Backward half: simulate fwd → train bwd ────────────────
-            x0_buf = _to_tensor(self.spec.source.sample(cfg.n_sim_samples), device)
-            Xt_f, t_f, X0_f = self._simulate_forward(x0_buf, fwd)
-            self._train_half(bwd, Xt_f, t_f, X0_f,
-                             toward_future=False, label=f"bwd_k{k}")
+            # Lambda re-samples fresh source points on each buffer refresh
+            def _sim_bwd(fwd=fwd):
+                x0_buf = _to_tensor(self.spec.source.sample(cfg.n_sim_samples), device)
+                return self._simulate_forward(x0_buf, fwd)
+
+            self._train_half(bwd, _sim_bwd, toward_future=False, label=f"bwd_k{k}")
 
             # ── Forward half: simulate bwd → train fwd ─────────────────
-            x1_buf = _to_tensor(self.spec.target.sample(cfg.n_sim_samples), device)
-            Xt_b, t_b, X1_b = self._simulate_backward(x1_buf, bwd)
-            self._train_half(fwd, Xt_b, t_b, X1_b,
-                             toward_future=True,  label=f"fwd_k{k}")
+            def _sim_fwd(bwd=bwd):
+                x1_buf = _to_tensor(self.spec.target.sample(cfg.n_sim_samples), device)
+                return self._simulate_backward(x1_buf, bwd)
+
+            self._train_half(fwd, _sim_fwd, toward_future=True, label=f"fwd_k{k}")
 
         # Save both drifts
         torch.save(fwd.state_dict(), os.path.join(self.spec.output_dir, "dsb_fwd.pth"))

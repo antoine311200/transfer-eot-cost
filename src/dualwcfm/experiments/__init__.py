@@ -12,6 +12,7 @@ exp_image        – Image (MNIST / FashionMNIST) experiment catalogue
 exp_color        – Color-domain image transfer experiments (E5 — non-trivial cost)
 exp_gushchin     – Gushchin-style Gaussian EOT benchmark with BW₂ metric (E1)
 exp_ablations    – Pre-defined ablation suites (E7a-f)
+exp_scalability  – High-dimensional scalability experiments (anticorrelation in d=16–128)
 ablation         – AblationSuite + AblationRunner for paper-quality comparisons
 run              – CLI entry point  (python -m dualwcfm.experiments.run --help)
 """
@@ -23,6 +24,7 @@ from dualwcfm.experiments.exp_3d_manifold import make_3d_manifold_experiments
 from dualwcfm.experiments.exp_image import make_image_experiments
 from dualwcfm.experiments.exp_color import make_color_experiments
 from dualwcfm.experiments.exp_gushchin import make_gushchin_experiments
+from dualwcfm.experiments.exp_scalability import make_scalability_experiments
 from dualwcfm.experiments.exp_ablations import (
     make_all_ablation_suites,
     make_particle_ratio_ablation,
@@ -43,6 +45,7 @@ __all__ = [
     "make_image_experiments",
     "make_color_experiments",
     "make_gushchin_experiments",
+    "make_scalability_experiments",
     "make_all_ablation_suites",
     "make_particle_ratio_ablation",
     "make_sigma_ablation",

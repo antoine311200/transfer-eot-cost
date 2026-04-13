@@ -30,7 +30,7 @@ import torch
 
 from dualwcfm.config import FeedForwardConfig, TrainingConfig, VisualizeConfig
 from dualwcfm.distributions.coupling import FunctionalCouplingDistribution, RotatedShapeCoupling
-from dualwcfm.distributions.distribution import GMMShapeDistribution, Simple2DGaussianDistribution
+from dualwcfm.distributions.distribution import GMMShapeDistribution, Simple2DGaussianDistribution, Distribution
 from dualwcfm.methods.mixture import MixtureConfig
 from dualwcfm.experiments.base import ExperimentSpec, get_device
 
@@ -285,11 +285,122 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
 
 
 # ---------------------------------------------------------------------------
+# moon – upper moon → lower moon transport
+# ---------------------------------------------------------------------------
+
+class _SingleMoonDist(Distribution):
+    """Sample from one half of the two-moons dataset (class 0 = upper, 1 = lower).
+
+    Uses sklearn make_moons for reliable label-paired sampling.  Samples are
+    scaled and shifted to allow placing the moons at arbitrary positions.
+    """
+
+    def __init__(self, moon_class: int, scale: float = 1.0,
+                 shift=(0.0, 0.0), noise: float = 0.07,
+                 device=None):
+        self._dev   = device or get_device()
+        self._class = moon_class
+        self._scale = scale
+        self._shift = torch.tensor(shift, dtype=torch.float32)
+        self._noise = noise
+
+    def sample(self, n: int) -> torch.Tensor:
+        from sklearn.datasets import make_moons
+        # Over-sample to guarantee at least n points per class after filtering
+        X, labels = make_moons(n_samples=max(6 * n, 2000), noise=self._noise)
+        X = torch.tensor(X, dtype=torch.float32)
+        pts = X[labels == self._class][:n]
+        return (pts * self._scale + self._shift).to(self._dev)
+
+
+def _moon(perturbed: bool, output_root: str) -> ExperimentSpec:
+    """Upper-moon → lower-moon transport (sklearn two-moons dataset).
+
+    Reference coupling
+        x ~ upper moon (class 0), y ~ lower moon (class 1), randomly paired.
+        Both at unit scale, centred near origin.
+    New marginals
+        μ' = upper moon scaled by 3× and shifted to [4, 4]
+        ν' = lower moon scaled by 3× and shifted to [4, 4]
+               (+ 20° global rotation if perturbed, testing distribution mismatch)
+    Transport map
+        No analytical ground truth — map-error metrics are omitted.
+    """
+    device = get_device()
+    noise  = 0.07
+    ref_scale  = 1.5          # reference coupling scale
+    new_scale  = 4.5          # new-marginal scale (3× reference)
+    new_shift  = (4.0, 4.0)   # move new marginals away from reference
+
+    def _moon_coupling(n: int, _dev=device, _ns=noise, _rs=ref_scale):
+        from sklearn.datasets import make_moons
+        X, labels = make_moons(n_samples=max(6 * n, 2000), noise=_ns)
+        X = torch.tensor(X, dtype=torch.float32) * _rs
+        x = X[labels == 0][:n]
+        y = X[labels == 1][:n]
+        return x.to(_dev), y.to(_dev)
+
+    coupling = FunctionalCouplingDistribution(_moon_coupling)
+
+    if perturbed:
+        # Rotate the new-target moon by 20° to create distribution mismatch
+        _theta = math.radians(20.0)
+        _c, _s = math.cos(_theta), math.sin(_theta)
+        _R     = torch.tensor([[_c, -_s], [_s, _c]], dtype=torch.float32)
+
+        class _RotatedMoonDist(Distribution):
+            def __init__(self, base: _SingleMoonDist, R):
+                self._base = base
+                self._R    = R
+            def sample(self, n: int) -> torch.Tensor:
+                pts = self._base.sample(n)
+                return (pts @ self._R.to(pts.device, pts.dtype).T)
+
+        new_src = _SingleMoonDist(0, scale=new_scale, shift=new_shift, noise=noise, device=device)
+        new_tgt = _RotatedMoonDist(
+            _SingleMoonDist(1, scale=new_scale, shift=new_shift, noise=noise, device=device), _R
+        )
+    else:
+        new_src = _SingleMoonDist(0, scale=new_scale, shift=new_shift, noise=noise, device=device)
+        new_tgt = _SingleMoonDist(1, scale=new_scale, shift=new_shift, noise=noise, device=device)
+
+    train_cfg               = _default_train_cfg(device)
+    train_cfg.iterations    = 100
+    train_cfg.pretrain_epochs = 8_000
+    train_cfg.scale_factor  = 20
+    method_cfg              = _default_method_cfg()
+    method_cfg.sigma        = 0.05
+    method_cfg.particle_ratio = 0.2
+    method_cfg.lip_reg      = 1.0
+    method_cfg.dual_warmup_epochs = 30
+    model_cfg               = _default_model_cfg(hidden_size=128, num_layers=3)
+    vis_cfg                 = VisualizeConfig(
+        show_each=1, n_trajectories=2000, trajectory_stride=2,
+        show_each_marginal=100, show_each_pretrain=1000,
+    )
+
+    return ExperimentSpec(
+        name                  = f"2d_moon{'_perturbed' if perturbed else ''}",
+        mode                  = "2d",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        transport_map         = None,   # no analytical map for moons
+        inverse_transport_map = None,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public catalogue
 # ---------------------------------------------------------------------------
 
 def make_2d_experiments(output_root: str = "results") -> List[ExperimentSpec]:
-    """Return all 2-D experiment specs (simple / medium / complex × standard / perturbed)."""
+    """Return all 2-D experiment specs (simple / medium / complex / moon × standard / perturbed)."""
     return [
         _simple(False,  output_root),
         _simple(True,   output_root),
@@ -297,4 +408,6 @@ def make_2d_experiments(output_root: str = "results") -> List[ExperimentSpec]:
         _medium(True,   output_root),
         _complex(False, output_root),
         _complex(True,  output_root),
+        _moon(False,    output_root),
+        _moon(True,     output_root),
     ]

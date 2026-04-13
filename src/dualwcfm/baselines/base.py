@@ -198,10 +198,13 @@ def append_summary_csv(output_root: str, row: Dict[str, Any]) -> None:
 
 
 def _write_run_csv(output_dir: str, metrics: Dict[str, Any]) -> None:
+    """Append one metrics row to ``result.csv`` in *output_dir* (never overwrites)."""
     path = os.path.join(output_dir, "result.csv")
-    with open(path, "w", newline="") as f:
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
         writer.writerow(metrics)
 
 

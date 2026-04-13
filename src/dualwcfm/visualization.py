@@ -123,6 +123,8 @@ class Visualizer:
             model = ctx["model"]
             backward = ctx.get("backward", False)
             n = min(self.config.n_trajectories, 500)
+            if n == 0:
+                return
             s = trainer.scale
             x0, x1 = trainer.initial_coupling.coupling_sample(n)
             x0, x1 = x0.to(trainer.device), x1.to(trainer.device)
@@ -132,7 +134,7 @@ class Visualizer:
                 end = trainer.flow_matching.evolve(
                     x0, model, num_steps=50, sigma=trainer._sigma, extend=True
                 )
-                end = end[:, :self.dim]
+                end = end[:, :x0.shape[1]]
             direction = "Backward" if backward else "Forward"
             self._display_evolution((x0 * s).cpu(), (end * s).cpu(), (x1 * s).cpu())
             plt.suptitle(f"Pretrain {direction} Flow — Epoch {epoch}")
@@ -395,23 +397,23 @@ class Visualizer:
 
         # For dim > 2, project onto first two principal components for visualisation
         dim = start_points.shape[1] if start_points.ndim == 2 else 2
-        if dim > 2:
-            all_pts = torch.cat([start_points, end_points], dim=0).numpy()
-            mean = all_pts.mean(axis=0, keepdims=True)
-            centered = all_pts - mean
-            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-            proj = Vt[:2]  # (2, dim)
-            def _project(t: torch.Tensor) -> np.ndarray:
-                return (t.numpy() - mean) @ proj.T
-            ax.set_xlabel("PC1")
-            ax.set_ylabel("PC2")
-            ax_label = " (PCA projection)"
-        else:
-            def _project(t: torch.Tensor) -> np.ndarray:
-                return t.numpy()[:, :2]
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            ax_label = ""
+        # if dim > 2:
+        #     all_pts = torch.cat([start_points, end_points], dim=0).numpy()
+        #     mean = all_pts.mean(axis=0, keepdims=True)
+        #     centered = all_pts - mean
+        #     _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        #     proj = Vt[:2]  # (2, dim)
+        #     def _project(t: torch.Tensor) -> np.ndarray:
+        #         return (t.numpy() - mean) @ proj.T
+        #     ax.set_xlabel("PC1")
+        #     ax.set_ylabel("PC2")
+        #     ax_label = " (PCA projection)"
+        # else:
+        def _project(t: torch.Tensor) -> np.ndarray:
+            return t.numpy()[:, :2]
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax_label = ""
 
         start_2d = _project(start_points)
         end_2d   = _project(end_points)
