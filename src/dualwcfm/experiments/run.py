@@ -98,6 +98,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--particle-ratio", type=float, default=None, dest="particle_ratio",
         help="Override particle_ratio for MixtureMethod (default: 0.25).",
     )
+    meth.add_argument(
+        "--loss", choices=["weighted", "explicit", "implicit"], default="weighted",
+        dest="loss",
+        help="Loss function to use (default: weighted).",
+    )
 
     # ── Training ─────────────────────────────────────────────────────────────
     train = parser.add_argument_group("training")
@@ -234,6 +239,10 @@ def _build_method_cfg(method_name: str, args: argparse.Namespace):
         cfg.sigma2 = args.sigma
     if args.particle_ratio is not None and hasattr(cfg, "particle_ratio"):
         cfg.particle_ratio = args.particle_ratio
+    if args.loss is not None:
+        cfg.loss = args.loss
+
+    print(f"Using method config: {cfg}")
 
     return cfg
 
@@ -366,6 +375,14 @@ def _apply_train_overrides(spec, args: argparse.Namespace) -> None:
         spec.train_cfg.checkpoint_every         = args.checkpoint_every
         if args.checkpoint_coupling:
             spec.train_cfg.save_coupling_checkpoints = True
+    if args.sigma is not None:
+        spec.method_cfg.sigma  = args.sigma
+    if args.sigma is not None and hasattr(spec.method_cfg, "sigma2"):
+         spec.method_cfg.sigma2 = args.sigma
+    if args.particle_ratio is not None and hasattr(spec.method_cfg, "particle_ratio"):
+        spec.method_cfg.particle_ratio = args.particle_ratio
+    if args.loss is not None:
+        spec.method_cfg.loss = args.loss
 
 
 def _run_ablation(args: argparse.Namespace, base_specs) -> None:

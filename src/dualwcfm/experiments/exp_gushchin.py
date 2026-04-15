@@ -322,11 +322,18 @@ def _gaussian_iso_2d(eps: float, output_root: str) -> ExperimentSpec:
     _new_mu_mean  = shift.float()
     _new_nu_mean  = (shift + torch.tensor([3.0, 2.0])).float()
 
+    # def _transport_map_iso2d(x: torch.Tensor) -> torch.Tensor:
+    #     return _new_nu_mean + (x - _new_mu_mean) @ (_Sigma_mu_inv @ _C_xy)
+
+    # def _inv_transport_map_iso2d(y: torch.Tensor) -> torch.Tensor:
+    #     return _new_mu_mean + (y - _new_nu_mean) @ (_Sigma_nu_inv @ _C_xy.T)
+
+    # Fix transport maps to use the same device as the tensors
     def _transport_map_iso2d(x: torch.Tensor) -> torch.Tensor:
-        return _new_nu_mean + (x - _new_mu_mean) @ (_Sigma_mu_inv @ _C_xy)
+        return _new_nu_mean.to(x.device) + (x - _new_mu_mean.to(x.device)) @ (_Sigma_mu_inv.to(x.device) @ _C_xy.to(x.device))
 
     def _inv_transport_map_iso2d(y: torch.Tensor) -> torch.Tensor:
-        return _new_mu_mean + (y - _new_nu_mean) @ (_Sigma_nu_inv @ _C_xy.T)
+        return _new_mu_mean.to(y.device) + (y - _new_nu_mean.to(y.device)) @ (_Sigma_nu_inv.to(y.device) @ _C_xy.T.to(y.device))
 
     eps_tag = str(eps).replace(".", "p")
     return ExperimentSpec(

@@ -234,17 +234,27 @@ class GENOTRunner(BaselineRunner):
         logger.info("  [GENOT] Training conditional velocity field  (dim=%d, steps=%d)",
                     dim, cfg.n_steps)
 
+        use_oracle = self.spec.coupling_fn is not None
+        if use_oracle:
+            logger.info("  [GENOT] coupling_fn provided — replacing Sinkhorn pairing "
+                        "with oracle (x, T(x)) pairs.")
+
         for step in range(cfg.n_steps):
-            # 1. Sample mini-batches
-            x = _to_tensor(self.spec.source.sample(cfg.batch), device)
-            y = _to_tensor(self.spec.target.sample(cfg.batch), device)
+            if use_oracle:
+                # Oracle coupling: directly sample (x, T(x)) pairs — no Sinkhorn needed
+                x, y_matched = self.spec.coupling_fn(cfg.batch)
+                x, y_matched = x.to(device), y_matched.to(device)
+            else:
+                # 1. Sample mini-batches
+                x = _to_tensor(self.spec.source.sample(cfg.batch), device)
+                y = _to_tensor(self.spec.target.sample(cfg.batch), device)
 
-            # 2. Sinkhorn plan  (no grad; used only for coupling)
-            T = _sinkhorn_plan(x, y, eps=cfg.eps, n_iter=cfg.n_sinkhorn)
+                # 2. Sinkhorn plan  (no grad; used only for coupling)
+                T = _sinkhorn_plan(x, y, eps=cfg.eps, n_iter=cfg.n_sinkhorn)
 
-            # 3. Sample y_i ~ plan(· | x_i) for each i
-            y_idx     = _row_sample(T)          # (n,)
-            y_matched = y[y_idx]                # (n, d)
+                # 3. Sample y_i ~ plan(· | x_i) for each i
+                y_idx     = _row_sample(T)          # (n,)
+                y_matched = y[y_idx]                # (n, d)
 
             # 4. Source of the flow: z_0 = x  (p_z = μ, same-space W₂ variant)
             # 5. Interpolate  z_t = (1-t)·x + t·y_matched

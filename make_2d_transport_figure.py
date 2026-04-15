@@ -58,6 +58,37 @@ from dualwcfm.mlp import MLP, torch_wrapper
 # Model helpers
 # ---------------------------------------------------------------------------
 
+def _infer_arch_from_state(state: dict) -> tuple[int, int]:
+    """Infer (hidden_size, n_layers) from a torch_wrapper(MLP) state dict.
+
+    MLP.net layout (no norm, time_varying=True):
+      index 0 : Linear(2*dim+1, w)   ← net.0
+      index 1 : SELU
+      index 2 : Linear(w, w)         ← net.2  (repeated n_layers-1 times)
+      index 3 : SELU
+      ...
+      index 2*n_layers : Linear(w, out_dim)   ← last linear = output
+
+    So  n_layers = max_linear_index / 2
+    and hidden_size = net.0.weight shape[0].
+    """
+    linear_indices = []
+    for key in state:
+        # keys: "model.net.N.weight"
+        parts = key.split(".")
+        if len(parts) == 4 and parts[0] == "model" and parts[1] == "net" and parts[3] == "weight":
+            linear_indices.append(int(parts[2]))
+
+    if not linear_indices:
+        return 64, 2  # safe fallback
+
+    max_idx   = max(linear_indices)
+    n_layers  = max_idx // 2          # e.g. max_idx=4 → n_layers=2; max_idx=6 → n_layers=3
+    # hidden = output size of the first linear layer
+    hidden    = state["model.net.0.weight"].shape[0]
+    return hidden, n_layers
+
+
 def _build_forward_model(
     dim: int, hidden_size: int, n_layers: int, device: torch.device
 ) -> torch.nn.Module:
@@ -69,8 +100,16 @@ def _build_forward_model(
 
 def _load_model(path: str, dim: int, hidden_size: int, n_layers: int,
                 device: torch.device) -> torch.nn.Module:
-    model = _build_forward_model(dim, hidden_size, n_layers, device)
     state = torch.load(path, map_location=device, weights_only=True)
+    # Auto-detect architecture from checkpoint; override CLI args if they differ.
+    ckpt_hidden, ckpt_layers = _infer_arch_from_state(state)
+    if (ckpt_hidden, ckpt_layers) != (hidden_size, n_layers):
+        print(
+            f"  [arch mismatch] CLI says hidden={hidden_size} n_layers={n_layers}; "
+            f"checkpoint has hidden={ckpt_hidden} n_layers={ckpt_layers} — using checkpoint."
+        )
+        hidden_size, n_layers = ckpt_hidden, ckpt_layers
+    model = _build_forward_model(dim, hidden_size, n_layers, device)
     model.load_state_dict(state)
     model.eval()
     return model
@@ -181,12 +220,14 @@ def _kde_image(
 
 def _panel(
     ax:           plt.Axes,
-    x_src:        np.ndarray,             # (N, 2) source particles (cyan)
-    x_tgt:        np.ndarray,             # (N, 2) transported/target particles (red)
-    trajs:        list[np.ndarray] | None,# trajectory snapshots, or None
+    x_src:        np.ndarray,              # (N, 2) source particles (blue)
+    x_tgt:        np.ndarray,              # (N, 2) transported/target particles (red)
+    trajs:        list[np.ndarray] | None, # trajectory snapshots, or None
     title:        str,
-    src_label:    str  = r"Source $\mu'$",
-    tgt_label:    str  = r"Target $\nu'$",
+    src_label:    str   = r"Source $\mu'$",
+    tgt_label:    str   = r"Target $\nu'$",
+    x_true_tgt:   np.ndarray | None = None,  # (N, 2) true target ν' overlay (green)
+    true_tgt_label: str = r"True target $\nu'$",
     pad:          float = 1.2,
     kde_res:      int   = 300,
     dot_size:     int   = 9,
@@ -194,18 +235,23 @@ def _panel(
     line_alpha:   float = 0.18,
     line_width:   float = 0.6,
 ):
-    """Draw one transport panel onto *ax*."""
-    # ax.set_facecolor("#0d0024")   # dark purple background
+    """Draw one transport panel onto *ax*.
 
-    # ── Axis limits ─────────────────────────────────────────────────────────
-    all_pts = np.vstack([x_src, x_tgt])
+    *x_true_tgt*: when provided (e.g. for the pretrained panel), draws the
+    true new-target distribution ν' as small semi-transparent green scatter
+    points so the reader can see how far the pretrained transport deviates
+    from the desired output.
+    """
+
+    # ── Axis limits — expand to include true target if present ──────────────
+    all_pts = np.vstack([x_src, x_tgt] + ([x_true_tgt] if x_true_tgt is not None else []))
     xmin = all_pts[:, 0].min() - pad
     xmax = all_pts[:, 0].max() + pad
     ymin = all_pts[:, 1].min() - pad
     ymax = all_pts[:, 1].max() + pad
     extent = (xmin, xmax, ymin, ymax)
 
-    # ── KDE background — viridis density of source + target combined ────────
+    # ── KDE background — viridis density of source + transported combined ───
     z_src = _kde_image(x_src, extent, kde_res)
     z_tgt = _kde_image(x_tgt, extent, kde_res)
     z     = z_src + z_tgt
@@ -227,7 +273,18 @@ def _panel(
                     color="#333333", alpha=line_alpha, linewidth=line_width,
                     solid_capstyle="round", zorder=1)
 
-    # ── Scatter: small semi-transparent dots with thin outline ──────────────
+    # ── True target ν' overlay (green, faint) — drawn first so it sits under ─
+    legend_handles = []
+    if x_true_tgt is not None:
+        sc_true = ax.scatter(
+            x_true_tgt[:, 0], x_true_tgt[:, 1],
+            s=dot_size * 0.9, c="#229944", alpha=0.45,
+            linewidths=0.3, edgecolors="#145c2a",
+            zorder=2, label=true_tgt_label,
+        )
+        legend_handles.append(sc_true)
+
+    # ── Scatter: source (blue) and transported/target (red) ─────────────────
     sc_src = ax.scatter(x_src[:, 0], x_src[:, 1],
                         s=dot_size, c="#0077bb", alpha=dot_alpha,
                         linewidths=0.4, edgecolors="#004488",
@@ -236,10 +293,11 @@ def _panel(
                         s=dot_size, c="#cc3311", alpha=dot_alpha,
                         linewidths=0.4, edgecolors="#882200",
                         zorder=3, label=tgt_label)
+    legend_handles += [sc_src, sc_tgt]
 
     # ── Legend ───────────────────────────────────────────────────────────────
     leg = ax.legend(
-        handles=[sc_src, sc_tgt],
+        handles=legend_handles,
         loc="upper left", fontsize=8,
         framealpha=0.5, facecolor="white", edgecolor="#aaaaaa",
         labelcolor="black", handletextpad=0.4, borderpad=0.5,
@@ -305,16 +363,17 @@ def build_figure(
 
     # ── 1. Reference coupling ────────────────────────────────────────────────
     print("Sampling reference coupling ...", flush=True)
-    x_ref, y_ref = spec.initial_coupling.sample(n_particles)
+    x_ref, y_ref = spec.initial_coupling.coupling_sample(n_particles)
     x_ref_np = _to_np(x_ref)
     y_ref_np  = _to_np(y_ref)
     # Straight lines: no model, just pair source → target
     ref_trajs = [x_ref_np, y_ref_np]
 
-    # ── Shared normalized source for panels 2 & 3 ───────────────────────────
-    x_new_raw = _to_np(spec.new_source.sample(n_particles))    # data space
-    x_new_np  = x_new_raw                                       # kept for plotting
-    x_new_norm = torch.tensor(x_new_raw / sc, dtype=torch.float32, device=device)
+    # ── Shared normalized source + true target for panels 2 & 3 ────────────
+    x_new_raw    = _to_np(spec.new_source.sample(n_particles))   # data space
+    x_new_np     = x_new_raw
+    x_new_norm   = torch.tensor(x_new_raw / sc, dtype=torch.float32, device=device)
+    x_new_tgt_np = _to_np(spec.new_target.sample(n_particles))   # true ν' for overlay
 
     # ── 2. Pretrained model on new source ────────────────────────────────────
     print(f"Loading initial model: {initial_model_path}", flush=True)
@@ -333,26 +392,31 @@ def build_figure(
     del model_final
 
     # ── Figure ───────────────────────────────────────────────────────────────
+    # Each entry: (x_src, x_tgt, trajs, title, src_label, tgt_label, x_true_tgt_overlay)
     panels = [
         (x_ref_np,  y_ref_np,            ref_trajs,
          "Reference Coupling $\\pi$",
-         r"Source $\mu$",  r"Target $\nu$"),
+         r"Source $\mu$",  r"Target $\nu$",
+         None),
         (x_new_np,  x_init_transported,  init_trajs,
          "Pretrained (before adaptation)",
-         r"Source $\mu'$", r"Transported (pretrained)"),
+         r"Source $\mu'$", r"Transported (pretrained)",
+         x_new_tgt_np),   # ← true ν' shown in green so the gap is visible
         (x_new_np,  x_final_transported, final_trajs,
          "Adapted (final model)",
-         r"Source $\mu'$", r"Transported (adapted)"),
+         r"Source $\mu'$", r"Transported (adapted)",
+         None),
     ]
 
     _panel_kw = dict(pad=pad, dot_size=dot_size, dot_alpha=dot_alpha)
 
     if separate:
-        for stem, (x_s, x_t, trajs, title, slbl, tlbl) in zip(
+        for stem, (x_s, x_t, trajs, title, slbl, tlbl, x_ov) in zip(
             ["reference_coupling", "pretrained", "adapted"], panels
         ):
             fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
-            _panel(ax, x_s, x_t, trajs, title, src_label=slbl, tgt_label=tlbl, **_panel_kw)
+            _panel(ax, x_s, x_t, trajs, title, src_label=slbl, tgt_label=tlbl,
+                   x_true_tgt=x_ov, **_panel_kw)
             out = f"{output_stem}_{stem}.png"
             fig.savefig(out, bbox_inches="tight", dpi=200, facecolor=fig.get_facecolor())
             print(f"Saved: {out}")
@@ -366,8 +430,9 @@ def build_figure(
             f"Transfer Learning of Data-based EOT — {exp_name}",
             color="black", fontsize=14, fontweight="bold", y=1.02,
         )
-        for ax, (x_s, x_t, trajs, title, slbl, tlbl) in zip(axes, panels):
-            _panel(ax, x_s, x_t, trajs, title, src_label=slbl, tgt_label=tlbl, **_panel_kw)
+        for ax, (x_s, x_t, trajs, title, slbl, tlbl, x_ov) in zip(axes, panels):
+            _panel(ax, x_s, x_t, trajs, title, src_label=slbl, tgt_label=tlbl,
+                   x_true_tgt=x_ov, **_panel_kw)
         plt.tight_layout(pad=0.5)
         out = f"{output_stem}.png"
         fig.savefig(out, bbox_inches="tight", dpi=200, facecolor=fig.get_facecolor())

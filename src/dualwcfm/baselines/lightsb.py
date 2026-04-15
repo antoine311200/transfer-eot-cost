@@ -72,19 +72,32 @@ class _PotentialMLP(nn.Module):
 
 
 class _VelocityMLP(nn.Module):
-    """Time-conditioned velocity field  v_θ(t, x) → ℝ^d."""
+    """Time-conditioned velocity field  v_θ(t, x) → ℝ^d.
 
-    def __init__(self, dim: int, hidden: int = 256, n_layers: int = 4):
+    When *conditional* is True, also takes x₀ as input: [t | x_t | x₀].
+    Required for oracle-coupling training when trajectories cross.
+    """
+
+    def __init__(self, dim: int, hidden: int = 256, n_layers: int = 4,
+                 conditional: bool = False):
         super().__init__()
-        layers: List[nn.Module] = [nn.Linear(dim + 1, hidden), nn.SiLU()]
+        in_dim = (2 * dim + 1) if conditional else (dim + 1)
+        layers: List[nn.Module] = [nn.Linear(in_dim, hidden), nn.SiLU()]
         for _ in range(n_layers - 1):
             layers += [nn.Linear(hidden, hidden), nn.SiLU()]
         layers.append(nn.Linear(hidden, dim))
         self.net = nn.Sequential(*layers)
+        self.conditional = conditional
 
-    def forward(self, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, t: torch.Tensor, x: torch.Tensor,
+                x0: Optional[torch.Tensor] = None) -> torch.Tensor:
         t_in = t.view(-1, 1).expand(x.shape[0], 1)
-        return self.net(torch.cat([t_in, x.flatten(1)], dim=1))
+        if self.conditional:
+            assert x0 is not None
+            inp = torch.cat([t_in, x.flatten(1), x0.flatten(1)], dim=1)
+        else:
+            inp = torch.cat([t_in, x.flatten(1)], dim=1)
+        return self.net(inp)
 
 
 # ---------------------------------------------------------------------------
@@ -300,10 +313,81 @@ class LightSBRunner(BaselineRunner):
         return flow
 
     # ------------------------------------------------------------------
+    # Stage 2 (oracle variant) — CFM directly on coupled pairs
+    # ------------------------------------------------------------------
+
+    def _train_cfm_coupled(self) -> "_VelocityMLP":
+        """Train CFM on oracle (x, T(x)) pairs; skips dual-potential training.
+
+        Uses a conditional velocity field v(t, x_t, x₀) to correctly handle
+        transports whose straight-line trajectories cross (e.g. x↦−x).
+        """
+        cfg    = self.config
+        device = self.spec.device
+        dim    = self.spec.dim
+
+        flow  = _VelocityMLP(dim, cfg.cfm_hidden, cfg.cfm_layers,
+                             conditional=True).to(device)
+        opt   = torch.optim.Adam(flow.parameters(), lr=cfg.cfm_lr)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=cfg.n_cfm_steps, eta_min=cfg.cfm_lr * 0.1,
+        )
+        log_every = max(1, cfg.n_cfm_steps // 20)
+
+        x_plan: Optional[torch.Tensor] = None
+        y_plan: Optional[torch.Tensor] = None
+        N = 0
+
+        for step in range(cfg.n_cfm_steps):
+            # Refresh the oracle pair buffer periodically (same cadence as plan)
+            if x_plan is None or (cfg.plan_refresh_every > 0
+                                  and step % cfg.plan_refresh_every == 0):
+                x_plan, y_plan = self.spec.coupling_fn(cfg.plan_buffer_size)
+                x_plan = x_plan.to(device)
+                y_plan = y_plan.to(device)
+                N = len(x_plan)
+
+            idx = torch.randint(N, (cfg.cfm_batch,), device=device)
+            x0b = x_plan[idx]
+            x1b = y_plan[idx]
+
+            t  = torch.rand(len(x0b), device=device)
+            xt = (1 - t.view(-1, 1)) * x0b + t.view(-1, 1) * x1b
+            if cfg.sigma_bridge > 0:
+                xt = xt + cfg.sigma_bridge * torch.randn_like(xt)
+
+            loss = (flow(t, xt, x0b) - (x1b - x0b)).pow(2).mean()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            sched.step()
+
+            if (step + 1) % log_every == 0:
+                logger.info(
+                    "  [LightSB CFM(coupled) %s] step %5d/%d  loss=%.5f",
+                    self.spec.name, step + 1, cfg.n_cfm_steps, loss.item(),
+                )
+                self._wandb.log({"lightsb/coupled_cfm_loss": loss.item()})
+
+        return flow
+
+    # ------------------------------------------------------------------
     # BaselineRunner interface
     # ------------------------------------------------------------------
 
     def train(self) -> None:
+        if self.spec.coupling_fn is not None:
+            logger.info(
+                "  [LightSB] coupling_fn provided — skipping dual training, "
+                "training CFM directly on oracle pairs."
+            )
+            flow = self._train_cfm_coupled()
+            torch.save(flow.state_dict(),
+                       os.path.join(self.spec.output_dir, "lightsb_flow.pth"))
+            self._flow = flow
+            logger.info("  [LightSB] Training complete -> %s", self.spec.output_dir)
+            return
+
         logger.info("  [LightSB] Stage 1: training dual potentials …")
         f, g = self._train_potentials()
 
@@ -333,13 +417,14 @@ class LightSBRunner(BaselineRunner):
         cfg    = self.config
         dt     = 1.0 / cfg.euler_steps
 
-        x0 = _to_tensor(self.spec.source.sample(n), device)
-        x  = x0.clone()
+        x0   = _to_tensor(self.spec.source.sample(n), device)
+        x    = x0.clone()
+        cond = x0 if flow.conditional else None
 
         with torch.no_grad():
             for i in range(cfg.euler_steps):
                 t = torch.full((n,), i * dt, device=device)
-                x = x + flow(t, x) * dt
+                x = x + flow(t, x, cond) * dt
 
         return x0, x
 

@@ -288,11 +288,31 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
 # moon – upper moon → lower moon transport
 # ---------------------------------------------------------------------------
 
+def _moon_points(moon_class: int, t: torch.Tensor) -> torch.Tensor:
+    """Analytical moon positions from angle parameter t ∈ [0, π].
+
+    Class 0 (upper):  (cos t,       sin t)
+    Class 1 (lower):  (1 − cos t,   0.5 − sin t)
+
+    Both follow sklearn's make_moons parameterisation exactly, so the pairing
+    by equal angle gives a valid, deterministic transport.
+    """
+    if moon_class == 0:
+        return torch.stack([torch.cos(t), torch.sin(t)], dim=1)
+    else:
+        return torch.stack([1.0 - torch.cos(t), 0.5 - torch.sin(t)], dim=1)
+
+
 class _SingleMoonDist(Distribution):
     """Sample from one half of the two-moons dataset (class 0 = upper, 1 = lower).
 
-    Uses sklearn make_moons for reliable label-paired sampling.  Samples are
-    scaled and shifted to allow placing the moons at arbitrary positions.
+    Samples angles t ∼ Uniform(0, π) and returns the corresponding point on
+    the moon arc ± Gaussian noise.  This ensures every call returns a fresh,
+    unbiased random batch covering the full arc, unlike the legacy sklearn
+    approach which took the first n points from a sorted grid (biased toward
+    the first third of the arc) and was deterministic at noise=0.
+
+    Scaled by *scale* and translated by *shift* to position the distribution.
     """
 
     def __init__(self, moon_class: int, scale: float = 1.0,
@@ -305,11 +325,10 @@ class _SingleMoonDist(Distribution):
         self._noise = noise
 
     def sample(self, n: int) -> torch.Tensor:
-        from sklearn.datasets import make_moons
-        # Over-sample to guarantee at least n points per class after filtering
-        X, labels = make_moons(n_samples=max(6 * n, 2000), noise=self._noise)
-        X = torch.tensor(X, dtype=torch.float32)
-        pts = X[labels == self._class][:n]
+        t   = torch.rand(n) * math.pi          # Uniform(0, π)
+        pts = _moon_points(self._class, t)      # (n, 2)
+        if self._noise > 0:
+            pts = pts + self._noise * torch.randn_like(pts)
         return (pts * self._scale + self._shift).to(self._dev)
 
 
@@ -327,17 +346,23 @@ def _moon(perturbed: bool, output_root: str) -> ExperimentSpec:
         No analytical ground truth — map-error metrics are omitted.
     """
     device = get_device()
-    noise  = 0.07
-    ref_scale  = 1.5          # reference coupling scale
-    new_scale  = 4.5          # new-marginal scale (3× reference)
-    new_shift  = (4.0, 4.0)   # move new marginals away from reference
+    noise      = 0.07          # per-point Gaussian noise added to both x and y
+    ref_scale  = 1.5           # reference coupling scale
+    new_scale  = 4.5           # new-marginal scale (3× reference)
+    new_shift  = (4.0, 4.0)    # move new marginals away from reference
 
     def _moon_coupling(n: int, _dev=device, _ns=noise, _rs=ref_scale):
-        from sklearn.datasets import make_moons
-        X, labels = make_moons(n_samples=max(6 * n, 2000), noise=_ns)
-        X = torch.tensor(X, dtype=torch.float32) * _rs
-        x = X[labels == 0][:n]
-        y = X[labels == 1][:n]
+        # Sample the SAME n random angles for both classes so (x[i], y[i]) are
+        # truly paired: y[i] = T(x[i]) + noise, where T maps upper→lower moon
+        # via the shared angle parameter.  Using max(6n,2000) sorted [:n] was
+        # wrong: it covered only the first ~π/3 of the arc and was deterministic
+        # at noise=0.
+        t = torch.rand(n) * math.pi             # Uniform(0, π) — full arc coverage
+        x = _moon_points(0, t) * _rs            # upper moon
+        y = _moon_points(1, t) * _rs            # lower moon  (same angle → paired)
+        if _ns > 0:
+            x = x + _ns * torch.randn_like(x)
+            y = y + _ns * torch.randn_like(y)
         return x.to(_dev), y.to(_dev)
 
     coupling = FunctionalCouplingDistribution(_moon_coupling)

@@ -55,10 +55,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
-        "--mode", choices=["2d", "3d", "gushchin"],
+        "--mode", choices=["2d", "3d", "gushchin", "image", "color"],
         help="Experiment mode (required unless --table).",
     )
-    sel.add_argument("--level", choices=["simple", "medium", "complex"], default=None)
+    sel.add_argument("--level", choices=["simple", "medium", "complex", "moon"], default=None)
     sel.add_argument("--perturbed", action="store_true")
 
     bl = parser.add_argument_group("baseline")
@@ -83,6 +83,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Path to models/ directory for the pretrained-only baseline. "
             "Defaults to {output}/{exp_name}/models/."
+        ),
+    )
+    bl.add_argument(
+        "--use-coupling", action="store_true", dest="use_coupling",
+        help=(
+            "Train on oracle coupled pairs (x, T(x)) from the ground-truth transport map "
+            "instead of independent marginal samples.  Requires the experiment to define "
+            "a transport_map.  Results are written to {baseline}_coupled/ so existing "
+            "independent-marginal results are never overwritten.  "
+            "Supported for: cfm, otcfm, lightsb, dsb, genot.  "
+            "Skipped silently for experiments without a transport_map (e.g. moon)."
         ),
     )
 
@@ -125,27 +136,68 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _baseline_spec_from_exp(exp_spec, baseline_name: str, output_root: str):
-    """Convert an ExperimentSpec into a BaselineSpec, including Gushchin GT if present."""
+def _baseline_spec_from_exp(
+    exp_spec,
+    baseline_name: str,
+    output_root: str,
+    use_coupling: bool = False,
+):
+    """Convert an ExperimentSpec into a BaselineSpec, including Gushchin GT if present.
+
+    When *use_coupling* is True and the experiment provides a transport_map, the
+    returned spec carries a ``coupling_fn`` that draws paired samples (x, T(x))
+    from the ground-truth map.  The baseline name is suffixed with ``_coupled``
+    so results land in a separate directory.
+    """
     from dualwcfm.baselines.base import BaselineSpec
     import torch
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Gushchin experiments optionally carry ground-truth Gaussian parameters
-    ref_mean = getattr(exp_spec, "ref_mean", None)
-    ref_cov  = getattr(exp_spec, "ref_cov",  None)
+    ref_mean      = getattr(exp_spec, "ref_mean",      None)
+    ref_cov       = getattr(exp_spec, "ref_cov",       None)
+    transport_map = getattr(exp_spec, "transport_map", None)
+
+    if use_coupling:
+        if transport_map is None:
+            logger.warning(
+                "  --use-coupling: experiment %r has no transport_map; "
+                "falling back to independent marginal samples.", exp_spec.name,
+            )
+            coupling_fn  = None
+            coupled_name = baseline_name
+        else:
+            _source = exp_spec.new_source
+            _T      = transport_map
+            _dev    = device
+
+            def coupling_fn(n, _s=_source, _map=_T, _d=_dev):
+                from dualwcfm.baselines.base import _sample
+                x = _sample(_s, n, _d)
+                y = _map(x)
+                return x, y
+
+            coupled_name = baseline_name + "_coupled"
+            logger.info(
+                "  --use-coupling: experiment %r will train on oracle (x, T(x)) pairs; "
+                "output dir suffix: _coupled", exp_spec.name,
+            )
+    else:
+        coupling_fn  = None
+        coupled_name = baseline_name
 
     return BaselineSpec(
-        name          = baseline_name,
+        name          = coupled_name,
         mode          = exp_spec.mode,
         source        = exp_spec.new_source,
         target        = exp_spec.new_target,
         dim           = exp_spec.model_cfg.flat_dimension,
-        output_dir    = os.path.join(output_root, exp_spec.name, "baselines", baseline_name),
+        output_dir    = os.path.join(output_root, exp_spec.name, "baselines", coupled_name),
         device        = device,
         ref_mean      = ref_mean,
         ref_cov       = ref_cov,
-        transport_map = getattr(exp_spec, "transport_map", None),
+        transport_map = transport_map,
+        coupling_fn   = coupling_fn,
     )
 
 
@@ -180,8 +232,9 @@ def _run_otcfm(args, exp_specs, use_ot: bool = True) -> None:
 
     label = "otcfm" if use_ot else "cfm"
     for exp_spec in exp_specs:
-        bl_spec   = _baseline_spec_from_exp(exp_spec, label, args.output)
-        wandb_run = _make_wandb_run(args, exp_spec.name, label)
+        bl_spec   = _baseline_spec_from_exp(exp_spec, label, args.output,
+                                            use_coupling=getattr(args, "use_coupling", False))
+        wandb_run = _make_wandb_run(args, exp_spec.name, bl_spec.name)
 
         cfg = OTCFMConfig(
             n_steps    = args.epochs    or 10_000,
@@ -200,8 +253,9 @@ def _run_dsb(args, exp_specs) -> None:
     from dualwcfm.baselines.dsb import DSBRunner, DSBConfig
 
     for exp_spec in exp_specs:
-        bl_spec   = _baseline_spec_from_exp(exp_spec, "dsb", args.output)
-        wandb_run = _make_wandb_run(args, exp_spec.name, "dsb")
+        bl_spec   = _baseline_spec_from_exp(exp_spec, "dsb", args.output,
+                                            use_coupling=getattr(args, "use_coupling", False))
+        wandb_run = _make_wandb_run(args, exp_spec.name, bl_spec.name)
 
         cfg = DSBConfig(
             n_ipf_iters      = args.dsb_iters or 10,
@@ -224,8 +278,9 @@ def _run_lightsb(args, exp_specs) -> None:
         args.ot_eps if args.ot_eps > 0 else 0.1
     )
     for exp_spec in exp_specs:
-        bl_spec   = _baseline_spec_from_exp(exp_spec, "lightsb", args.output)
-        wandb_run = _make_wandb_run(args, exp_spec.name, "lightsb")
+        bl_spec   = _baseline_spec_from_exp(exp_spec, "lightsb", args.output,
+                                            use_coupling=getattr(args, "use_coupling", False))
+        wandb_run = _make_wandb_run(args, exp_spec.name, bl_spec.name)
 
         n_steps = args.epochs or 5_000
         cfg = LightSBConfig(
@@ -249,6 +304,7 @@ def _run_metaot(args, exp_specs) -> None:
     from dualwcfm.baselines.metaot import MetaOTRunner, MetaOTConfig
 
     for exp_spec in exp_specs:
+        # MetaOT is ICNN-based (no CFM stage) — coupling_fn not used
         bl_spec   = _baseline_spec_from_exp(exp_spec, "metaot", args.output)
         wandb_run = _make_wandb_run(args, exp_spec.name, "metaot")
 
@@ -269,8 +325,9 @@ def _run_genot(args, exp_specs) -> None:
 
     eps = args.ot_eps if args.ot_eps > 0 else 0.1
     for exp_spec in exp_specs:
-        bl_spec   = _baseline_spec_from_exp(exp_spec, "genot", args.output)
-        wandb_run = _make_wandb_run(args, exp_spec.name, "genot")
+        bl_spec   = _baseline_spec_from_exp(exp_spec, "genot", args.output,
+                                            use_coupling=getattr(args, "use_coupling", False))
+        wandb_run = _make_wandb_run(args, exp_spec.name, bl_spec.name)
 
         cfg = GENOTConfig(
             eps     = eps,
@@ -344,11 +401,13 @@ def main() -> None:
     from dualwcfm.experiments.exp_2d       import make_2d_experiments
     from dualwcfm.experiments.exp_3d       import make_3d_experiments
     from dualwcfm.experiments.exp_gushchin import make_gushchin_experiments
+    from dualwcfm.experiments.exp_image    import make_image_experiments
 
     catalogues = {
         "2d":       make_2d_experiments,
         "3d":       make_3d_experiments,
         "gushchin": make_gushchin_experiments,
+        "image":    make_image_experiments,
     }
     all_specs = catalogues[args.mode](args.output)
     matching  = _filter(all_specs, args.level, args.perturbed)

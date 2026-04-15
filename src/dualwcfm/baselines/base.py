@@ -80,6 +80,9 @@ class BaselineSpec:
     ref_cov:       Optional[torch.Tensor] = None
     # Optional: ground-truth forward transport map T s.t. y ≈ T(x)
     transport_map: Optional[Callable]     = None
+    # Optional: oracle coupling sampler  n -> (x, y) from the true transport plan.
+    # When set, baseline runners use paired samples instead of independent marginals.
+    coupling_fn:   Optional[Callable]     = None
 
 
 # ---------------------------------------------------------------------------

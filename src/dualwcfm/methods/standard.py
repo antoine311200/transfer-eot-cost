@@ -475,7 +475,11 @@ class StandardMethod(Method):
 
             optimizer.zero_grad()
             u_s = model(s, x_s, x0)
-            u_s_true = trainer.flow_matching.vector_field(x_s, s, x0, x1, noisy=True)#self.config.use_noisy_field)
+            # Flow pretrain uses noisy=False for the same reason as bridge pretrain:
+            # the (1-2t)/(2t(1-t))*sigma*noise correction term has std ~sigma/(2*sqrt(eps))
+            # near t=0, which can equal or exceed the drift x1-x0 on normalized data.
+            # The score correction is only meaningful for the main SDE-based CFM training.
+            u_s_true = trainer.flow_matching.vector_field(x_s, s, x0, x1, noisy=False)
             loss = loss_fn(u_s, u_s_true)
             loss.backward()
             optimizer.step()
