@@ -54,7 +54,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── Experiment selection ─────────────────────────────────────────────────
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
-        "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color", "gushchin"],
+        "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color", "gushchin", "scalability"],
         help="Experiment mode.  Required unless --all is given.",
     )
     sel.add_argument(
@@ -66,8 +66,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     sel.add_argument(
+        "--dims", nargs="+", type=int, default=[16, 32, 64, 128],
+        metavar="D",
+        help="Dimensions for scalability experiments (default: 16 32 64 128).",
+    )
+    sel.add_argument(
         "--perturbed", action="store_true",
         help="Use the perturbed variant of the experiment.",
+    )
+    sel.add_argument(
+        "--no-perturbed", action="store_true", dest="no_perturbed",
+        help="Exclude perturbed variants (run only non-perturbed experiments).",
     )
     sel.add_argument(
         "--all", action="store_true", dest="run_all",
@@ -88,6 +97,11 @@ def _build_parser() -> argparse.ArgumentParser:
     meth.add_argument(
         "--particle-ratio", type=float, default=None, dest="particle_ratio",
         help="Override particle_ratio for MixtureMethod (default: 0.25).",
+    )
+    meth.add_argument(
+        "--loss", choices=["weighted", "explicit", "implicit"], default="weighted",
+        dest="loss",
+        help="Loss function to use (default: weighted).",
     )
 
     # ── Training ─────────────────────────────────────────────────────────────
@@ -119,6 +133,17 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--no-save-models", action="store_false", dest="save_models",
         help="Do not write model checkpoints to disk.",
+    )
+    train.add_argument(
+        "--checkpoint-every", type=int, default=0, dest="checkpoint_every", metavar="N",
+        help=(
+            "Save model checkpoints every N iterations, plus the first and last. "
+            "0 = disabled (default)."
+        ),
+    )
+    train.add_argument(
+        "--checkpoint-coupling", action="store_true", dest="checkpoint_coupling",
+        help="Also checkpoint the coupling dataset at each checkpoint iteration (can be large).",
     )
 
     # ── Ablation ─────────────────────────────────────────────────────────────
@@ -214,6 +239,10 @@ def _build_method_cfg(method_name: str, args: argparse.Namespace):
         cfg.sigma2 = args.sigma
     if args.particle_ratio is not None and hasattr(cfg, "particle_ratio"):
         cfg.particle_ratio = args.particle_ratio
+    if args.loss is not None:
+        cfg.loss = args.loss
+
+    print(f"Using method config: {cfg}")
 
     return cfg
 
@@ -222,18 +251,19 @@ def _build_method_cfg(method_name: str, args: argparse.Namespace):
 # Helpers: filter catalogue
 # ---------------------------------------------------------------------------
 
-def _filter_catalogue(catalogue, level, perturbed):
-    """Return specs matching *level* / *perturbed* filters."""
+def _filter_catalogue(catalogue, level, perturbed, no_perturbed=False):
+    """Return specs matching *level* / *perturbed* / *no_perturbed* filters."""
     parts = []
     if level:
         parts.append(level)
     if perturbed:
         parts.append("perturbed")
 
-    if not parts:
-        return catalogue
+    matching = catalogue if not parts else [s for s in catalogue if all(p in s.name for p in parts)]
 
-    matching = [s for s in catalogue if all(p in s.name for p in parts)]
+    if no_perturbed:
+        matching = [s for s in matching if "perturbed" not in s.name]
+
     return matching
 
 
@@ -251,17 +281,21 @@ def main() -> None:
     from dualwcfm.experiments.exp_image         import make_image_experiments, make_image_experiments_v2
     from dualwcfm.experiments.exp_color         import make_color_experiments
     from dualwcfm.experiments.exp_gushchin      import make_gushchin_experiments
+    from dualwcfm.experiments.exp_scalability   import make_scalability_experiments
     from dualwcfm.experiments.base              import run_experiment
+
+    dims = tuple(getattr(args, "dims", [16, 32, 64, 128]))
 
     # ── Catalogue factory ────────────────────────────────────────────────────
     catalogue_factories = {
-        "2d":       make_2d_experiments,
-        "3d":       make_3d_experiments,
-        "manifold": make_3d_manifold_experiments,
-        "image":    make_image_experiments,
-        "image-v2": make_image_experiments_v2,
-        "color":    make_color_experiments,
-        "gushchin": make_gushchin_experiments,
+        "2d":          make_2d_experiments,
+        "3d":          make_3d_experiments,
+        "manifold":    make_3d_manifold_experiments,
+        "image":       make_image_experiments,
+        "image-v2":    make_image_experiments_v2,
+        "color":       make_color_experiments,
+        "gushchin":    make_gushchin_experiments,
+        "scalability": lambda out: make_scalability_experiments(out, dims=dims),
     }
 
     # ── Run everything ───────────────────────────────────────────────────────
@@ -296,7 +330,7 @@ def main() -> None:
         sys.exit(1)
 
     catalogue = catalogue_factories[args.mode](args.output)
-    matching  = _filter_catalogue(catalogue, args.level, args.perturbed)
+    matching  = _filter_catalogue(catalogue, args.level, args.perturbed, getattr(args, "no_perturbed", False))
 
     if not matching:
         print(
@@ -318,7 +352,7 @@ def main() -> None:
     # ── Single experiment ────────────────────────────────────────────────────
     for spec in matching:
         _apply_train_overrides(spec, args)
-        spec.method_cfg = _build_method_cfg(args.method, args)
+        # spec.method_cfg = _build_method_cfg(args.method, args)
         run_experiment(
             spec,
             retrain          = not args.load_pretrained,
@@ -331,11 +365,24 @@ def main() -> None:
 
 
 def _apply_train_overrides(spec, args: argparse.Namespace) -> None:
-    """Apply CLI training overrides (iterations, batch_size) to *spec* in place."""
+    """Apply CLI training overrides (iterations, batch_size, checkpointing) to *spec* in place."""
     if args.iterations is not None:
         spec.train_cfg.iterations = args.iterations
     if args.batch_size is not None:
         spec.train_cfg.batch_size = args.batch_size
+    if args.checkpoint_every > 0:
+        spec.train_cfg.save_model_checkpoints   = True
+        spec.train_cfg.checkpoint_every         = args.checkpoint_every
+        if args.checkpoint_coupling:
+            spec.train_cfg.save_coupling_checkpoints = True
+    if args.sigma is not None:
+        spec.method_cfg.sigma  = args.sigma
+    if args.sigma is not None and hasattr(spec.method_cfg, "sigma2"):
+         spec.method_cfg.sigma2 = args.sigma
+    if args.particle_ratio is not None and hasattr(spec.method_cfg, "particle_ratio"):
+        spec.method_cfg.particle_ratio = args.particle_ratio
+    if args.loss is not None:
+        spec.method_cfg.loss = args.loss
 
 
 def _run_ablation(args: argparse.Namespace, base_specs) -> None:

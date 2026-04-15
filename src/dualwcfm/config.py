@@ -31,10 +31,12 @@ class TrainingConfig:
     coupling_save_dir: Optional[str] = None  # Directory for disk coupling (None = temp dir)
     coupling_chunk_size: int = 256  # Samples per chunk file
 
-    # Checkpointing: save state at every iteration for later visualization / analysis.
+    # Checkpointing: save state periodically for later visualization / analysis.
     # Files land in <model_dir>/checkpoints/coupling/  and  <model_dir>/checkpoints/models/
-    save_coupling_checkpoints: bool = False  # Save coupling dataset after each advance step
-    save_model_checkpoints: bool = False     # Save CFM forward/backward weights after each iteration
+    save_coupling_checkpoints: bool = False  # Save coupling dataset at checkpoint iterations
+    save_model_checkpoints: bool = False     # Save CFM forward/backward weights at checkpoint iterations
+    # checkpoint_every=0 → disabled, N → save at iter 0, every N-th iter, and the last iter
+    checkpoint_every: int = 1
 
     # Final model persistence: save all learned models at the end of training.
     save_final_models: bool = True  # Save forward/backward/bridges/duals after all iterations
@@ -50,15 +52,21 @@ class ModelConfig:
     mu_learning_rate: float = 1e-3
     nu_learning_rate: float = 1e-3
     flow_learning_rate: float = 5e-3
+    dual_l2_reg: float = 0.0  # L2 regularization strength for dual networks (default: no regularization)
 
 
 @dataclass
 class FeedForwardConfig(ModelConfig):
     dimension: int = 2
     hidden_size: int = 64
+    num_layers: int = 2  # Number of hidden layers in the MLP (bridges, duals, flow models)
     # For image models
     image_shape: Optional[Tuple[int, int, int]] = None  # (C, H, W)
     num_res_blocks: int = 1  # UNet residual blocks per resolution level
+    # Bridge conditioning: if True, mu/nu bridge models accept x0 as a second input
+    # (model(t, xt, x0)) so each particle's velocity is conditioned on its starting
+    # point.  This eliminates crossing-path ambiguity and stabilises bridge training.
+    use_conditional_bridge: bool = False
 
     @property
     def is_image_model(self) -> bool:

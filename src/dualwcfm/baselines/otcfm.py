@@ -70,19 +70,34 @@ def _ot_pair(
 # ---------------------------------------------------------------------------
 
 class _VelocityMLP(nn.Module):
-    """Time-conditioned MLP velocity field for low-dimensional data."""
+    """Time-conditioned MLP velocity field for low-dimensional data.
 
-    def __init__(self, dim: int, hidden: int = 256, n_layers: int = 4):
+    When *conditional* is True the model also takes x₀ (the source point) as
+    input, concatenated as  [t | x_t | x₀]  (input dim = 2*d + 1).  This is
+    required when trajectories cross (e.g. anticorrelation transport x↦−x),
+    where the unconditional marginal velocity field is ill-defined.
+    """
+
+    def __init__(self, dim: int, hidden: int = 256, n_layers: int = 4,
+                 conditional: bool = False):
         super().__init__()
-        layers: List[nn.Module] = [nn.Linear(dim + 1, hidden), nn.SiLU()]
+        in_dim = (2 * dim + 1) if conditional else (dim + 1)
+        layers: List[nn.Module] = [nn.Linear(in_dim, hidden), nn.SiLU()]
         for _ in range(n_layers - 1):
             layers += [nn.Linear(hidden, hidden), nn.SiLU()]
         layers.append(nn.Linear(hidden, dim))
         self.net = nn.Sequential(*layers)
+        self.conditional = conditional
 
-    def forward(self, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, t: torch.Tensor, x: torch.Tensor,
+                x0: Optional[torch.Tensor] = None) -> torch.Tensor:
         t_in = t.view(-1, 1).expand(x.shape[0], 1)
-        return self.net(torch.cat([t_in, x.flatten(1)], dim=1))
+        if self.conditional:
+            assert x0 is not None, "x0 required for conditional model"
+            inp = torch.cat([t_in, x.flatten(1), x0.flatten(1)], dim=1)
+        else:
+            inp = torch.cat([t_in, x.flatten(1)], dim=1)
+        return self.net(inp)
 
 
 # ---------------------------------------------------------------------------
@@ -140,20 +155,34 @@ class OTCFMRunner(BaselineRunner):
         device = self.spec.device
         dim    = self.spec.dim
 
-        model = _VelocityMLP(dim, hidden=cfg.hidden, n_layers=cfg.n_layers).to(device)
+        # When oracle coupling is provided, condition the velocity field on x₀.
+        # This is necessary for transports whose straight-line trajectories cross
+        # (e.g. anticorrelation x↦−x), where the marginal velocity is ill-defined.
+        use_oracle    = self.spec.coupling_fn is not None
+        conditional   = use_oracle
+        model = _VelocityMLP(dim, hidden=cfg.hidden, n_layers=cfg.n_layers,
+                             conditional=conditional).to(device)
         opt   = torch.optim.Adam(model.parameters(), lr=cfg.lr)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.n_steps, eta_min=cfg.lr * 0.1)
+
+        if conditional:
+            logger.info("  [OT-CFM] coupling_fn provided — using conditional velocity "
+                        "field v(t, x_t, x₀) to handle crossing trajectories.")
 
         log_every = max(1, cfg.n_steps // 20)
         model.train()
 
         for step in range(cfg.n_steps):
-            x0 = _to_tensor(self.spec.source.sample(cfg.batch_size), device)
-            x1 = _to_tensor(self.spec.target.sample(cfg.batch_size), device)
-
-            # Minibatch OT pairing (or plain random pairing)
-            if cfg.ot_eps is not None:
-                x0, x1 = _ot_pair(x0, x1, eps=cfg.ot_eps)
+            if use_oracle:
+                # Oracle coupling: skip independent sampling and OT pairing entirely
+                x0, x1 = self.spec.coupling_fn(cfg.batch_size)
+                x0, x1 = x0.to(device), x1.to(device)
+            else:
+                x0 = _to_tensor(self.spec.source.sample(cfg.batch_size), device)
+                x1 = _to_tensor(self.spec.target.sample(cfg.batch_size), device)
+                # Minibatch OT pairing (or plain random pairing)
+                if cfg.ot_eps is not None:
+                    x0, x1 = _ot_pair(x0, x1, eps=cfg.ot_eps)
 
             # Sample time, interpolate, add optional noise
             t  = torch.rand(len(x0), device=device)
@@ -162,7 +191,7 @@ class OTCFMRunner(BaselineRunner):
                 xt = xt + cfg.sigma * torch.randn_like(xt)
 
             # CFM objective: regress conditional vector field (x1 - x0)
-            loss = (model(t, xt) - (x1 - x0)).pow(2).mean()
+            loss = (model(t, xt, x0 if conditional else None) - (x1 - x0)).pow(2).mean()
 
             opt.zero_grad()
             loss.backward()
@@ -191,11 +220,13 @@ class OTCFMRunner(BaselineRunner):
         x0 = _to_tensor(self.spec.source.sample(n), device)
         x  = x0.clone()
         dt = 1.0 / self.config.euler_steps
+        # Pass x₀ as condition throughout integration for conditional models
+        cond = x0 if model.conditional else None
 
         with torch.no_grad():
             for i in range(self.config.euler_steps):
                 t = torch.full((n,), i * dt, device=device)
-                x = x + model(t, x) * dt
+                x = x + model(t, x, cond) * dt
 
         return x0, x
 

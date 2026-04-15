@@ -9,11 +9,20 @@ by θ° applied to Gaussian blobs at positions S₀.  The new source μ' and
 new target ν' live at *different* 3-D positions S₁ and follow the **same**
 rotation dynamic.
 
+Critical design rule
+--------------------
+The reference coupling MUST have the **same number of modes** as the new
+distributions.  An unconditional flow matching bridge can only learn a
+deterministic velocity field v(t, y_t); with N_ref < N_new it would need
+to "split" one source blob into multiple target blobs — impossible for a
+deterministic map.  OT mini-batch pairing then provides clean 1-to-1 mode
+assignments.
+
 Experiments
 -----------
-simple  – 90° z-rotation of a 2-blob GMM → generalised to a 3-blob GMM
-medium  – 120° z-rotation of an equilateral-triangle GMM → 4-blob rectangle
-complex – 60° z-rotation of a 4-blob square → 6-blob hexagonal pattern
+simple  – 90° z-rotation of a 3-blob GMM → generalised to a 3-blob GMM
+medium  – 120° z-rotation of a 4-blob GMM → 4-blob rectangle
+complex – 60° z-rotation of a 6-blob hexagonal GMM → 6-blob hexagonal pattern
 
 Each experiment exists in a *standard* and *perturbed* variant.  The perturbed
 variant adds an extra 30° tilt around the x-axis on the new target, probing
@@ -138,9 +147,10 @@ class GMM3DCoupling(CouplingDistribution):
         self.K      = self.src.shape[0]
 
     def coupling_sample(self, n: int):
-        idx  = torch.randint(self.K, (n,), device=self._dev)
-        x    = self.src[idx] + torch.randn(n, 3, device=self._dev) * self.scale
-        y    = self.tgt[idx] + torch.randn(n, 3, device=self._dev) * self.scale
+        idx   = torch.randint(self.K, (n,), device=self._dev)
+        noise = torch.randn(n, 3, device=self._dev) * self.scale
+        x     = self.src[idx] + noise
+        y     = self.tgt[idx] + noise   # same noise → velocity y-x = tgt[k]-src[k] exactly
         return x, y
 
     def sample_init(self, n: int) -> torch.Tensor:
@@ -190,14 +200,15 @@ class GMM3DDistribution(Distribution):
 def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 200_000,
-        marginal_epochs          = 10_000,
-        pretrain_epochs          = 20_000,
-        dual_epochs              = 500,
-        cfm_epochs               = 1000,
+        dataset_size             = 500_000,
+        marginal_epochs          = 2_000,
+        pretrain_epochs          = 5_000,
+        dual_epochs              = 100,
+        cfm_epochs               = 500,
         advance_steps            = 100,
         iterations               = 50,
-        scale_factor             = 100.0,
+        num_rectified_flow       = 0,
+        scale_factor             = 50,
         batch_size               = 2_048 * 8,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
@@ -206,34 +217,65 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma           = 0.05,
-        sigma2          = 0.05,
+        sigma           = 0.1,
+        sigma2          = 0.1,
         loss            = "weighted",
-        l2_reg          = 0,
-        lip_reg         = 0,
+        l2_reg          = 1e-2,
+        lip_reg         = 1.0,
         mean_reg        = 0,
-        use_noisy_field = False,
-        particle_ratio  = 0.25,
-        lr_min_factor   = 0.1,
+        use_noisy_field    = True,
+        particle_ratio     = 0.25,
+        lr_cosine_decay    = False,
+        lr_min_factor      = 0.4,   # 0.1 was too aggressive: flow ran at 1e-4 every iteration
+        dual_warmup_epochs = 0,
+        use_ot_pretrain=True #(default): OT pairing gives each sample a consistent
+        # (y0, y1) assignment so the conditional bridge model can learn per-sample
+        # transport rather than the dataset mean velocity.
+    )
+
+def default_model_cfg(dimension: int = 3, hidden_size: int = 64, num_layers: int = 3) -> FeedForwardConfig:
+    return FeedForwardConfig(
+        dimension=dimension,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        flow_learning_rate=1e-3,
+        nu_learning_rate=1e-3,
+        mu_learning_rate=1e-3,
+        dual_learning_rate=1e-3,
+        dual_l2_reg=1e-3,
+        # 3D reference couplings always have fewer modes than the new distributions
+        # (2→3, 3→4, 4→6 blobs across simple/medium/complex).  An unconditional
+        # bridge with independent (y0,y1) sampling can only learn the mean velocity
+        # E[y1-y0] — it cannot split blobs.  With use_conditional_bridge=True the
+        # model receives cat([yt, y0]) so OT-assigned starting points determine
+        # which target blob each particle goes to.  The architecture fix in base.py
+        # ensures bridge MLPs are built with bridge_dim=2*dim input from the start.
+        use_conditional_bridge=True,
     )
 
 
 # ---------------------------------------------------------------------------
-# simple – 90° z-rotation, 2 blobs → 3 blobs
+# simple – 90° z-rotation, 3 blobs → 3 blobs
 # ---------------------------------------------------------------------------
 
 def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
-    """90° z-rotation on 2 source blobs generalised to 3 new blobs.
+    """90° z-rotation on 3 source blobs generalised to 3 new blobs.
 
     Reference coupling
-        2 blobs at [±1.5, 0, 0], transport = R_z(90°).
+        3 blobs with slight y-offset: [[1.5,±0.5,0], [-1.5,0,0]].
+        The y-offset breaks the x-axis symmetry so that R_z(90°) maps each
+        ref_src blob to a *distinct* ref_tgt position, giving OT a clean
+        1-to-1 assignment.
+        ref_tgt = R_z(90°) → [[-0.5,1.5,0], [0.5,1.5,0], [0,-1.5,0]]
     New marginals
         3 blobs at different 3-D positions;  target = R_z(90°) of source
         (+ R_x(30°) extra tilt if perturbed).
     """
     device   = get_device()
-    ref_src  = [[-1.5, 0.0, 0.0], [1.5, 0.0, 0.0]]
-    ref_tgt  = _rot_z(ref_src, 90.0)
+    # y-offset ±1.0 matches new_src's ±1.0 offset → same blob separation ratio (8σ).
+    # ±0.5 gave only 4σ separation, causing OT cross-assignment and mode drift over epochs.
+    ref_src  = [[1.5, 1.0, 0.0], [1.5, -1.0, 0.0], [-1.5, 0.0, 0.0]]
+    ref_tgt  = _rot_z(ref_src, 90.0)   # → [[-1.0,1.5,0],[1.0,1.5,0],[0,-1.5,0]]
     coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.25, device=device)
 
     new_src_c = [[3.0, 1.0, 1.0], [3.0, -1.0, 1.0], [-3.0, 0.0, 1.0]]
@@ -246,9 +288,14 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     transport_map, inverse_transport_map = _make_transport_maps(90.0, perturbed)
 
     train_cfg  = _default_train_cfg(device)
+    train_cfg.marginal_epochs = 2_000          # 2-blob reference is simple; 20k is overkill
+    train_cfg.iterations     = 100              # complex needs more iterations than simple
+    train_cfg.pretrain_epochs = 8_000           # larger flow pretraining for 5-blob cross with 6.7× scale jump
+    train_cfg.dual_epochs    = 150
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
+    method_cfg.dual_warmup_epochs = 50         # warm-start duals for hard geometry
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=128, num_layers=4)   # 128 is oversized for 2→3 blobs
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"3d_simple{'_perturbed' if perturbed else ''}",
@@ -267,25 +314,26 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
 
 
 # ---------------------------------------------------------------------------
-# medium – 120° z-rotation, equilateral triangle → 4-blob rectangle
+# medium – 120° z-rotation, 4 blobs → 4 blobs
 # ---------------------------------------------------------------------------
 
 def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
-    """120° z-rotation on an equilateral-triangle GMM generalised to a 4-blob GMM.
+    """120° z-rotation on a 4-blob rectangular GMM generalised to a 4-blob GMM.
 
     Reference coupling
-        3 blobs at the vertices of an equilateral triangle (r=2), transport = R_z(120°)
-        so that each vertex maps to the next (v₀→v₁→v₂→v₀).
+        4 blobs at [±2, ±1, 0] (small rectangle), transport = R_z(120°).
+        Rectangle aspect ratio 2:1 ensures all 4 blobs are distinct under
+        R_z(120°), giving OT a clean 1-to-1 assignment (no symmetric degeneracy).
     New marginals
         4-blob rectangle at [±4, ±2, 1];  target = R_z(120°) of source
         (+ R_x(30°) if perturbed).
     """
     device = get_device()
-    r      = 2.0
     ref_src = [
-        [r, 0.0, 0.0],
-        [r * math.cos(2 * math.pi / 3), r * math.sin(2 * math.pi / 3), 0.0],
-        [r * math.cos(4 * math.pi / 3), r * math.sin(4 * math.pi / 3), 0.0],
+        [ 2.0,  1.0, 0.0],
+        [ 2.0, -1.0, 0.0],
+        [-2.0,  1.0, 0.0],
+        [-2.0, -1.0, 0.0],
     ]
     ref_tgt  = _rot_z(ref_src, 120.0)
     coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.3, device=device)
@@ -300,9 +348,12 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     transport_map, inverse_transport_map = _make_transport_maps(120.0, perturbed)
 
     train_cfg  = _default_train_cfg(device)
+    train_cfg.marginal_epochs    = 2_000       # 3→4 blob case benefits from more bridge training
+    # train_cfg.num_rectified_flow = 1            # extra rectification pass improves trajectory straightness
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
-    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
+    method_cfg.dual_warmup_epochs = 50          # warm-start duals for 4-blob target
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=256, num_layers=4)
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"3d_medium{'_perturbed' if perturbed else ''}",
@@ -321,25 +372,27 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
 
 
 # ---------------------------------------------------------------------------
-# complex – 60° z-rotation, 4-blob square → 6-blob hexagon
+# complex – 60° z-rotation, 6-blob hexagon → 6-blob hexagon
 # ---------------------------------------------------------------------------
 
 def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
-    """60° z-rotation on a 4-blob square generalised to a 6-blob hexagonal pattern.
+    """60° z-rotation on a 6-blob hexagonal GMM generalised to a larger hexagonal pattern.
 
     Reference coupling
-        4-blob axis-aligned square at r=2 in the z=0 plane, transport = R_z(60°).
+        6-blob hexagon at r=1.5 in the z=0 plane, transport = R_z(60°).
+        Under a 60° rotation a regular hexagon maps each vertex to the next,
+        giving a clean 1-to-1 OT assignment.
     New marginals
         6-blob hexagon at r=4 in the z=2 plane;  target = R_z(60°) of source
         (+ R_x(30°) if perturbed).
     """
     device = get_device()
-    r0     = 2.0
+    r0     = 1.5
     ref_src = [
-        [ r0,  0.0, 0.0], [0.0,  r0, 0.0],
-        [-r0,  0.0, 0.0], [0.0, -r0, 0.0],
+        [r0 * math.cos(k * math.pi / 3), r0 * math.sin(k * math.pi / 3), 0.0]
+        for k in range(6)
     ]
-    ref_tgt  = _rot_z(ref_src, 60.0)
+    ref_tgt  = _rot_z(ref_src, 60.0)   # maps vertex k → vertex k+1 (mod 6)
     coupling = GMM3DCoupling(ref_src, ref_tgt, blob_scale=0.25, device=device)
 
     r1, z1 = 4.0, 2.0
@@ -355,11 +408,19 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     transport_map, inverse_transport_map = _make_transport_maps(60.0, perturbed)
 
-    train_cfg              = _default_train_cfg(device)
-    train_cfg.iterations   = 200
-    method_cfg             = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
-    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2)
+    train_cfg                    = _default_train_cfg(device)
+    train_cfg.iterations         = 100             # 200 risks coupling drift; 100 is more stable
+    train_cfg.pretrain_epochs    = 8_000           # 6-blob hexagon needs more flow pretraining
+    train_cfg.dual_epochs        = 200             # harder geometry → more dual convergence steps
+    train_cfg.cfm_epochs         = 750             # more CFM steps for complex 3D geometry
+    # train_cfg.num_rectified_flow = 1               # extra rectification for 4→6 blob jump
+    method_cfg                   = _default_method_cfg()
+    method_cfg.lr_min_factor     = 0.3             # slightly more aggressive decay for complex
+    method_cfg.dual_warmup_epochs = 100            # larger warmup for hardest 3D geometry
+    method_cfg.lip_reg           = 15              # stronger Lipschitz for 6-blob hexagonal potential
+    method_cfg.particle_ratio    = 0.35            # more particle mixing for complex multi-mode case
+    model_cfg  = default_model_cfg(dimension=3, hidden_size=256, num_layers=4)  # deeper for 6-blob hexagon
+    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=800, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"3d_complex{'_perturbed' if perturbed else ''}",

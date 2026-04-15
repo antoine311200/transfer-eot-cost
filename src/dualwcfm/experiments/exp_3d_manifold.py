@@ -384,11 +384,19 @@ def _swiss_roll(output_root: str) -> ExperimentSpec:
     new_tgt = _TransportedDist(new_src, transport_map)
 
     train_cfg  = _default_train_cfg(device)
+    train_cfg.marginal_epochs    = 2_000          # continuous manifold needs more bridge training than GMM
+    train_cfg.num_rectified_flow = 2               # extra rectification for curved roll geometry
+    train_cfg.pretrain_epochs    = 8_000
+    train_cfg.dual_epochs        = 150
+    train_cfg.advance_steps      = 150             # more ODE steps for curved manifold integration
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
+    method_cfg.sigma             = 0.05            # σ=0.1 over-spreads the roll structure; 0.05 keeps paths on manifold
+    method_cfg.lip_reg           = 5               # roll transport is smooth; less Lipschitz regularisation needed
+    method_cfg.dual_warmup_epochs = 50
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=128, num_layers=3, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
-        show_each_marginal=1000, show_each_pretrain=1000,
+        show_each_marginal=100, show_each_pretrain=1000,
         camera_elev=38, camera_azim=30,   # top-ish view to see roll structure
     )
 
@@ -442,12 +450,14 @@ def _helices(output_root: str) -> ExperimentSpec:
     new_tgt = _TransportedDist(new_src, transport_map)
 
     train_cfg  = _default_train_cfg(device)
+    train_cfg.num_rectified_flow = 2               # helical geometry benefits from trajectory straightening
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
+    method_cfg.sigma             = 0.05            # helix is a 1D structure; σ=0.1 blurs the tube unnecessarily
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, num_layers=3, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
-        show_each_marginal=1000, show_each_pretrain=1000,
-        camera_elev=18, camera_azim=30,   # side view to appreciate helical structure
+        show_each_marginal=100, show_each_pretrain=1000,
+        camera_elev=18, camera_azim=30,   # side view to appreciate helical structure (linear T, 64 sufficient)
     )
 
     return ExperimentSpec(
@@ -497,11 +507,23 @@ def _sphere_twist_exp(output_root: str) -> ExperimentSpec:
     new_tgt = _TransportedDist(new_src, transport_map)
 
     train_cfg  = _default_train_cfg(device)
+    train_cfg.marginal_epochs    = 3_000          # latitude-dependent twist is the hardest bridge learning task
+    train_cfg.num_rectified_flow = 3               # nonlinear twist requires the most trajectory straightening
+    train_cfg.pretrain_epochs    = 10_000
+    train_cfg.dual_epochs        = 200
+    train_cfg.cfm_epochs         = 750
+    train_cfg.iterations         = 100
+    train_cfg.advance_steps      = 150
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
+    method_cfg.sigma             = 0.05            # sphere radius=1; σ=0.1 leaks outside the shell
+    method_cfg.lip_reg           = 20              # nonlinear twist → sharper dual gradients → more Lipschitz control
+    method_cfg.particle_ratio    = 0.35
+    method_cfg.lr_min_factor     = 0.3
+    method_cfg.dual_warmup_epochs = 100            # largest warmup for hardest dual problem
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=256, num_layers=4, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
-        show_each_marginal=1000, show_each_pretrain=1000,
+        show_each_marginal=100, show_each_pretrain=1000,
         camera_elev=28, camera_azim=20,
     )
 
@@ -561,11 +583,23 @@ def _rings_to_helix(output_root: str) -> ExperimentSpec:
         return torch.stack([y[:, 0], y[:, 1], torch.zeros_like(y[:, 2])], dim=1)
 
     train_cfg  = _default_train_cfg(device)
+    train_cfg.marginal_epochs    = 2_000          # 40-blob GMM with tiny blob_scale=0.07 needs long bridge training
+    train_cfg.num_rectified_flow = 2
+    train_cfg.pretrain_epochs    = 8_000
+    train_cfg.dual_epochs        = 150
+    train_cfg.cfm_epochs         = 750             # z-lift transport is nonlinear → more CFM steps
+    train_cfg.iterations         = 100
+    train_cfg.advance_steps      = 150
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=64, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
+    method_cfg.sigma             = 0.03            # BLOB_SCALE=0.07 → σ must stay ≤ 0.07; 0.03 is safe
+    method_cfg.lip_reg           = 15
+    method_cfg.particle_ratio    = 0.35
+    method_cfg.lr_min_factor     = 0.3
+    method_cfg.dual_warmup_epochs = 50
+    model_cfg  = FeedForwardConfig(dimension=3, hidden_size=256, num_layers=4, flow_learning_rate=1e-4, nu_learning_rate=1e-4, mu_learning_rate=1e-4, dual_learning_rate=1e-4)
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=600, trajectory_stride=2,
-        show_each_marginal=1000, show_each_pretrain=1000,
+        show_each_marginal=100, show_each_pretrain=1000,
         camera_elev=25, camera_azim=15,   # see both z-lift and ring structure
     )
 

@@ -39,6 +39,7 @@ De Bortoli et al., "Diffusion Schrödinger Bridge", NeurIPS 2021.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -71,19 +72,32 @@ class _PotentialMLP(nn.Module):
 
 
 class _VelocityMLP(nn.Module):
-    """Time-conditioned velocity field  v_θ(t, x) → ℝ^d."""
+    """Time-conditioned velocity field  v_θ(t, x) → ℝ^d.
 
-    def __init__(self, dim: int, hidden: int = 256, n_layers: int = 4):
+    When *conditional* is True, also takes x₀ as input: [t | x_t | x₀].
+    Required for oracle-coupling training when trajectories cross.
+    """
+
+    def __init__(self, dim: int, hidden: int = 256, n_layers: int = 4,
+                 conditional: bool = False):
         super().__init__()
-        layers: List[nn.Module] = [nn.Linear(dim + 1, hidden), nn.SiLU()]
+        in_dim = (2 * dim + 1) if conditional else (dim + 1)
+        layers: List[nn.Module] = [nn.Linear(in_dim, hidden), nn.SiLU()]
         for _ in range(n_layers - 1):
             layers += [nn.Linear(hidden, hidden), nn.SiLU()]
         layers.append(nn.Linear(hidden, dim))
         self.net = nn.Sequential(*layers)
+        self.conditional = conditional
 
-    def forward(self, t: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, t: torch.Tensor, x: torch.Tensor,
+                x0: Optional[torch.Tensor] = None) -> torch.Tensor:
         t_in = t.view(-1, 1).expand(x.shape[0], 1)
-        return self.net(torch.cat([t_in, x.flatten(1)], dim=1))
+        if self.conditional:
+            assert x0 is not None
+            inp = torch.cat([t_in, x.flatten(1), x0.flatten(1)], dim=1)
+        else:
+            inp = torch.cat([t_in, x.flatten(1)], dim=1)
+        return self.net(inp)
 
 
 # ---------------------------------------------------------------------------
@@ -95,19 +109,20 @@ class LightSBConfig:
     """Hyperparameters for the LightSB baseline."""
     eps:               float = 0.1     # entropic regularisation ε
     # Potential training
-    n_dual_steps:      int   = 5_000   # gradient steps for (f, g) training
-    dual_batch:        int   = 256     # batch size for potential training
+    n_dual_steps:      int   = 10_000  # gradient steps for (f, g) training
+    dual_batch:        int   = 512     # batch size for potential training
     dual_lr:           float = 1e-3
     potential_hidden:  int   = 256
     potential_layers:  int   = 3
     # CFM on resampled plan
-    n_cfm_steps:       int   = 5_000
+    n_cfm_steps:       int   = 10_000
     cfm_batch:         int   = 512
     cfm_lr:            float = 1e-3
     cfm_hidden:        int   = 256
     cfm_layers:        int   = 4
     # Plan sampling buffer
     plan_buffer_size:  int   = 4_000   # number of (x, y) plan pairs to maintain
+    plan_refresh_every: int  = 2_000   # re-sample the plan buffer every N CFM steps
     sigma_bridge:      float = 0.0     # noise on the interpolant; 0 = ODE
     # Inference
     euler_steps:       int   = 100
@@ -167,11 +182,14 @@ class LightSBRunner(BaselineRunner):
             C = torch.cdist(x.flatten(1), y.flatten(1)).pow(2)  # (N, M)
 
             # Sinkhorn dual: maximise E[f] + E[g] - ε·mean(exp((f+g-C)/ε))
-            # log-stabilised: log_W_ij = (f_i + g_j - C_ij) / ε
             log_W = (fx.unsqueeze(1) + gy.unsqueeze(0) - C) / eps  # (N, M)
-            # Subtract max for numerical stability in the expectation term
-            log_W_stable = log_W - log_W.detach().max()
-            exp_term = eps * log_W_stable.exp().mean()
+
+            # Numerically stable mean(exp(log_W)) via logsumexp:
+            #   mean(exp(log_W)) = exp(logsumexp(log_W.flat) - log(N*M))
+            # NOTE: do NOT just subtract max without restoring exp(max) —
+            # that silently drops the penalty to ~0 and causes divergence.
+            log_n = math.log(log_W.numel())
+            exp_term = eps * (torch.logsumexp(log_W.reshape(-1), dim=0) - log_n).exp()
 
             # Negate because we want to *maximise* the dual
             loss = -(fx.mean() + gy.mean() - exp_term)
@@ -179,6 +197,10 @@ class LightSBRunner(BaselineRunner):
             opt_f.zero_grad()
             opt_g.zero_grad()
             loss.backward()
+            # Clip to guard against any remaining large gradients
+            torch.nn.utils.clip_grad_norm_(
+                list(f.parameters()) + list(g.parameters()), 5.0
+            )
             opt_f.step()
             opt_g.step()
 
@@ -222,9 +244,12 @@ class LightSBRunner(BaselineRunner):
         C  = torch.cdist(x.flatten(1), y.flatten(1)).pow(2)   # (N, N)
 
         log_w = (fx.unsqueeze(1) + gy.unsqueeze(0) - C) / eps  # (N, N)
-        # Normalise rows: p(j | i) = softmax_j(log_w[i, :])
-        log_p = log_w - torch.logsumexp(log_w, dim=1, keepdim=True)  # (N, N)
-        p     = log_p.exp()   # (N, N)
+        # Row-wise softmax: numerically stable; handles -inf rows gracefully
+        p = torch.softmax(log_w, dim=1)   # (N, N)
+        # Guard: if any row collapsed to NaN (all-inf costs), replace with uniform
+        bad = p.isnan().any(dim=1)
+        if bad.any():
+            p[bad] = 1.0 / N
 
         # Sample one y per x according to p(· | x_i)
         y_idx = torch.multinomial(p, num_samples=1).squeeze(1)  # (N,)
@@ -236,13 +261,13 @@ class LightSBRunner(BaselineRunner):
 
     def _train_cfm(
         self,
-        x_plan: torch.Tensor,
-        y_plan: torch.Tensor,
+        f: _PotentialMLP,
+        g: _PotentialMLP,
     ) -> _VelocityMLP:
+        """Train CFM on the SB plan, periodically refreshing the plan buffer."""
         cfg    = self.config
         device = self.spec.device
         dim    = self.spec.dim
-        N      = len(x_plan)
 
         flow = _VelocityMLP(dim, cfg.cfm_hidden, cfg.cfm_layers).to(device)
         opt  = torch.optim.Adam(flow.parameters(), lr=cfg.cfm_lr)
@@ -251,7 +276,16 @@ class LightSBRunner(BaselineRunner):
         )
         log_every = max(1, cfg.n_cfm_steps // 20)
 
+        # Initial plan buffer
+        x_plan, y_plan = self._sample_plan(f, g)
+        N = len(x_plan)
+
         for step in range(cfg.n_cfm_steps):
+            # Periodically refresh the plan buffer to avoid overfitting
+            if step > 0 and cfg.plan_refresh_every > 0 and step % cfg.plan_refresh_every == 0:
+                x_plan, y_plan = self._sample_plan(f, g)
+                N = len(x_plan)
+
             idx = torch.randint(N, (cfg.cfm_batch,), device=device)
             x0b = x_plan[idx]
             x1b = y_plan[idx]
@@ -279,23 +313,95 @@ class LightSBRunner(BaselineRunner):
         return flow
 
     # ------------------------------------------------------------------
+    # Stage 2 (oracle variant) — CFM directly on coupled pairs
+    # ------------------------------------------------------------------
+
+    def _train_cfm_coupled(self) -> "_VelocityMLP":
+        """Train CFM on oracle (x, T(x)) pairs; skips dual-potential training.
+
+        Uses a conditional velocity field v(t, x_t, x₀) to correctly handle
+        transports whose straight-line trajectories cross (e.g. x↦−x).
+        """
+        cfg    = self.config
+        device = self.spec.device
+        dim    = self.spec.dim
+
+        flow  = _VelocityMLP(dim, cfg.cfm_hidden, cfg.cfm_layers,
+                             conditional=True).to(device)
+        opt   = torch.optim.Adam(flow.parameters(), lr=cfg.cfm_lr)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=cfg.n_cfm_steps, eta_min=cfg.cfm_lr * 0.1,
+        )
+        log_every = max(1, cfg.n_cfm_steps // 20)
+
+        x_plan: Optional[torch.Tensor] = None
+        y_plan: Optional[torch.Tensor] = None
+        N = 0
+
+        for step in range(cfg.n_cfm_steps):
+            # Refresh the oracle pair buffer periodically (same cadence as plan)
+            if x_plan is None or (cfg.plan_refresh_every > 0
+                                  and step % cfg.plan_refresh_every == 0):
+                x_plan, y_plan = self.spec.coupling_fn(cfg.plan_buffer_size)
+                x_plan = x_plan.to(device)
+                y_plan = y_plan.to(device)
+                N = len(x_plan)
+
+            idx = torch.randint(N, (cfg.cfm_batch,), device=device)
+            x0b = x_plan[idx]
+            x1b = y_plan[idx]
+
+            t  = torch.rand(len(x0b), device=device)
+            xt = (1 - t.view(-1, 1)) * x0b + t.view(-1, 1) * x1b
+            if cfg.sigma_bridge > 0:
+                xt = xt + cfg.sigma_bridge * torch.randn_like(xt)
+
+            loss = (flow(t, xt, x0b) - (x1b - x0b)).pow(2).mean()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            sched.step()
+
+            if (step + 1) % log_every == 0:
+                logger.info(
+                    "  [LightSB CFM(coupled) %s] step %5d/%d  loss=%.5f",
+                    self.spec.name, step + 1, cfg.n_cfm_steps, loss.item(),
+                )
+                self._wandb.log({"lightsb/coupled_cfm_loss": loss.item()})
+
+        return flow
+
+    # ------------------------------------------------------------------
     # BaselineRunner interface
     # ------------------------------------------------------------------
 
     def train(self) -> None:
+        if self.spec.coupling_fn is not None:
+            logger.info(
+                "  [LightSB] coupling_fn provided — skipping dual training, "
+                "training CFM directly on oracle pairs."
+            )
+            flow = self._train_cfm_coupled()
+            torch.save(flow.state_dict(),
+                       os.path.join(self.spec.output_dir, "lightsb_flow.pth"))
+            self._flow = flow
+            logger.info("  [LightSB] Training complete -> %s", self.spec.output_dir)
+            return
+
         logger.info("  [LightSB] Stage 1: training dual potentials …")
         f, g = self._train_potentials()
 
-        logger.info("  [LightSB] Stage 2: sampling SB plan …")
-        x_plan, y_plan = self._sample_plan(f, g)
+        # Log plan quality after potential training
+        with torch.no_grad():
+            x_probe, y_probe = self._sample_plan(f, g)
         logger.info(
             "  [LightSB] Plan sampled: %d pairs,  E[‖x−y‖²]=%.4f",
-            len(x_plan),
-            (x_plan - y_plan).pow(2).sum(-1).mean().item(),
+            len(x_probe),
+            (x_probe - y_probe).pow(2).sum(-1).mean().item(),
         )
 
-        logger.info("  [LightSB] Stage 3: training CFM on plan …")
-        flow = self._train_cfm(x_plan, y_plan)
+        logger.info("  [LightSB] Stage 3: training CFM on plan (with periodic refresh) …")
+        flow = self._train_cfm(f, g)
 
         # Save artefacts
         torch.save(f.state_dict(),    os.path.join(self.spec.output_dir, "lightsb_f.pth"))
@@ -311,13 +417,14 @@ class LightSBRunner(BaselineRunner):
         cfg    = self.config
         dt     = 1.0 / cfg.euler_steps
 
-        x0 = _to_tensor(self.spec.source.sample(n), device)
-        x  = x0.clone()
+        x0   = _to_tensor(self.spec.source.sample(n), device)
+        x    = x0.clone()
+        cond = x0 if flow.conditional else None
 
         with torch.no_grad():
             for i in range(cfg.euler_steps):
                 t = torch.full((n,), i * dt, device=device)
-                x = x + flow(t, x) * dt
+                x = x + flow(t, x, cond) * dt
 
         return x0, x
 

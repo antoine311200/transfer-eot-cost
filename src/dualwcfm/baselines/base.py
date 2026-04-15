@@ -80,6 +80,9 @@ class BaselineSpec:
     ref_cov:       Optional[torch.Tensor] = None
     # Optional: ground-truth forward transport map T s.t. y ≈ T(x)
     transport_map: Optional[Callable]     = None
+    # Optional: oracle coupling sampler  n -> (x, y) from the true transport plan.
+    # When set, baseline runners use paired samples instead of independent marginals.
+    coupling_fn:   Optional[Callable]     = None
 
 
 # ---------------------------------------------------------------------------
@@ -198,10 +201,13 @@ def append_summary_csv(output_root: str, row: Dict[str, Any]) -> None:
 
 
 def _write_run_csv(output_dir: str, metrics: Dict[str, Any]) -> None:
+    """Append one metrics row to ``result.csv`` in *output_dir* (never overwrites)."""
     path = os.path.join(output_dir, "result.csv")
-    with open(path, "w", newline="") as f:
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(metrics.keys()))
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
         writer.writerow(metrics)
 
 

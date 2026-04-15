@@ -131,28 +131,33 @@ class BidirectionalUnetStrategy(BidirectionalStrategy):
     ``(C, H, W)`` tuple set by the caller before ``_create_models`` is invoked.
     """
 
-    def _create_models(self, dim: int, hidden_size: int) -> None:  # noqa: D102
+    def _create_models(self, dim: int, hidden_size: int, num_layers: int = 2) -> None:  # noqa: D102
         self._device = None  # Reset so the next to_device() call moves the new models.
         C, H, W = self.config.image_shape
         num_channels   = hidden_size if hidden_size > 0 else _NUM_CHANNELS
         num_res_blocks = getattr(self.config, "num_res_blocks", _NUM_RES_BLOCKS)
 
-        def _make_unet(in_channels: int, stop_middle: bool = False) -> UNetModel:
+        def _make_unet(in_channels: int, stop_middle: bool = False, out_channels: int = None) -> UNetModel:
+            _out = 1 if stop_middle else (out_channels if out_channels is not None else in_channels)
             return UNetModel(
                 dim            = (in_channels, H, W),
                 channel_mult   = _CHANNEL_MULT,
                 num_channels   = num_channels,
                 num_res_blocks = num_res_blocks,
                 stop_middle    = stop_middle,
-                out_channels   = 1 if stop_middle else in_channels,
+                out_channels   = _out,
             )
 
         wrap  = self.wrapper   # UNetWrapper
         dwrap = DualUNetWrapper
 
-        # Bridge models: (t, x) → velocity, single-channel input
-        self.mu_bridge = wrap(_make_unet(C))
-        self.nu_bridge = wrap(_make_unet(C))
+        # Bridge models: (t, x_full) → velocity.
+        # With use_conditional_bridge=True the extended state cat([xt, x0]) doubles
+        # the input channels, but the bridge always outputs C channels (velocity for
+        # the state half only).
+        bridge_in = 2 * C if getattr(self.config, "use_conditional_bridge", False) else C
+        self.mu_bridge = wrap(_make_unet(bridge_in, out_channels=C))
+        self.nu_bridge = wrap(_make_unet(bridge_in, out_channels=C))
 
         # Dual potentials: (x,) → scalar, stop_middle=True for global pool
         self.f_dual = dwrap(_make_unet(C,     stop_middle=True))
@@ -166,8 +171,8 @@ class BidirectionalUnetStrategy(BidirectionalStrategy):
         self.previous_backward_model= wrap(_make_unet(2 * C))
 
         # Frozen initial copies for reference
-        self.initial_mu_bridge      = wrap(_make_unet(C))
-        self.initial_nu_bridge      = wrap(_make_unet(C))
+        self.initial_mu_bridge      = wrap(_make_unet(bridge_in, out_channels=C))
+        self.initial_nu_bridge      = wrap(_make_unet(bridge_in, out_channels=C))
         self.initial_forward_model  = wrap(_make_unet(2 * C))
         self.initial_backward_model = wrap(_make_unet(2 * C))
 

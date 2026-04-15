@@ -30,7 +30,7 @@ import torch
 
 from dualwcfm.config import FeedForwardConfig, TrainingConfig, VisualizeConfig
 from dualwcfm.distributions.coupling import FunctionalCouplingDistribution, RotatedShapeCoupling
-from dualwcfm.distributions.distribution import GMMShapeDistribution, Simple2DGaussianDistribution
+from dualwcfm.distributions.distribution import GMMShapeDistribution, Simple2DGaussianDistribution, Distribution
 from dualwcfm.methods.mixture import MixtureConfig
 from dualwcfm.experiments.base import ExperimentSpec, get_device
 
@@ -43,16 +43,16 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
         dataset_size             = 1_000_000,
-        marginal_epochs          = 10_000,
-        pretrain_epochs          = 10_000,
+        marginal_epochs          = 2_000,
+        pretrain_epochs          = 5_000,
         dual_epochs              = 100,
         cfm_epochs               = 500,
         advance_steps            = 100,
         iterations               = 50,
-        num_rectified_flow       = 1,
-        scale_factor             = 100.0,
-        batch_size               = 2_048 * 4,
-        coupling_chunk_size      = 1_000,
+        num_rectified_flow       = 0,
+        scale_factor             = 50,
+        batch_size               = 2048 * 4,
+        coupling_chunk_size      = 100_000,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
     )
@@ -60,18 +60,30 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
 
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
-        sigma          = 0.01,
-        sigma2         = 0.01,
+        sigma          = 0.1, # t time
+        sigma2         = 0.1, # s time
         loss           = "weighted",
-        l2_reg         = 0,
-        lip_reg        = 0,
+        l2_reg         = 1e-2,
+        lip_reg        = 1.0,
         mean_reg       = 0,
         use_noisy_field= False,
         particle_ratio = 0.1,
         lr_cosine_decay = False,
         lr_min_factor   = 0.5,
+        dual_warmup_epochs = 0,
     )
 
+def _default_model_cfg(dimension: int = 2, hidden_size: int = 32, num_layers: int = 2) -> FeedForwardConfig:
+    return FeedForwardConfig(
+        dimension=dimension,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+        flow_learning_rate=1e-3,
+        nu_learning_rate=1e-3,
+        mu_learning_rate=1e-3,
+        dual_learning_rate=1e-3,
+        dual_l2_reg=0,#1e-3,
+    )
 
 # ---------------------------------------------------------------------------
 # simple – anticorrelation map
@@ -116,9 +128,12 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     inverse_transport_map = transport_map
 
     train_cfg  = _default_train_cfg(device)
+    train_cfg.marginal_epochs    = 2_000   # linear transport converges fast; fewer phases needed
+    # train_cfg.num_rectified_flow = 1       # one rectification pass is sufficient for a linear map
     method_cfg = _default_method_cfg()
-    model_cfg  = FeedForwardConfig(dimension=2, hidden_size=32)
-    vis_cfg    = VisualizeConfig(show_each=10, n_trajectories=500, trajectory_stride=2)
+    method_cfg.sigma = 0.03                # blobs are narrow (std=0.5) and far apart (loc=10); small σ avoids over-spreading
+    model_cfg  = _default_model_cfg()
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"2d_simple{'_perturbed' if perturbed else ''}",
@@ -180,8 +195,8 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg              = _default_train_cfg(device)
     train_cfg.iterations   = 100
     method_cfg             = _default_method_cfg()
-    model_cfg              = FeedForwardConfig(dimension=2, hidden_size=32)
-    vis_cfg                = VisualizeConfig(show_each=1, n_trajectories=2_000, trajectory_stride=2)
+    model_cfg              = _default_model_cfg(hidden_size=64)   # 4-blob target needs more capacity than simple
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"2d_medium{'_perturbed' if perturbed else ''}",
@@ -213,7 +228,7 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
     """
     device = get_device()
     r0     = 1.5
-    r1     = 4.5
+    r1     = 10.0
 
     ref_centers = [[0, 0], [r0, 0], [-r0, 0], [0, r0], [0, -r0]]
     coupling = RotatedShapeCoupling(
@@ -221,9 +236,9 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
         rotation_degrees=45.0, device=device,
     )
     new_centers = [[0, 0], [r1, 0], [-r1, 0], [0, r1], [0, -r1]]
-    new_src = GMMShapeDistribution(new_centers, scale=0.4, device=device)
+    new_src = GMMShapeDistribution(new_centers, scale=0.15, device=device)
     new_tgt = GMMShapeDistribution(
-        new_centers, scale=0.4,
+        new_centers, scale=0.15,
         rotation_degrees=45.0 + (10.0 if perturbed else 0.0),
         device=device,
     )
@@ -240,12 +255,18 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
         return y @ _R_cpx.to(y.device, y.dtype)
 
     train_cfg                = _default_train_cfg(device)
-    train_cfg.iterations     = 150
-    train_cfg.dual_epochs    = 200
-    train_cfg.cfm_epochs     = 300
+    train_cfg.iterations     = 100              # complex needs more iterations than simple
+    train_cfg.pretrain_epochs = 8_000           # larger flow pretraining for 5-blob cross with 6.7× scale jump
+    train_cfg.dual_epochs    = 150              # duals need more steps for complex geometry
+    train_cfg.scale_factor   = 30              # blobs at r1=10; scale_factor=50 over-normalises
     method_cfg               = _default_method_cfg()
-    model_cfg                = FeedForwardConfig(dimension=2, hidden_size=32)
-    vis_cfg                  = VisualizeConfig(show_each=1, n_trajectories=400, trajectory_stride=2)
+    method_cfg.l2_reg        = 5e-3            # less dual potential regularisation for complex geometry
+    method_cfg.lip_reg       = 1.0             # stronger Lipschitz stability for large scale jumps
+    method_cfg.particle_ratio = 0.2            # more particle mixing for 5-blob cross
+    method_cfg.lr_min_factor  = 0.3            # more LR headroom per iteration
+    method_cfg.dual_warmup_epochs = 50         # warm-start duals for hard geometry
+    model_cfg                = _default_model_cfg(hidden_size=128, num_layers=3)  # deeper network for complex transport
+    vis_cfg                  = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
         name                  = f"2d_complex{'_perturbed' if perturbed else ''}",
@@ -264,11 +285,147 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
 
 
 # ---------------------------------------------------------------------------
+# moon – upper moon → lower moon transport
+# ---------------------------------------------------------------------------
+
+def _moon_points(moon_class: int, t: torch.Tensor) -> torch.Tensor:
+    """Analytical moon positions from angle parameter t ∈ [0, π].
+
+    Class 0 (upper):  (cos t,       sin t)
+    Class 1 (lower):  (1 − cos t,   0.5 − sin t)
+
+    Both follow sklearn's make_moons parameterisation exactly, so the pairing
+    by equal angle gives a valid, deterministic transport.
+    """
+    if moon_class == 0:
+        return torch.stack([torch.cos(t), torch.sin(t)], dim=1)
+    else:
+        return torch.stack([1.0 - torch.cos(t), 0.5 - torch.sin(t)], dim=1)
+
+
+class _SingleMoonDist(Distribution):
+    """Sample from one half of the two-moons dataset (class 0 = upper, 1 = lower).
+
+    Samples angles t ∼ Uniform(0, π) and returns the corresponding point on
+    the moon arc ± Gaussian noise.  This ensures every call returns a fresh,
+    unbiased random batch covering the full arc, unlike the legacy sklearn
+    approach which took the first n points from a sorted grid (biased toward
+    the first third of the arc) and was deterministic at noise=0.
+
+    Scaled by *scale* and translated by *shift* to position the distribution.
+    """
+
+    def __init__(self, moon_class: int, scale: float = 1.0,
+                 shift=(0.0, 0.0), noise: float = 0.07,
+                 device=None):
+        self._dev   = device or get_device()
+        self._class = moon_class
+        self._scale = scale
+        self._shift = torch.tensor(shift, dtype=torch.float32)
+        self._noise = noise
+
+    def sample(self, n: int) -> torch.Tensor:
+        t   = torch.rand(n) * math.pi          # Uniform(0, π)
+        pts = _moon_points(self._class, t)      # (n, 2)
+        if self._noise > 0:
+            pts = pts + self._noise * torch.randn_like(pts)
+        return (pts * self._scale + self._shift).to(self._dev)
+
+
+def _moon(perturbed: bool, output_root: str) -> ExperimentSpec:
+    """Upper-moon → lower-moon transport (sklearn two-moons dataset).
+
+    Reference coupling
+        x ~ upper moon (class 0), y ~ lower moon (class 1), randomly paired.
+        Both at unit scale, centred near origin.
+    New marginals
+        μ' = upper moon scaled by 3× and shifted to [4, 4]
+        ν' = lower moon scaled by 3× and shifted to [4, 4]
+               (+ 20° global rotation if perturbed, testing distribution mismatch)
+    Transport map
+        No analytical ground truth — map-error metrics are omitted.
+    """
+    device = get_device()
+    noise      = 0.07          # per-point Gaussian noise added to both x and y
+    ref_scale  = 1.5           # reference coupling scale
+    new_scale  = 4.5           # new-marginal scale (3× reference)
+    new_shift  = (4.0, 4.0)    # move new marginals away from reference
+
+    def _moon_coupling(n: int, _dev=device, _ns=noise, _rs=ref_scale):
+        # Sample the SAME n random angles for both classes so (x[i], y[i]) are
+        # truly paired: y[i] = T(x[i]) + noise, where T maps upper→lower moon
+        # via the shared angle parameter.  Using max(6n,2000) sorted [:n] was
+        # wrong: it covered only the first ~π/3 of the arc and was deterministic
+        # at noise=0.
+        t = torch.rand(n) * math.pi             # Uniform(0, π) — full arc coverage
+        x = _moon_points(0, t) * _rs            # upper moon
+        y = _moon_points(1, t) * _rs            # lower moon  (same angle → paired)
+        if _ns > 0:
+            x = x + _ns * torch.randn_like(x)
+            y = y + _ns * torch.randn_like(y)
+        return x.to(_dev), y.to(_dev)
+
+    coupling = FunctionalCouplingDistribution(_moon_coupling)
+
+    if perturbed:
+        # Rotate the new-target moon by 20° to create distribution mismatch
+        _theta = math.radians(20.0)
+        _c, _s = math.cos(_theta), math.sin(_theta)
+        _R     = torch.tensor([[_c, -_s], [_s, _c]], dtype=torch.float32)
+
+        class _RotatedMoonDist(Distribution):
+            def __init__(self, base: _SingleMoonDist, R):
+                self._base = base
+                self._R    = R
+            def sample(self, n: int) -> torch.Tensor:
+                pts = self._base.sample(n)
+                return (pts @ self._R.to(pts.device, pts.dtype).T)
+
+        new_src = _SingleMoonDist(0, scale=new_scale, shift=new_shift, noise=noise, device=device)
+        new_tgt = _RotatedMoonDist(
+            _SingleMoonDist(1, scale=new_scale, shift=new_shift, noise=noise, device=device), _R
+        )
+    else:
+        new_src = _SingleMoonDist(0, scale=new_scale, shift=new_shift, noise=noise, device=device)
+        new_tgt = _SingleMoonDist(1, scale=new_scale, shift=new_shift, noise=noise, device=device)
+
+    train_cfg               = _default_train_cfg(device)
+    train_cfg.iterations    = 100
+    train_cfg.pretrain_epochs = 8_000
+    train_cfg.scale_factor  = 20
+    method_cfg              = _default_method_cfg()
+    method_cfg.sigma        = 0.05
+    method_cfg.particle_ratio = 0.2
+    method_cfg.lip_reg      = 1.0
+    method_cfg.dual_warmup_epochs = 30
+    model_cfg               = _default_model_cfg(hidden_size=128, num_layers=3)
+    vis_cfg                 = VisualizeConfig(
+        show_each=1, n_trajectories=2000, trajectory_stride=2,
+        show_each_marginal=100, show_each_pretrain=1000,
+    )
+
+    return ExperimentSpec(
+        name                  = f"2d_moon{'_perturbed' if perturbed else ''}",
+        mode                  = "2d",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        transport_map         = None,   # no analytical map for moons
+        inverse_transport_map = None,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public catalogue
 # ---------------------------------------------------------------------------
 
 def make_2d_experiments(output_root: str = "results") -> List[ExperimentSpec]:
-    """Return all 2-D experiment specs (simple / medium / complex × standard / perturbed)."""
+    """Return all 2-D experiment specs (simple / medium / complex / moon × standard / perturbed)."""
     return [
         _simple(False,  output_root),
         _simple(True,   output_root),
@@ -276,4 +433,6 @@ def make_2d_experiments(output_root: str = "results") -> List[ExperimentSpec]:
         _medium(True,   output_root),
         _complex(False, output_root),
         _complex(True,  output_root),
+        _moon(False,    output_root),
+        _moon(True,     output_root),
     ]

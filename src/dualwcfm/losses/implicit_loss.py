@@ -38,9 +38,13 @@ class ImplicitFlowLoss(FlowLoss):
             b_ta = previous_model(s, xs, x0)
             u_t = flow_matching.vector_field(xs, s, x0, x1, noisy=True)
 
-        # Single forward pass -- use detach() for the target instead of running model twice
+        # Single forward pass -- use detach() for the target instead of running model twice.
+        # Fixed-point analysis with factor (w - 1):
+        #   u_s* = b_ta/w + (1 - 1/w)*u_t  →  diverges as w → 0, wrong direction for w < 1.
+        # Correct factor is w:
+        #   u_s* = (b_ta + w·u_t) / (1 + w)  →  stable for all w ≥ 0.
         u_s = model(s, xs, x0)
         with torch.no_grad():
-            target = b_ta + (weight - 1) * (u_t - u_s.detach())
+            target = b_ta + weight * (u_t - u_s.detach())
 
         return ((u_s - target) ** 2).mean(), model, optimizer

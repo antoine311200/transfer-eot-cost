@@ -56,6 +56,7 @@ from dualwcfm.experiments.base import (
 )
 from dualwcfm.experiments.exp_2d import make_2d_experiments
 from dualwcfm.experiments.exp_3d import make_3d_experiments
+from dualwcfm.experiments.exp_color import make_color_experiments
 from dualwcfm.methods.mixture import MixtureConfig
 
 logger = logging.getLogger("dualwcfm")
@@ -93,7 +94,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ── Experiment selection ────────────────────────────────────────────
     sel = p.add_argument_group("experiment selection")
-    sel.add_argument("--mode",   choices=["2d", "3d"], default="2d",
+    sel.add_argument("--mode",   choices=["2d", "3d", "color"], default="2d",
                      help="Experiment catalogue to search.")
     sel.add_argument("--level", nargs="+", default=None, metavar="SUBSTR",
                      help="One or more substring filters on experiment name. "
@@ -170,6 +171,15 @@ def _build_parser() -> argparse.ArgumentParser:
                    metavar="N[,N…]",
                    help="Random seeds.  Multiple seeds run each combo N times and "
                         "aggregate metrics (mean ± std).  (default: 0)")
+
+    # ── Checkpointing ──────────────────────────────────────────────────
+    ck = p.add_argument_group("checkpointing")
+    ck.add_argument("--checkpoint-every", type=int, default=0, metavar="N",
+                    help="Save model (and coupling) checkpoints every N iterations, "
+                         "plus the first and last iteration.  0 = disabled (default).")
+    ck.add_argument("--checkpoint-coupling", action="store_true",
+                    help="Also checkpoint the coupling dataset at each checkpoint iteration "
+                         "(can be large; disabled by default).")
 
     return p
 
@@ -669,7 +679,12 @@ def main() -> None:
     setup_logging()
 
     # ── Select experiments ───────────────────────────────────────────────
-    factory = make_2d_experiments if args.mode == "2d" else make_3d_experiments
+    if args.mode == "2d":
+        factory = make_2d_experiments
+    elif args.mode == "3d":
+        factory = make_3d_experiments
+    else:
+        factory = make_color_experiments
     all_specs = factory(args.output)
 
     # Filter by level substrings (any match)
@@ -693,6 +708,14 @@ def main() -> None:
         )
 
     logger.info("Selected experiments: %s", [s.name for s in all_specs])
+
+    # Apply checkpoint settings to all specs
+    if args.checkpoint_every > 0:
+        for spec in all_specs:
+            spec.train_cfg.save_model_checkpoints  = True
+            spec.train_cfg.checkpoint_every        = args.checkpoint_every
+            if args.checkpoint_coupling:
+                spec.train_cfg.save_coupling_checkpoints = True
 
     combos = _build_grid(args)
     logger.info("Grid: %d combinations", len(combos))

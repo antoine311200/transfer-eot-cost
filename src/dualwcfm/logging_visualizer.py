@@ -96,10 +96,12 @@ class _LoggingMixin:
         if self._axis_lim is not None:
             return
         valid = [t for t in tensors if isinstance(t, torch.Tensor)
-                 and t.dim() == 2 and t.shape[1] >= 2]
+                 and t.dim() == 2 and t.shape[0] > 0 and t.shape[1] >= 2]
         if not valid:
             return
         pts = torch.cat([t[:, :2] for t in valid], dim=0)
+        if pts.numel() == 0:
+            return
         xmin, xmax = pts[:, 0].min().item(), pts[:, 0].max().item()
         ymin, ymax = pts[:, 1].min().item(), pts[:, 1].max().item()
         dx = max((xmax - xmin) * padding, 0.5)
@@ -143,11 +145,17 @@ class _LoggingMixin:
 
     def analyse(self, time_step: int, trainer: "Trainer",
                 n_samples: int = 2000, n_proj: int = 2000) -> dict:
+        # For image experiments cap sample/projection counts to avoid prohibitive cost.
+        if trainer.config.image_shape is not None:
+            n_samples = min(n_samples, 256)
+            n_proj    = min(n_proj, 500)
         distances = super().analyse(time_step, trainer, n_samples, n_proj)  # type: ignore[misc]
 
         device = trainer.device
         n = min(n_samples, trainer.config.batch_size)
-        t = time_step / trainer.config.iterations
+        # step_postprocess has already advanced the coupling to (time_step+1)/N,
+        # so mu_t / nu_t must be evaluated at the same interpolation time.
+        t = (time_step + 1) / trainer.config.iterations
         t_tensor = torch.full((n, 1), t, device=device)
         s = trainer.scale
 
@@ -202,7 +210,9 @@ class _LoggingMixin:
         # Ground-truth map errors — only compute for the direction trained this step.
         # For BidirectionalStrategy: skip fwd error on backward steps and vice versa
         # to avoid flat segments in W&B graphs from an untrained model.
-        n_map = min(n, 2_000)
+        # For image tensors, cap at 256 to keep ODE integration (200 steps × batch) fast.
+        _is_img = is_image_tensor(x)
+        n_map = min(n, 256 if _is_img else 2_000)
         fwd_model = getattr(trainer.strategy, "forward_model",  None)
         bwd_model = getattr(trainer.strategy, "backward_model", None)
 
@@ -452,6 +462,9 @@ class _LoggingMixin:
             return
         x0 = ctx["x0"]
         x1 = ctx["x1"]
+        # Guard: need at least 2 dims and non-empty tensors for scatter
+        if x0.dim() < 2 or x0.shape[0] == 0 or x0.shape[1] < 2:
+            return
         log_w = ctx["log_w"]
         x0_np = x0.cpu().numpy()
         x1_np = x1.cpu().numpy()
@@ -621,6 +634,8 @@ class LoggingVisualizer(_LoggingMixin, Visualizer):
             return
         backward = self._is_backward(epoch, trainer)
         n = self.config.n_trajectories
+        if n == 0:
+            return
         x, y = trainer.current_coupling.coupling_sample(n)
         x, y = x.to(trainer.device), y.to(trainer.device)
         start = y if backward else x
@@ -673,6 +688,10 @@ class LoggingVisualizer(_LoggingMixin, Visualizer):
         mu_s = mu_samples.cpu()
         nu_s = nu_samples.cpu()
 
+        # Skip plot for non-2D data (high-dim scalability experiments) or empty tensors
+        if mu_s.dim() < 2 or mu_s.shape[0] == 0 or mu_s.shape[1] < 2:
+            return
+
         fig = plt.figure(figsize=(6, 6))
         plt.plot(mu_s[:, 0], mu_s[:, 1], ".", label="Mu Distribution", alpha=0.5)
         plt.plot(nu_s[:, 0], nu_s[:, 1], ".", label="Nu Distribution", alpha=0.5)
@@ -710,7 +729,7 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
             start, trainer.strategy.get_flow(epoch, trainer.device)[0],
             num_steps=25, sigma=trainer._sigma, extend=True,
         )
-        traj = traj[:, :, :self.dim]
+        traj = traj[:, :, :start.shape[1]]
         end = traj[-1]
         s = trainer.scale
         stride = self.config.trajectory_stride

@@ -39,6 +39,13 @@ class Trainer:
         self.device = device
         self.method = method
 
+        # Log the configurations for reproducibility
+        logger.info("Training configuration:")
+        for key, value in vars(config).items():
+            logger.info(f"  {key}: {value}")
+        for key, value in vars(method.config).items():
+            logger.info(f"  method.{key}: {value}")
+
         # Compute normalization scale: max absolute value across a probe batch
         # of all four marginals so every sample lies in [-1, 1] after scaling.
         if self.config.scale_factor > 0:
@@ -174,7 +181,13 @@ class Trainer:
             self.method.step_postprocess(self, iteration, ctx)
 
             if save_checkpoints and (self.config.save_coupling_checkpoints or self.config.save_model_checkpoints):
-                self._save_iteration_checkpoint(iteration, save_checkpoints)
+                n = self.config.checkpoint_every
+                if n > 0:
+                    is_first = iteration == 0
+                    is_last  = iteration == self.config.iterations - 1
+                    is_nth   = (iteration + 1) % n == 0
+                    if is_first or is_last or is_nth:
+                        self._save_iteration_checkpoint(iteration, save_checkpoints)
 
             self.visualizer.display(iteration, self)
             distances = self.visualizer.analyse(iteration, self)

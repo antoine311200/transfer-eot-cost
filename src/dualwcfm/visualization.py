@@ -86,26 +86,33 @@ class Visualizer:
             n = min(self.config.n_trajectories, 500)
             s = trainer.scale
             stride = self.config.trajectory_stride
+            conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
             for model, source_dist, target_dist, label in [
                 (mu_model, trainer.mu_distribution, trainer.new_source, "Mu"),
                 (nu_model, trainer.nu_distribution, trainer.new_target, "Nu"),
             ]:
                 start = source_dist.sample(n).to(trainer.device)
                 with torch.no_grad():
+                    # Conditional bridge: use extend=True so the frozen condition is
+                    # embedded in the second half of xt, matching the flow model convention.
                     traj = trainer.flow_matching.evolve_trajectory(
-                        start, model, num_steps=50, sigma=trainer._sigma, extend=False
+                        start, model, num_steps=50, sigma=trainer._sigma, extend=conditional,
                     )
-                end = traj[-1]
+                # When extend=True the trajectory tensor is (T, N, 2*D); slice state half.
+                dim = start.shape[1]
+                end = traj[-1][:, :dim]
                 target = target_dist.sample(n).to(trainer.device)
                 traj_2d = (traj[:, :, :self.dim] * s).cpu() if stride > 0 else None
                 self._display_evolution(
                     (start * s).cpu(), (end * s).cpu(), (target * s).cpu(),
                     trajectories=traj_2d, trajectory_stride=stride,
                 )
-                plt.suptitle(f"{label} Marginal Flow — Epoch {epoch} Phase {phase_idx}")
+                phase_tag = "Rectified " if phase_idx > 0 else ""
+                plt.suptitle(f"{label} {phase_tag}Marginal Flow — Epoch {epoch} Phase {phase_idx}")
+                rectified_suffix = "_rectified" if phase_idx > 0 else ""
                 self.save_fig(
                     plt.gcf(), "pretrain",
-                    f"{label.lower()}_bridge_{epoch:05d}_p{phase_idx}.png",
+                    f"{label.lower()}_bridge{rectified_suffix}_{epoch:05d}_p{phase_idx}.png",
                 )
 
         elif phase == "flow":
@@ -116,6 +123,8 @@ class Visualizer:
             model = ctx["model"]
             backward = ctx.get("backward", False)
             n = min(self.config.n_trajectories, 500)
+            if n == 0:
+                return
             s = trainer.scale
             x0, x1 = trainer.initial_coupling.coupling_sample(n)
             x0, x1 = x0.to(trainer.device), x1.to(trainer.device)
@@ -125,7 +134,7 @@ class Visualizer:
                 end = trainer.flow_matching.evolve(
                     x0, model, num_steps=50, sigma=trainer._sigma, extend=True
                 )
-                end = end[:, :self.dim]
+                end = end[:, :x0.shape[1]]
             direction = "Backward" if backward else "Forward"
             self._display_evolution((x0 * s).cpu(), (end * s).cpu(), (x1 * s).cpu())
             plt.suptitle(f"Pretrain {direction} Flow — Epoch {epoch}")
@@ -136,27 +145,28 @@ class Visualizer:
 
     def at_pretrain_end(self, trainer: "Trainer", ctx: dict) -> None:
         """Visualize final bridge quality (mu and nu bridges)."""
-        samples = 2500
-        s = trainer.scale
-        for model_attr, src_attr, tgt_attr, title, fname in [
-            ("mu_bridge", "mu_distribution", "new_source",
-             "Mu bridge: source distribution flow", "mu_bridge_final.png"),
-            ("nu_bridge", "nu_distribution", "new_target",
-             "Nu bridge: target distribution flow", "nu_bridge_final.png"),
-        ]:
-            model = getattr(trainer.strategy, model_attr)
-            start = getattr(trainer, src_attr).sample(samples).to(trainer.device)
-            model.eval()
-            with torch.no_grad():
-                end = trainer.flow_matching.evolve(
-                    start, model, num_steps=50, sigma=trainer._sigma, extend=False
-                )
-            target = getattr(trainer, tgt_attr).sample(samples).to(trainer.device)
-            self._display_evolution(
-                (start * s).cpu(), (end * s).cpu(), (target * s).cpu()
-            )
-            plt.suptitle(title)
-            self.save_fig(plt.gcf(), "marginals", fname)
+        pass
+        # samples = 2500
+        # s = trainer.scale
+        # for model_attr, src_attr, tgt_attr, title, fname in [
+        #     ("mu_bridge", "mu_distribution", "new_source",
+        #      "Mu bridge: source distribution flow", "mu_bridge_final.png"),
+        #     ("nu_bridge", "nu_distribution", "new_target",
+        #      "Nu bridge: target distribution flow", "nu_bridge_final.png"),
+        # ]:
+        #     model = getattr(trainer.strategy, model_attr)
+        #     start = getattr(trainer, src_attr).sample(samples).to(trainer.device)
+        #     model.eval()
+        #     with torch.no_grad():
+        #         end = trainer.flow_matching.evolve(
+        #             start, model, num_steps=trainer.config.advance_steps, extend=False
+        #         )
+        #     target = getattr(trainer, tgt_attr).sample(samples).to(trainer.device)
+        #     self._display_evolution(
+        #         (start * s).cpu(), (end * s).cpu(), (target * s).cpu()
+        #     )
+        #     plt.suptitle(title)
+        #     self.save_fig(plt.gcf(), "marginals", fname)
 
     def at_flow_pretrain_end(self, trainer: "Trainer", ctx: dict) -> None:
         """Visualize the pretrained forward (and backward) flows on the new marginals.
@@ -331,7 +341,9 @@ class Visualizer:
     ) -> dict:
         device = trainer.device
         config = trainer.config
-        t = time_step / config.iterations
+        # step_postprocess has already advanced the coupling to (time_step+1)/N,
+        # so mu_t / nu_t must be evaluated at the same interpolation time.
+        t = (time_step + 1) / config.iterations
         t_tensor = torch.full((n_samples, 1), t, device=device)
 
         with torch.no_grad():
@@ -385,23 +397,23 @@ class Visualizer:
 
         # For dim > 2, project onto first two principal components for visualisation
         dim = start_points.shape[1] if start_points.ndim == 2 else 2
-        if dim > 2:
-            all_pts = torch.cat([start_points, end_points], dim=0).numpy()
-            mean = all_pts.mean(axis=0, keepdims=True)
-            centered = all_pts - mean
-            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-            proj = Vt[:2]  # (2, dim)
-            def _project(t: torch.Tensor) -> np.ndarray:
-                return (t.numpy() - mean) @ proj.T
-            ax.set_xlabel("PC1")
-            ax.set_ylabel("PC2")
-            ax_label = " (PCA projection)"
-        else:
-            def _project(t: torch.Tensor) -> np.ndarray:
-                return t.numpy()[:, :2]
-            ax.set_xlabel("X")
-            ax.set_ylabel("Y")
-            ax_label = ""
+        # if dim > 2:
+        #     all_pts = torch.cat([start_points, end_points], dim=0).numpy()
+        #     mean = all_pts.mean(axis=0, keepdims=True)
+        #     centered = all_pts - mean
+        #     _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+        #     proj = Vt[:2]  # (2, dim)
+        #     def _project(t: torch.Tensor) -> np.ndarray:
+        #         return (t.numpy() - mean) @ proj.T
+        #     ax.set_xlabel("PC1")
+        #     ax.set_ylabel("PC2")
+        #     ax_label = " (PCA projection)"
+        # else:
+        def _project(t: torch.Tensor) -> np.ndarray:
+            return t.numpy()[:, :2]
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax_label = ""
 
         start_2d = _project(start_points)
         end_2d   = _project(end_points)
@@ -429,7 +441,7 @@ class Visualizer:
         target_2d = _project(target_points) if target_points is not None else None
         if target_2d is not None:
             ax.scatter(target_2d[:, 0], target_2d[:, 1], c="orange", s=20, alpha=0.5, zorder=4, label="Target", edgecolors='k')
-        ax.scatter(mid_points_2d[:n_traj, 0], mid_points_2d[:n_traj, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
+        # ax.scatter(mid_points_2d[:n_traj, 0], mid_points_2d[:n_traj, 1], c="blue", s=20, alpha=0.5, zorder=4, label="Mid", edgecolors='k')
         ax.scatter(start_2d[:n_traj, 0], start_2d[:n_traj, 1], c="red", s=20, alpha=0.5, zorder=4, label="Start", edgecolors='k')
         ax.scatter(end_2d[:n_traj, 0], end_2d[:n_traj, 1], c="green", s=20, alpha=0.5, zorder=4, label="End", edgecolors='k')
         # ax.xaxis.set_major_locator(MultipleLocator(0.25))
@@ -512,8 +524,8 @@ class Visualizer3D(Visualizer):
                    c=C_SRC, s=14, alpha=0.75, label=r"Source $\mu$", zorder=6, **kw_s)
         ax.scatter(end_points[:n_traj, 0], end_points[:n_traj, 1], end_points[:n_traj, 2],
                    c=C_END, s=14, alpha=0.75, label="Transported", zorder=6, **kw_s)
-        ax.scatter(mid_points[:, 0], mid_points[:, 1], mid_points[:, 2],
-                   c=C_MID, s=8, alpha=0.55, label="Mid-point", zorder=5, **kw_s)
+        # ax.scatter(mid_points[:, 0], mid_points[:, 1], mid_points[:, 2],
+        #            c=C_MID, s=8, alpha=0.55, label="Mid-point", zorder=5, **kw_s)
 
         ax.set_xlim([L_lo, L_hi]); ax.set_ylim([L_lo, L_hi]); ax.set_zlim([L_lo, L_hi])
         ax.set_xlabel(r"$x_1$", labelpad=3, fontsize=9)
@@ -571,15 +583,19 @@ class VisualizerImage(Visualizer):
             phase_idx = ctx.get("phase_idx", 0)
             n = min(self.config.n_trajectories, 6)
             s = trainer.scale
+            conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
             for model, source_dist, target_dist, label in [
                 (mu_model, trainer.mu_distribution, trainer.new_source, "Mu"),
                 (nu_model, trainer.nu_distribution, trainer.new_target, "Nu"),
             ]:
                 start = source_dist.sample(n).to(trainer.device)
+                C = start.shape[1]
                 with torch.no_grad():
-                    end = trainer.flow_matching.evolve(
-                        start, model, num_steps=50, sigma=trainer._sigma, extend=False
+                    evolved = trainer.flow_matching.evolve(
+                        start, model, num_steps=50, sigma=trainer._sigma, extend=conditional,
                     )
+                # When extend=True the output has 2*C channels; take the state half.
+                end = evolved[:, :C, :, :] if conditional else evolved
                 target = target_dist.sample(n).to(trainer.device)
                 self._display_evolution((start * s).cpu(), (end * s).cpu(), (target * s).cpu())
                 plt.suptitle(f"{label} Marginal Flow — Epoch {epoch} Phase {phase_idx}")
@@ -619,6 +635,7 @@ class VisualizerImage(Visualizer):
         """Image-specific: uses evolve and 6 samples."""
         n = min(self.config.n_trajectories, 6)
         s = trainer.scale
+        conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
         for model_attr, src_attr, tgt_attr, title, fname in [
             ("mu_bridge", "mu_distribution", "new_source",
              "Mu bridge: source distribution flow", "mu_bridge_final.png"),
@@ -627,11 +644,13 @@ class VisualizerImage(Visualizer):
         ]:
             model = getattr(trainer.strategy, model_attr)
             start = getattr(trainer, src_attr).sample(n).to(trainer.device)
+            C = start.shape[1]
             model.eval()
             with torch.no_grad():
-                end = trainer.flow_matching.evolve(
-                    start, model, num_steps=50, sigma=trainer._sigma, extend=False
+                evolved = trainer.flow_matching.evolve(
+                    start, model, num_steps=50, sigma=trainer._sigma, extend=conditional,
                 )
+            end = evolved[:, :C, :, :] if conditional else evolved
             target = getattr(trainer, tgt_attr).sample(n).to(trainer.device)
             self._display_evolution((start * s).cpu(), (end * s).cpu(), (target * s).cpu())
             plt.suptitle(title)
@@ -758,7 +777,7 @@ def plot_2d_flow_trajectories(
     ax.scatter(start_points[:, 0], start_points[:, 1], c="red", s=5, alpha=0.5, zorder=4, label="Start")
     ax.scatter(end_points[:, 0], end_points[:, 1], c="green", s=5, alpha=0.5, zorder=4, label="End")
     mid_points = trajectories_np[trajectories_np.shape[0] // 2, :, :2]
-    ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=5, alpha=0.5, zorder=4, label="Mid")
+    # ax.scatter(mid_points[:, 0], mid_points[:, 1], c="blue", s=5, alpha=0.5, zorder=4, label="Mid")
     ax.grid(True, alpha=0.2)
     ax.set_title(title)
     lc = LineCollection(segments, colors="gray", alpha=0.5, linewidths=0.8, zorder=1)

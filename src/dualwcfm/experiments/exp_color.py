@@ -255,16 +255,16 @@ def _default_train_cfg_mnist(device: torch.device) -> TrainingConfig:
         device                   = device,
         dataset_size             = 2_000,
         marginal_epochs          = 10_000,
-        pretrain_epochs          = 5_001,
+        pretrain_epochs          = 5_000,
         dual_epochs              = 100,
         cfm_epochs               = 1000,
         advance_steps            = 200,
-        iterations               = 21,
+        iterations               = 51,
         num_rectified_flow       = 0,
         scale_factor             = 1.0,
         batch_size               = 128,
         use_disk_coupling        = False,
-        coupling_chunk_size      = 256,
+        coupling_chunk_size      = 128,
         save_coupling_checkpoints= False,
         save_model_checkpoints   = False,
     )
@@ -273,13 +273,13 @@ def _default_train_cfg_mnist(device: torch.device) -> TrainingConfig:
 def _default_train_cfg_cifar(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 50_000,
-        marginal_epochs          = 5_000,
-        pretrain_epochs          = 1_000,
-        dual_epochs              = 1000,
-        cfm_epochs               = 1000,
+        dataset_size             = 2_000,
+        marginal_epochs          = 20_000,
+        pretrain_epochs          = 10_000,
+        dual_epochs              = 100,
+        cfm_epochs               = 500,
         advance_steps            = 200,
-        iterations               = 20,
+        iterations               = 51,
         num_rectified_flow       = 0,
         scale_factor             = 1.0,
         batch_size               = 64,
@@ -295,14 +295,15 @@ def _default_method_cfg() -> MixtureConfig:
         sigma           = 0.05,
         sigma2          = 0.05,
         loss            = "weighted",
-        l2_reg          = 0,
-        lip_reg         = 0,
+        l2_reg          = 1e-2,
+        lip_reg         = 1.0,
         mean_reg        = 0,
         use_noisy_field = False,
         particle_ratio  = 0.25,
         lr_cosine_decay = False,
-        lr_min_factor   = 0.1,
-        dual_warmup_epochs = 1000
+        lr_min_factor   = 0.5,
+        dual_warmup_epochs = 100,
+        use_ot_pretrain=True
     )
 
 
@@ -407,6 +408,7 @@ def _mnist_rgb_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
         mu_learning_rate   = 2e-4,
         nu_learning_rate   = 2e-4,
         flow_learning_rate = 2e-4,
+        use_conditional_bridge=True,
     )
     vis_cfg = VisualizeConfig(
         show_each           = 1,
@@ -474,6 +476,7 @@ def _mnist_rgb_complex(perturbed: bool, output_root: str) -> ExperimentSpec:
         mu_learning_rate   = 2e-4,
         nu_learning_rate   = 2e-4,
         flow_learning_rate = 2e-4,
+        use_conditional_bridge=True,
     )
     vis_cfg = VisualizeConfig(show_each=1, n_trajectories=6, trajectory_stride=0)
 
@@ -542,6 +545,7 @@ def _mnist_rgb_flip_simple(perturbed: bool, output_root: str) -> ExperimentSpec:
         mu_learning_rate   = 2e-4,
         nu_learning_rate   = 2e-4,
         flow_learning_rate = 2e-4,
+        use_conditional_bridge=True,
     )
     vis_cfg = VisualizeConfig(
         show_each           = 1,
@@ -612,6 +616,7 @@ def _mnist_rgb_flip_complex(perturbed: bool, output_root: str) -> ExperimentSpec
         mu_learning_rate   = 2e-4,
         nu_learning_rate   = 2e-4,
         flow_learning_rate = 2e-4,
+        use_conditional_bridge=True,
     )
     vis_cfg = VisualizeConfig(show_each=1, n_trajectories=6, trajectory_stride=0)
 
@@ -691,6 +696,7 @@ def _cifar_hue(new_class: int, new_class_name: str, perturbed: bool,
         mu_learning_rate   = 2e-4,
         nu_learning_rate   = 2e-4,
         flow_learning_rate = 2e-4,
+        use_conditional_bridge=True,
     )
     vis_cfg = VisualizeConfig(show_each=1, n_trajectories=6, trajectory_stride=0)
 

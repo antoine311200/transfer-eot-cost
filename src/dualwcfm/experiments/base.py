@@ -159,16 +159,22 @@ class ExperimentSpec:
 # ---------------------------------------------------------------------------
 
 def _make_mlp_strategy(
-    dim: int,
-    hidden: int,
+    model_cfg: "FeedForwardConfig",
     bidirectional: bool = True,
     device: Optional[torch.device] = None,
 ) -> Strategy:
-    """Build a MLP-based Strategy, move it to *device*, and return it."""
+    """Build a MLP-based Strategy from *model_cfg*, move it to *device*, and return it.
+
+    Uses *model_cfg* directly as the strategy config so that all fields
+    (``use_conditional_bridge``, LRs, hidden sizes, etc.) are respected when
+    the bridge and flow MLPs are constructed.  Previously a fresh
+    ``FeedForwardConfig(dimension=..., hidden_size=...)`` was built internally,
+    which silently dropped fields like ``use_conditional_bridge`` and caused the
+    bridge MLP to have the wrong input dimension.
+    """
     device = device or get_device()
-    cfg = FeedForwardConfig(dimension=dim, hidden_size=hidden)
     cls = BidirectionalStrategy if bidirectional else Strategy
-    strategy = cls(torch_wrapper, cfg)
+    strategy = cls(torch_wrapper, model_cfg)
     strategy.to_device(device)
     return strategy
 
@@ -294,12 +300,10 @@ def run_experiment(
         strategy.to_device(device)
     else:
         strategy = _make_mlp_strategy(
-            dim          = spec.model_cfg.flat_dimension,
-            hidden       = spec.model_cfg.hidden_size,
+            model_cfg    = spec.model_cfg,
             bidirectional= spec.bidirectional,
             device       = device,
         )
-        strategy.config = spec.model_cfg
 
     # --- Flow matching ----------------------------------------------------
     flow_matching = ConditionalFlowMatching()

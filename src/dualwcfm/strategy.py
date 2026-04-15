@@ -44,8 +44,9 @@ class Strategy:
 
         dim = config.dimension
         hidden_size = config.hidden_size
+        num_layers = config.num_layers
 
-        self._create_models(dim, hidden_size)
+        self._create_models(dim, hidden_size, num_layers)
         self._create_optimizers(config)
 
         if change_of_measure is not None:
@@ -53,22 +54,25 @@ class Strategy:
         else:
             self._com_optimizer = None
 
-    def _create_models(self, dim: int, hidden_size: int):
+    def _create_models(self, dim: int, hidden_size: int, num_layers: int = 2):
         """Create all models. Override this method for custom architectures."""
         self._device = None  # Reset so next to_device() call actually moves models
         wrapper = self.wrapper
-        self.mu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
-        self.nu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
-        self.f_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, time_varying=False))
-        self.g_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, time_varying=False))
-        self.h_dual = MLP(dim=2*dim, out_dim=1, w=hidden_size, time_varying=False)
-        self.forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
-        self.previous_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
+        # When use_conditional_bridge=True the bridge model takes cat([xt, x0]) as
+        # input, so its MLP input dimension is 2*dim instead of dim.
+        bridge_dim = 2 * dim if getattr(self.config, "use_conditional_bridge", False) else dim
+        self.mu_bridge = wrapper(MLP(dim=bridge_dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.nu_bridge = wrapper(MLP(dim=bridge_dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.f_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, n_layers=num_layers, time_varying=False))
+        self.g_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, n_layers=num_layers, time_varying=False))
+        self.h_dual = MLP(dim=2*dim, out_dim=1, w=hidden_size, n_layers=num_layers, time_varying=False)
+        self.forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.previous_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
 
         # Save initial state
-        self.initial_mu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
-        self.initial_nu_bridge = wrapper(MLP(dim=dim, out_dim=dim, w=hidden_size, time_varying=True))
-        self.initial_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
+        self.initial_mu_bridge = wrapper(MLP(dim=bridge_dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.initial_nu_bridge = wrapper(MLP(dim=bridge_dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.initial_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
 
     def to_device(self, device: torch.device):
         """Move all models to device once. Call this before training."""
@@ -96,11 +100,11 @@ class Strategy:
 
     def _create_optimizers(self, config: FeedForwardConfig):
         dual_params = list(self.f_dual.parameters()) + list(self.g_dual.parameters())
-        self.mu_optimizer = optim.Adam(self.mu_bridge.parameters(), lr=config.mu_learning_rate)
-        self.nu_optimizer = optim.Adam(self.nu_bridge.parameters(), lr=config.nu_learning_rate)
-        self.dual_optimizer = optim.Adam(dual_params, lr=config.dual_learning_rate)
+        self.mu_optimizer = optim.Adam(self.mu_bridge.parameters(), lr=config.mu_learning_rate, weight_decay=config.dual_l2_reg)
+        self.nu_optimizer = optim.Adam(self.nu_bridge.parameters(), lr=config.nu_learning_rate, weight_decay=config.dual_l2_reg)
+        self.dual_optimizer = optim.Adam(dual_params, lr=config.dual_learning_rate, weight_decay=config.dual_l2_reg)
         self.dual_mismatch_optimizer = optim.Adam(self.h_dual.parameters(), lr=config.dual_learning_rate)
-        self.forward_optimizer = optim.Adam(self.forward_model.parameters(), lr=config.flow_learning_rate)
+        self.forward_optimizer = optim.Adam(self.forward_model.parameters(), lr=config.flow_learning_rate, weight_decay=config.dual_l2_reg)
 
     def log_weight(self, x: torch.Tensor, y: torch.Tensor, n_iter: int) -> torch.Tensor:
         """Compute log-weight (f(x) + g(y) [+ com(x,y)]) / n_iter."""
@@ -226,12 +230,12 @@ class BidirectionalStrategy(Strategy):
     def __init__(self, wrapper, config: FeedForwardConfig, change_of_measure: Optional[nn.Module] = None):
         super().__init__(wrapper, config, change_of_measure)
 
-    def _create_models(self, dim: int, hidden_size: int):
-        super()._create_models(dim, hidden_size)
+    def _create_models(self, dim: int, hidden_size: int, num_layers: int = 2):
+        super()._create_models(dim, hidden_size, num_layers)
         wrapper = self.wrapper
-        self.backward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
-        self.previous_backward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
-        self.initial_backward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, time_varying=True))
+        self.backward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.previous_backward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
+        self.initial_backward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
 
     def _model_attrs(self):
         return super()._model_attrs() + [
@@ -240,7 +244,7 @@ class BidirectionalStrategy(Strategy):
 
     def _create_optimizers(self, config: FeedForwardConfig):
         super()._create_optimizers(config)
-        self.backward_optimizer = optim.Adam(self.backward_model.parameters(), lr=config.flow_learning_rate)
+        self.backward_optimizer = optim.Adam(self.backward_model.parameters(), lr=config.flow_learning_rate, weight_decay=config.dual_l2_reg)
 
     def get_flow(self, step: int, device):
         self.to_device(device)
