@@ -23,8 +23,12 @@ import argparse
 import csv
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Ensure the src package is importable when running from the project root.
+sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -109,29 +113,10 @@ _COUPLED_ROWS = {"cfm_coupled", "otcfm_coupled", "lightsb_coupled", "dsb_coupled
 # Sentinel: stored in the data dict to signal a "to be filled" cell.
 _TBF = "TBF"
 
-# Step-0 metrics (pretrained model applied without any adaptation).
-OUR_PRETRAINED_RESULTS: Dict[str, Dict[str, float]] = {
-    "2d_simple": {
-        "W2_nu":          0.02823,
-        "W1_nu":          0.02187,
-        "W2_mu":          0.02647,
-        "W1_mu":          0.01890,
-        "map_err_fwd":    7.50311,
-        "sinkhorn_div":   195.572,
-        "mmd_nu":         1.01438,
-        "energy_dist_nu": 26.2408,
-    },
-    "2d_complex": {
-        "W2_nu":          0.08902,
-        "W1_nu":          0.03873,
-        "W2_mu":          0.05958,
-        "W1_mu":          0.03303,
-        "map_err_fwd":    1.14249,
-        "sinkhorn_div":   49.1493,
-        "mmd_nu":         0.41064,
-        "energy_dist_nu": 4.03350,
-    },
-}
+# Step-0 metrics computed on-demand by compute_pretrained_results() and cached
+# as pretrained_metrics.csv in each experiment's output directory.
+# This dict is no longer hard-coded; see load_pretrained_results() below.
+OUR_PRETRAINED_RESULTS: Dict[str, Dict[str, float]] = {}
 
 EXP_LABEL: Dict[str, str] = {
     "2d_simple":            r"Simple",
@@ -169,6 +154,148 @@ def _safe_float(v: str) -> Optional[float]:
         return None
 
 
+def load_pretrained_results(
+    results_dir: Path,
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """Read per-experiment pretrained_metrics.csv files written by compute_pretrained_results().
+
+    Returns a dict mapping experiment name → {metric: float | None}.
+    """
+    out: Dict[str, Dict[str, Optional[float]]] = {}
+    for exp_dir in sorted(results_dir.iterdir()):
+        if not exp_dir.is_dir():
+            continue
+        csv_path = exp_dir / "pretrained_metrics.csv"
+        if not csv_path.exists():
+            continue
+        with open(csv_path, newline="") as f:
+            for row in csv.DictReader(f):
+                out[exp_dir.name] = {m: _safe_float(row.get(m, "")) for m in METRICS}
+                break  # single row per file
+    return out
+
+
+def compute_pretrained_results(
+    results_dir: Path,
+    n_eval:      int = 4_000,
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """Run the pretrained forward model for each experiment and cache metrics.
+
+    For every experiment directory in *results_dir* that has a
+    ``models/initial_forward_model.pth``, this function:
+      1. Reconstructs the experiment spec from the 2D catalogue.
+      2. Wraps the reference coupling's y-marginal as a Distribution for conditioning.
+      3. Runs PretrainedOnlyRunner (loads model, samples, computes metrics).
+      4. Writes results to ``{exp_dir}/pretrained_metrics.csv``.
+
+    This is consistent with how baselines are evaluated: same evaluate_metrics()
+    call, same n_eval, same transport_map for map_err_fwd.
+    """
+    from dualwcfm.experiments.exp_2d import make_2d_experiments
+    from dualwcfm.baselines.base import BaselineSpec, evaluate_metrics
+    from dualwcfm.baselines.pretrained import PretrainedOnlyRunner
+
+    # Build all 2D experiment specs, keyed by name.
+    # Use a dummy output_root so the catalogue doesn't depend on results_dir.
+    specs_by_name = {s.name: s for s in make_2d_experiments(str(results_dir.parent))}
+
+    class _CouplingYMarginal:
+        """Thin Distribution wrapper that samples the y-marginal of a coupling.
+
+        Uses coupling_sample() directly to avoid the broken CouplingDistribution.sample()
+        fallback which calls super().coupling_sample() on Distribution (no such method).
+        """
+        def __init__(self, coupling):
+            self._c = coupling
+        def sample(self, n: int):
+            _, y = self._c.coupling_sample(n)
+            return y
+
+    out: Dict[str, Dict[str, Optional[float]]] = {}
+
+    for exp_dir in sorted(results_dir.iterdir()):
+        if not exp_dir.is_dir():
+            continue
+        exp_name  = exp_dir.name
+        models_dir = exp_dir / "models"
+        fwd_path   = models_dir / "initial_forward_model.pth"
+        if not fwd_path.exists():
+            print(f"  [pretrained] No model found for {exp_name}, skipping.")
+            continue
+
+        spec = specs_by_name.get(exp_name)
+        if spec is None:
+            print(f"  [pretrained] Unknown experiment {exp_name}, skipping.")
+            continue
+
+        print(f"  [pretrained] Evaluating {exp_name} ...")
+
+        bl_spec = BaselineSpec(
+            name       = f"pretrained_{exp_name}",
+            mode       = "2d",
+            source     = spec.new_source,
+            target     = spec.new_target,
+            dim        = 2,
+            output_dir = str(exp_dir / "pretrained_eval"),
+            device     = spec.train_cfg.device,
+            transport_map = spec.transport_map,
+        )
+
+        # Infer num_layers from the checkpoint's state_dict rather than the
+        # current spec, because the models may have been trained before
+        # num_layers was changed in the spec (e.g. complex/moon now say 3
+        # but saved checkpoints use 2).
+        # MLP with n_layers=L has linear layers at net indices 0, 2, 4, ..., 2*L.
+        # The highest index is 2*L, so n_layers = max_index // 2.
+        import torch as _torch
+        _sd = _torch.load(str(fwd_path), map_location="cpu")
+        _max_idx = max(
+            int(k.split(".")[2])
+            for k in _sd.keys()
+            if k.startswith("model.net.") and k.endswith(".weight")
+        )
+        _inferred_num_layers = _max_idx // 2
+
+        runner = PretrainedOnlyRunner(
+            spec         = bl_spec,
+            pretrain_dir = str(models_dir),
+            ref_target   = _CouplingYMarginal(spec.initial_coupling),
+            hidden_size  = spec.model_cfg.hidden_size,
+            num_layers   = _inferred_num_layers,
+        )
+
+        try:
+            runner.train()
+            x_gen, y_gen = runner.sample(n_eval)
+            metrics = evaluate_metrics(bl_spec, x_gen, y_gen)
+        except Exception as e:
+            print(f"  [pretrained] Failed for {exp_name}: {e}")
+            continue
+
+        row = {m: metrics.get(m) for m in METRICS}
+        out[exp_name] = row
+
+        # Cache to CSV so subsequent runs don't recompute.
+        csv_path = exp_dir / "pretrained_metrics.csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=METRICS)
+            writer.writeheader()
+            writer.writerow({m: (row[m] if row[m] is not None else "") for m in METRICS})
+        print(f"  [pretrained] Saved -> {csv_path.name}")
+
+    return out
+
+
+def _local_csv_dir_for_loss(loss_type: str) -> Optional[Path]:
+    """Return the local results directory for the given loss variant."""
+    mapping = {
+        "weighted": OUR_WEIGHT_DIR,
+        "implicit": OUR_IMPL_DIR,
+        "explicit": OUR_EXPL_DIR,
+    }
+    return mapping.get(loss_type)
+
+
 def load_our_results_wandb(
     loss_type: str,
     entity:    str = "antoine311200",
@@ -178,10 +305,13 @@ def load_our_results_wandb(
 
     For each experiment, picks the most-recently-created *finished* run whose
     ``config.loss == loss_type``, then reads all metrics from its run summary.
-    Using the summary avoids the alternating-metric problem in local CSVs
-    (map_err_fwd / map_err_bwd are logged on alternate steps, so local CSVs
-    have gaps; the W&B summary accumulates the last logged value per key,
-    giving a complete row).
+    The wandb summary accumulates the last logged value per key, which gives
+    a complete row for alternating metrics (map_err_fwd / map_err_bwd).
+
+    Target-marginal metrics (W2_nu, W1_nu) are overridden with the true
+    final-iteration values from the local metrics.csv when available, because
+    older runs only logged these on forward steps — causing the run summary
+    to capture the penultimate forward step rather than the last iteration.
 
     Parameters
     ----------
@@ -213,9 +343,34 @@ def load_our_results_wandb(
         if prev is None or run.created_at > prev.created_at:
             latest[exp] = run
 
+    # Local CSV directory for this loss variant (may be None)
+    local_dir = _local_csv_dir_for_loss(loss_type)
+
     for exp, run in sorted(latest.items()):
         summary = dict(run.summary)
-        out[exp] = {m: _safe_float(str(summary.get(m, ""))) for m in METRICS}
+        row: Dict[str, Optional[float]] = {m: _safe_float(str(summary.get(m, ""))) for m in METRICS}
+
+        # Override W2_nu / W1_nu with the true final-iteration value from the
+        # local metrics.csv.  Older wandb runs only logged these on forward
+        # steps, so the summary may reflect the penultimate step instead of
+        # the last iteration.
+        if local_dir is not None:
+            csv_path = local_dir / exp / "metrics.csv"
+            if csv_path.exists():
+                try:
+                    import csv as _csv
+                    with open(csv_path, newline="") as fh:
+                        rows = list(_csv.DictReader(fh))
+                    if rows:
+                        last = rows[-1]
+                        for key in ("W2_nu", "W1_nu"):
+                            v = _safe_float(last.get(key, ""))
+                            if v is not None:
+                                row[key] = v
+                except Exception:
+                    pass
+
+        out[exp] = row
 
     return out
 
@@ -223,8 +378,12 @@ def load_our_results_wandb(
 def load_all_results(results_dir: Path, only_coupled: bool = False) -> List[Row]:
     """Scan results_dir/{exp}/baselines/{baseline}/result.csv and return all rows.
 
-    If *only_coupled* is True, only baseline directories whose name ends with
-    ``_coupled`` are loaded (used for the coupling results directory).
+    If *only_coupled* is True, every baseline directory that has a result.csv is
+    loaded, and any baseline name that does not already end with ``_coupled`` has
+    the suffix appended automatically.  This handles both naming conventions:
+      - results_baseline_coupling/{exp}/baselines/cfm_coupled/   (already suffixed)
+      - results_baseline_coupling/{exp}/baselines/cfm/           (moon-style, no suffix)
+    When *only_coupled* is False, baseline names are used as-is.
     """
     rows: List[Row] = []
     for exp_dir in sorted(results_dir.iterdir()):
@@ -237,12 +396,12 @@ def load_all_results(results_dir: Path, only_coupled: bool = False) -> List[Row]
         for bl_dir in sorted(baselines_dir.iterdir()):
             if not bl_dir.is_dir():
                 continue
-            baseline_name = bl_dir.name
-            if only_coupled and not baseline_name.endswith("_coupled"):
-                continue
             csv_path = bl_dir / "result.csv"
             if not csv_path.exists():
                 continue
+            baseline_name = bl_dir.name
+            if only_coupled and not baseline_name.endswith("_coupled"):
+                baseline_name = baseline_name + "_coupled"
             with open(csv_path, newline="") as f:
                 reader = csv.DictReader(f)
                 for raw in reader:
@@ -304,21 +463,24 @@ def _inject_our_rows(
     our_weight:  Dict[str, Dict[str, Optional[float]]],
     our_impl:    Dict[str, Dict[str, Optional[float]]],
     our_expl:    Dict[str, Dict[str, Optional[float]]],
+    pretrained:  Dict[str, Dict[str, Optional[float]]] = None,
 ) -> List[Row]:
     """Append pretrained + three Ours rows per experiment.
 
-    - pretrained  : step-0 state (hardcoded from OUR_PRETRAINED_RESULTS)
-    - our_weight  : loaded from results_final_2d       (best iter by W2_nu)
-    - our_impl    : loaded from results_final_2d_impl  (best iter by W2_nu)
-    - our_expl    : loaded from results_final_2d_expl  (best iter by W2_nu)
+    - pretrained  : step-0 state loaded from pretrained_metrics.csv (or _TBF)
+    - our_weight  : loaded from W&B [loss=weighted]
+    - our_impl    : loaded from W&B [loss=implicit]
+    - our_expl    : loaded from W&B [loss=explicit]
     """
+    pretrained = pretrained or {}
     extra: List[Row] = []
     for exp in experiments:
         # Pretrained row
         pretrain_row: Row = {"experiment": exp, "baseline": "pretrained"}
-        known_pre = OUR_PRETRAINED_RESULTS.get(exp, {})
+        known_pre = pretrained.get(exp, {})
         for m in METRICS:
-            pretrain_row[m] = known_pre[m] if m in known_pre else _TBF
+            v = known_pre.get(m) if known_pre else None
+            pretrain_row[m] = v if v is not None else _TBF
         extra.append(pretrain_row)
 
         # Three Ours variants
@@ -430,7 +592,7 @@ def make_per_experiment_tables(
 # ---------------------------------------------------------------------------
 
 def make_full_csv(rows: List[Row], out_path: Path,
-                  our_weight=None, our_impl=None, our_expl=None) -> None:
+                  our_weight=None, our_impl=None, our_expl=None, pretrained=None) -> None:
     """Wide-format CSV: one row per (experiment, baseline), all metrics as columns."""
     our_weight = our_weight or {}
     our_impl   = our_impl   or {}
@@ -438,7 +600,8 @@ def make_full_csv(rows: List[Row], out_path: Path,
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     experiments = _ordered_experiments(sorted({str(r["experiment"]) for r in rows}))
-    rows_with_our = _inject_our_rows(rows, experiments, our_weight, our_impl, our_expl)
+    rows_with_our = _inject_our_rows(rows, experiments, our_weight, our_impl, our_expl,
+                                     pretrained=pretrained)
 
     by_exp_bl: Dict[Tuple[str, str], Row] = {}
     for r in rows_with_our:
@@ -467,7 +630,7 @@ def make_full_csv(rows: List[Row], out_path: Path,
 # ---------------------------------------------------------------------------
 
 def make_full_latex_table(rows: List[Row], out_path: Path,
-                          our_weight=None, our_impl=None, our_expl=None) -> None:
+                          our_weight=None, our_impl=None, our_expl=None, pretrained=None) -> None:
     """
     Large booktabs table:
       - Column groups = metric groups
@@ -481,7 +644,8 @@ def make_full_latex_table(rows: List[Row], out_path: Path,
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     experiments = _ordered_experiments(sorted({str(r["experiment"]) for r in rows}))
-    rows = _inject_our_rows(rows, experiments, our_weight, our_impl, our_expl)
+    rows = _inject_our_rows(rows, experiments, our_weight, our_impl, our_expl,
+                            pretrained=pretrained)
 
     # Collect all baselines across the whole dataset (now includes 'our')
     all_baselines = _ordered_baselines(sorted({str(r["baseline"]) for r in rows}))
@@ -607,7 +771,7 @@ def make_full_latex_table(rows: List[Row], out_path: Path,
 # ---------------------------------------------------------------------------
 
 def make_transposed_latex_table(rows: List[Row], out_path: Path,
-                                our_weight=None, our_impl=None, our_expl=None) -> None:
+                                our_weight=None, our_impl=None, our_expl=None, pretrained=None) -> None:
     """
     Alternative layout:
       Rows = (metric-group, metric) pairs
@@ -620,7 +784,8 @@ def make_transposed_latex_table(rows: List[Row], out_path: Path,
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     experiments = _ordered_experiments(sorted({str(r["experiment"]) for r in rows}))
-    rows = _inject_our_rows(rows, experiments, our_weight, our_impl, our_expl)
+    rows = _inject_our_rows(rows, experiments, our_weight, our_impl, our_expl,
+                            pretrained=pretrained)
     all_baselines = _ordered_baselines(sorted({str(r["baseline"]) for r in rows}))
 
     data: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
@@ -798,24 +963,51 @@ def main() -> None:
     our_expl = load_our_results_wandb("explicit")
     print(f"  Found {len(our_expl)} experiments.")
 
+    # Load pretrained (step-0) metrics from cached CSV files.
+    # If any experiment is missing its cache, run the model to compute and save it.
+    print(f"Loading pretrained metrics from {OUR_WEIGHT_DIR} ...")
+    pretrained = load_pretrained_results(OUR_WEIGHT_DIR)
+    print(f"  Found cached results for {len(pretrained)} experiments.")
+    missing = [
+        exp_dir.name
+        for exp_dir in sorted(OUR_WEIGHT_DIR.iterdir())
+        if exp_dir.is_dir()
+        and (exp_dir / "models" / "initial_forward_model.pth").exists()
+        and exp_dir.name not in pretrained
+    ]
+    if missing:
+        print(f"  Computing pretrained metrics for: {', '.join(missing)} ...")
+        computed = compute_pretrained_results(OUR_WEIGHT_DIR)
+        pretrained.update(computed)
+        print(f"  Pretrained metrics now available for {len(pretrained)} experiments.")
+
     print_summary(rows)
 
     print(f"\nWriting outputs to  {out_dir} ...")
 
-    # 1. Per-experiment tables
-    make_per_experiment_tables(rows, out_dir / "per_experiment")
+    # 1. Per-experiment tables  (inject our rows so they appear alongside baselines)
+    experiments_found = _ordered_experiments(sorted({str(r["experiment"]) for r in rows}))
+    rows_with_our = _inject_our_rows(
+        rows, experiments_found,
+        our_weight=our_weight, our_impl=our_impl, our_expl=our_expl,
+        pretrained=pretrained,
+    )
+    make_per_experiment_tables(rows_with_our, out_dir / "per_experiment")
 
     # 2. Full CSV
     make_full_csv(rows, out_dir / "full_comparison.csv",
-                  our_weight=our_weight, our_impl=our_impl, our_expl=our_expl)
+                  our_weight=our_weight, our_impl=our_impl, our_expl=our_expl,
+                  pretrained=pretrained)
 
     # 3. Full LaTeX (grouped by experiment, metrics as columns)
     make_full_latex_table(rows, out_dir / "full_comparison.tex",
-                          our_weight=our_weight, our_impl=our_impl, our_expl=our_expl)
+                          our_weight=our_weight, our_impl=our_impl, our_expl=our_expl,
+                          pretrained=pretrained)
 
     # 4. Transposed LaTeX (metrics as rows, experiments as column groups)
     make_transposed_latex_table(rows, out_dir / "full_comparison_transposed.tex",
-                                our_weight=our_weight, our_impl=our_impl, our_expl=our_expl)
+                                our_weight=our_weight, our_impl=our_impl, our_expl=our_expl,
+                                pretrained=pretrained)
 
     print(f"\nDone.  All outputs in  {out_dir.resolve()}")
 

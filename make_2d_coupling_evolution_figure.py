@@ -64,12 +64,12 @@ from dualwcfm.mlp import MLP, torch_wrapper
 # Palette (matches make_2d_transport_figure.py)
 # ---------------------------------------------------------------------------
 
-_C_SRC       = "#0077bb"   # blue  – source μ'
-_C_SRC_EDGE  = "#004488"
-_C_TRN       = "#cc3311"   # red   – transported
-_C_TRN_EDGE  = "#882200"
-_C_TGT       = "#229944"   # green – new target ν' (reference)
-_C_LINE      = "#444444"   # dark grey coupling lines
+_C_SRC       = "#00cfff"   # bright cyan  – source μ'
+_C_SRC_EDGE  = "#007aaa"
+_C_TRN       = "#ff4422"   # bright orange-red – transported
+_C_TRN_EDGE  = "#cc2200"
+_C_TGT       = "#ffe033"   # bright yellow – new target ν' (reference)
+_C_LINE      = "#cccccc"   # light grey coupling lines (visible on dark bg)
 _C_TITLE     = "black"
 
 

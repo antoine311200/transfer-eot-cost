@@ -54,7 +54,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── Experiment selection ─────────────────────────────────────────────────
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
-        "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color", "gushchin", "scalability"],
+        "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color",
+                           "gushchin", "scalability", "singlecell"],
         help="Experiment mode.  Required unless --all is given.",
     )
     sel.add_argument(
@@ -81,6 +82,15 @@ def _build_parser() -> argparse.ArgumentParser:
     sel.add_argument(
         "--all", action="store_true", dest="run_all",
         help="Run every experiment (2D + 3D + image) sequentially.",
+    )
+    sel.add_argument(
+        "--data-path", default=None, dest="data_path", metavar="PATH",
+        help=(
+            "Path to the Sci-Plex3 h5ad file "
+            "(SrivatsanTrapnell2020_sciplex3.h5ad). "
+            "Required for --mode singlecell unless pertpy is installed "
+            "with the dataset cached locally."
+        ),
     )
 
     # ── Method ──────────────────────────────────────────────────────────────
@@ -282,6 +292,7 @@ def main() -> None:
     from dualwcfm.experiments.exp_color         import make_color_experiments
     from dualwcfm.experiments.exp_gushchin      import make_gushchin_experiments
     from dualwcfm.experiments.exp_scalability   import make_scalability_experiments
+    from dualwcfm.experiments.exp_singlecell    import make_singlecell_experiments
     from dualwcfm.experiments.base              import run_experiment
 
     dims = tuple(getattr(args, "dims", [16, 32, 64, 128]))
@@ -296,6 +307,9 @@ def main() -> None:
         "color":       make_color_experiments,
         "gushchin":    make_gushchin_experiments,
         "scalability": lambda out: make_scalability_experiments(out, dims=dims),
+        "singlecell":  lambda out: make_singlecell_experiments(
+            data_path=getattr(args, "data_path", None), output_root=out
+        ),
     }
 
     # ── Run everything ───────────────────────────────────────────────────────

@@ -145,9 +145,13 @@ class ExperimentSpec:
     # inverse_transport_map: T⁻¹ s.t. x ≈ T⁻¹(y) (backward direction)
     transport_map:         Optional[Callable] = None
     inverse_transport_map: Optional[Callable] = None
-    method_cfg:       MethodConfig = field(default_factory=MixtureConfig)
-    bidirectional:    bool = True
-    output_root:      str = "results"
+    method_cfg:        MethodConfig = field(default_factory=MixtureConfig)
+    bidirectional:     bool = True
+    output_root:       str = "results"
+    #: Extra keyword arguments forwarded to the visualiser constructor.
+    #: Used by custom modes (e.g. ``"singlecell"``) to pass mode-specific data
+    #: such as cluster centres and cell-type names.
+    visualizer_kwargs: dict = field(default_factory=dict)
 
     @property
     def output_dir(self) -> str:
@@ -309,6 +313,7 @@ def run_experiment(
     flow_matching = ConditionalFlowMatching()
 
     # --- Visualizer -------------------------------------------------------
+    _viz_kw = getattr(spec, "visualizer_kwargs", {}) or {}
     if spec.mode == "2d":
         visualizer = LoggingVisualizer(spec.vis_cfg, spec.transport_map, spec.output_dir,
                                        wandb_run=wandb_run,
@@ -317,6 +322,14 @@ def run_experiment(
         visualizer = LoggingVisualizer3D(spec.vis_cfg, spec.transport_map, spec.output_dir,
                                          wandb_run=wandb_run,
                                          inverse_transport_map=spec.inverse_transport_map)
+    elif spec.mode == "singlecell":
+        from dualwcfm.logging_visualizer_singlecell import LoggingVisualizerSingleCell
+        visualizer = LoggingVisualizerSingleCell(
+            spec.vis_cfg, spec.transport_map, spec.output_dir,
+            wandb_run=wandb_run,
+            inverse_transport_map=spec.inverse_transport_map,
+            **_viz_kw,
+        )
     else:
         if spec.train_cfg.image_shape is None:
             raise ValueError("image_shape must be set in train_cfg for image experiments.")
