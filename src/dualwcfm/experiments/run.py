@@ -80,6 +80,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Exclude perturbed variants (run only non-perturbed experiments).",
     )
     sel.add_argument(
+        "--no-ot-cfm", action="store_true", dest="no_ot_cfm",
+        help="Do not use OT-CFM for training the velocity fields between source and new source (resp. target and new target)"
+    )
+    sel.add_argument(
         "--all", action="store_true", dest="run_all",
         help="Run every experiment (2D + 3D + image) sequentially.",
     )
@@ -204,6 +208,13 @@ def _build_parser() -> argparse.ArgumentParser:
     wb.add_argument(
         "--wandb-run", default=None, dest="wandb_run_name", metavar="RUN",
         help="W&B run display name.  Defaults to the experiment name.",
+    )
+    wb.add_argument(
+        "--wandb-offline", action="store_true", dest="wandb_offline",
+        help=(
+            "Log W&B data offline (no network calls).  "
+            "Sync later with: wandb sync wandb/offline-run-*/"
+        ),
     )
 
     # ── Output ───────────────────────────────────────────────────────────────
@@ -336,6 +347,7 @@ def main() -> None:
                     wandb_project    = getattr(args, "wandb_project", None),
                     wandb_entity     = getattr(args, "wandb_entity", None),
                     wandb_run_name   = getattr(args, "wandb_run_name", None),
+                    wandb_mode       = "offline" if getattr(args, "wandb_offline", False) else None,
                 )
         return
 
@@ -375,6 +387,7 @@ def main() -> None:
             wandb_project    = getattr(args, "wandb_project", None),
             wandb_entity     = getattr(args, "wandb_entity", None),
             wandb_run_name   = getattr(args, "wandb_run_name", None),
+            wandb_mode       = "offline" if getattr(args, "wandb_offline", False) else None,
         )
 
 
@@ -397,6 +410,9 @@ def _apply_train_overrides(spec, args: argparse.Namespace) -> None:
         spec.method_cfg.particle_ratio = args.particle_ratio
     if args.loss is not None:
         spec.method_cfg.loss = args.loss
+    if args.no_ot_cfm:
+        spec.method_cfg.use_ot_pretrain = False
+
 
 
 def _run_ablation(args: argparse.Namespace, base_specs) -> None:

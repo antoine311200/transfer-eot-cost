@@ -37,7 +37,7 @@ from dualwcfm.methods.mixture import MixtureConfig, MixtureMethod
 from dualwcfm.methods.score import ScoreConfig, ScoreMethod
 from dualwcfm.methods.standard import StandardConfig, StandardMethod
 from dualwcfm.mlp import torch_wrapper
-from dualwcfm.strategy import BidirectionalStrategy, Strategy
+from dualwcfm.strategy import BidirectionalSirenStrategy, BidirectionalStrategy, Strategy
 from dualwcfm.trainer import Trainer
 
 logger = logging.getLogger("dualwcfm")
@@ -177,7 +177,12 @@ def _make_mlp_strategy(
     bridge MLP to have the wrong input dimension.
     """
     device = device or get_device()
-    cls = BidirectionalStrategy if bidirectional else Strategy
+    if bidirectional and getattr(model_cfg, "use_siren", False):
+        cls = BidirectionalSirenStrategy
+    elif bidirectional:
+        cls = BidirectionalStrategy
+    else:
+        cls = Strategy
     strategy = cls(torch_wrapper, model_cfg)
     strategy.to_device(device)
     return strategy
@@ -198,6 +203,7 @@ def run_experiment(
     wandb_group: Optional[str] = None,
     wandb_extra_config: Optional[Dict] = None,
     wandb_tags: Optional[list] = None,
+    wandb_mode: Optional[str] = None,
 ) -> None:
     """Build all objects from *spec* and run the full training loop.
 
@@ -273,6 +279,7 @@ def run_experiment(
         group   = _wb_group,
         config  = _wb_config,
         tags    = _wb_tags,
+        mode    = wandb_mode,
     )
 
     # --- Pre-trained weights ----------------------------------------------

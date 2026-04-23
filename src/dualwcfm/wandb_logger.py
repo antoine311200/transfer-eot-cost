@@ -47,8 +47,11 @@ class _WandbRun:
         self._run = run
 
     def log(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
-        kwargs = {"step": step} if step is not None else {}
-        self._run.log(metrics, **kwargs)
+        try:
+            kwargs = {"step": step} if step is not None else {}
+            self._run.log(metrics, **kwargs)
+        except Exception as exc:
+            logger.warning("  W&B log failed (%s) — skipping.", exc)
 
     def log_image(self, key: str, images, step: Optional[int] = None) -> None:
         try:
@@ -59,11 +62,17 @@ class _WandbRun:
             pass
 
     def summary(self, metrics: Dict[str, Any]) -> None:
-        for k, v in metrics.items():
-            self._run.summary[k] = v
+        try:
+            for k, v in metrics.items():
+                self._run.summary[k] = v
+        except Exception as exc:
+            logger.warning("  W&B summary failed (%s) — skipping.", exc)
 
     def finish(self) -> None:
-        self._run.finish()
+        try:
+            self._run.finish()
+        except Exception:
+            pass
 
     def __bool__(self) -> bool:
         return True
@@ -76,6 +85,7 @@ def init(
     group: Optional[str] = None,
     config: Optional[Dict[str, Any]] = None,
     tags: Optional[List[str]] = None,
+    mode: Optional[str] = None,
 ) -> "_NoOpRun | _WandbRun":
     """Initialise a W&B run, or return a no-op stub if wandb is unavailable.
 
@@ -104,22 +114,31 @@ def init(
     if project is None:
         return _NoOpRun()
 
+    # WANDB_MODE env var takes precedence; explicit mode= overrides only when set.
+    import os
+    resolved_mode = mode or os.environ.get("WANDB_MODE", "online")
+
     try:
         import wandb
         run = wandb.init(
-            project = project,
-            name    = name,
-            entity  = entity,
-            group   = group,
-            config  = config or {},
-            tags    = tags or [],
-            reinit  = True,
+            project  = project,
+            name     = name,
+            entity   = entity,
+            group    = group,
+            config   = config or {},
+            tags     = tags or [],
+            reinit   = True,
+            mode     = resolved_mode,
+            settings = wandb.Settings(init_timeout=120),
         )
         # wandb sometimes ignores name= when reinit=True; force it explicitly.
         if name and run.name != name:
             run.name = name
             run.save()
-        logger.info("  W&B run initialised: %s/%s — run: %s", entity or "<default>", project, run.name)
+        logger.info(
+            "  W&B run initialised (mode=%s): %s/%s — run: %s",
+            resolved_mode, entity or "<default>", project, run.name,
+        )
         return _WandbRun(run)
     except Exception as exc:
         logger.warning("  W&B init failed (%s) — logging disabled.", exc)
