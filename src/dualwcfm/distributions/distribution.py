@@ -1,7 +1,9 @@
 import math
+import os
 from abc import ABC, abstractmethod
 from typing import Optional, Callable
 
+import numpy as np
 import torch
 from torch.distributions import Categorical, MixtureSameFamily, Independent, Normal
 
@@ -35,6 +37,62 @@ class FixedSizeDistribution(Distribution):
         import copy
 
         return copy.deepcopy(self)
+
+
+class DiskDistribution(Distribution):
+    """Disk-backed sample buffer — the persistent analogue of FixedSizeDistribution.
+
+    Stores N samples in a flat memmap file so the buffer never lives in RAM.
+    Supports random `sample`, arbitrary indexed `read`, and indexed `write`,
+    making it reusable wherever a large fixed buffer is needed (e.g. particle origins).
+    """
+
+    def __init__(self, size: int, sample_shape: tuple, np_dtype, save_dir: str):
+        self.size = size
+        self.sample_shape = tuple(sample_shape)
+        self._save_dir = save_dir
+        os.makedirs(save_dir, exist_ok=True)
+        shape = (size, *self.sample_shape)
+        torch.save(
+            {"sample_shape": list(sample_shape), "dtype": str(np.dtype(np_dtype)), "size": size},
+            os.path.join(save_dir, "meta.pt"),
+        )
+        self._mmap = np.memmap(os.path.join(save_dir, "data.dat"), dtype=np_dtype, mode="w+", shape=shape)
+
+    @staticmethod
+    def from_tensor(tensor: torch.Tensor, save_dir: str) -> "DiskDistribution":
+        """Create a DiskDistribution pre-filled from a CPU tensor."""
+        np_dtype = np.float32 if tensor.dtype == torch.float32 else np.float64
+        dist = DiskDistribution(tensor.shape[0], tuple(tensor.shape[1:]), np_dtype, save_dir)
+        dist._mmap[:] = tensor.numpy()
+        dist._mmap.flush()
+        return dist
+
+    @staticmethod
+    def from_directory(save_dir: str) -> "DiskDistribution":
+        """Re-open an existing DiskDistribution from a directory."""
+        meta = torch.load(os.path.join(save_dir, "meta.pt"), weights_only=True)
+        dist = DiskDistribution.__new__(DiskDistribution)
+        dist.size = meta["size"]
+        dist.sample_shape = tuple(meta["sample_shape"])
+        dist._save_dir = save_dir
+        shape = (dist.size, *dist.sample_shape)
+        dist._mmap = np.memmap(
+            os.path.join(save_dir, "data.dat"), dtype=np.dtype(meta["dtype"]), mode="r+", shape=shape
+        )
+        return dist
+
+    def sample(self, n: int) -> torch.Tensor:
+        return self.read(torch.randint(0, self.size, (n,)))
+
+    def read(self, indices: torch.Tensor) -> torch.Tensor:
+        return torch.from_numpy(self._mmap[indices.numpy()].copy())
+
+    def write(self, indices: torch.Tensor, values: torch.Tensor) -> None:
+        self._mmap[indices.numpy()] = values.cpu().numpy()
+
+    def close(self) -> None:
+        self._mmap = None
 
 
 class WeightedDistribution(Distribution):
@@ -192,6 +250,75 @@ class RotatedDistribution(Distribution):
     def rotate(self, new_angle: float) -> "RotatedDistribution":
         """Create a new RotatedDistribution with different angle."""
         return RotatedDistribution(self.base_dist, new_angle)
+
+
+class UniformRectDistribution(Distribution):
+    """Uniform samples from an axis-aligned rectangle [x_min, x_max] × [y_min, y_max]."""
+
+    def __init__(self, x_min: float, x_max: float, y_min: float, y_max: float,
+                 noise: float = 0.0, device=None):
+        self._dev = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._lo = torch.tensor([x_min, y_min], dtype=torch.float32)
+        self._hi = torch.tensor([x_max, y_max], dtype=torch.float32)
+        self._noise = noise
+
+    def sample(self, n: int) -> torch.Tensor:
+        lo = self._lo.to(self._dev)
+        hi = self._hi.to(self._dev)
+        pts = lo + torch.rand(n, 2, device=self._dev) * (hi - lo)
+        if self._noise > 0:
+            pts = pts + self._noise * torch.randn(n, 2, device=self._dev)
+        return pts
+
+
+class CheckerboardDistribution(Distribution):
+    """Uniform samples from dark cells of a k×k checkerboard over [−scale, scale]²."""
+
+    def __init__(self, k: int = 4, scale: float = 2.0, noise: float = 0.0, device=None):
+        self._dev = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._k = k
+        self._scale = scale
+        self._noise = noise
+        self._cells = torch.tensor(
+            [(i, j) for i in range(k) for j in range(k) if (i + j) % 2 == 0],
+            dtype=torch.float32,
+        )
+
+    def sample(self, n: int) -> torch.Tensor:
+        cell_size = 2.0 * self._scale / self._k
+        idx = torch.randint(0, len(self._cells), (n,))
+        cells = self._cells[idx]
+        corners = -self._scale + cells * cell_size
+        pts = corners + torch.rand(n, 2) * cell_size
+        if self._noise > 0:
+            pts = pts + self._noise * torch.randn(n, 2)
+        return pts.to(self._dev)
+
+
+class TransformedDistribution(Distribution):
+    """Applies a deterministic map to samples drawn from a base distribution."""
+
+    def __init__(self, base: "Distribution", transform: "Callable[[torch.Tensor], torch.Tensor]"):
+        self._base = base
+        self._transform = transform
+
+    def sample(self, n: int) -> torch.Tensor:
+        return self._transform(self._base.sample(n))
+
+
+class UnionDistribution(Distribution):
+    """Equal-weight mixture: samples n//k from each sub-distribution then shuffles."""
+
+    def __init__(self, distributions: "list[Distribution]"):
+        self._dists = distributions
+
+    def sample(self, n: int) -> torch.Tensor:
+        k = len(self._dists)
+        sizes = [n // k] * k
+        sizes[-1] += n - sum(sizes)
+        parts = [d.sample(s) for d, s in zip(self._dists, sizes)]
+        pts = torch.cat(parts, dim=0)
+        return pts[torch.randperm(n)]
 
 
 class SphereDistribution(Distribution):

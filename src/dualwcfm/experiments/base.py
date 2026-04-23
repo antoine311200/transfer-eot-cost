@@ -37,7 +37,7 @@ from dualwcfm.methods.mixture import MixtureConfig, MixtureMethod
 from dualwcfm.methods.score import ScoreConfig, ScoreMethod
 from dualwcfm.methods.standard import StandardConfig, StandardMethod
 from dualwcfm.mlp import torch_wrapper
-from dualwcfm.strategy import BidirectionalStrategy, Strategy
+from dualwcfm.strategy import BidirectionalSirenStrategy, BidirectionalStrategy, Strategy
 from dualwcfm.trainer import Trainer
 
 logger = logging.getLogger("dualwcfm")
@@ -145,9 +145,13 @@ class ExperimentSpec:
     # inverse_transport_map: T⁻¹ s.t. x ≈ T⁻¹(y) (backward direction)
     transport_map:         Optional[Callable] = None
     inverse_transport_map: Optional[Callable] = None
-    method_cfg:       MethodConfig = field(default_factory=MixtureConfig)
-    bidirectional:    bool = True
-    output_root:      str = "results"
+    method_cfg:        MethodConfig = field(default_factory=MixtureConfig)
+    bidirectional:     bool = True
+    output_root:       str = "results"
+    #: Extra keyword arguments forwarded to the visualiser constructor.
+    #: Used by custom modes (e.g. ``"singlecell"``) to pass mode-specific data
+    #: such as cluster centres and cell-type names.
+    visualizer_kwargs: dict = field(default_factory=dict)
 
     @property
     def output_dir(self) -> str:
@@ -173,7 +177,12 @@ def _make_mlp_strategy(
     bridge MLP to have the wrong input dimension.
     """
     device = device or get_device()
-    cls = BidirectionalStrategy if bidirectional else Strategy
+    if bidirectional and getattr(model_cfg, "use_siren", False):
+        cls = BidirectionalSirenStrategy
+    elif bidirectional:
+        cls = BidirectionalStrategy
+    else:
+        cls = Strategy
     strategy = cls(torch_wrapper, model_cfg)
     strategy.to_device(device)
     return strategy
@@ -194,6 +203,7 @@ def run_experiment(
     wandb_group: Optional[str] = None,
     wandb_extra_config: Optional[Dict] = None,
     wandb_tags: Optional[list] = None,
+    wandb_mode: Optional[str] = None,
 ) -> None:
     """Build all objects from *spec* and run the full training loop.
 
@@ -269,6 +279,7 @@ def run_experiment(
         group   = _wb_group,
         config  = _wb_config,
         tags    = _wb_tags,
+        mode    = wandb_mode,
     )
 
     # --- Pre-trained weights ----------------------------------------------
@@ -309,6 +320,7 @@ def run_experiment(
     flow_matching = ConditionalFlowMatching()
 
     # --- Visualizer -------------------------------------------------------
+    _viz_kw = getattr(spec, "visualizer_kwargs", {}) or {}
     if spec.mode == "2d":
         visualizer = LoggingVisualizer(spec.vis_cfg, spec.transport_map, spec.output_dir,
                                        wandb_run=wandb_run,
@@ -317,6 +329,14 @@ def run_experiment(
         visualizer = LoggingVisualizer3D(spec.vis_cfg, spec.transport_map, spec.output_dir,
                                          wandb_run=wandb_run,
                                          inverse_transport_map=spec.inverse_transport_map)
+    elif spec.mode == "singlecell":
+        from dualwcfm.logging_visualizer_singlecell import LoggingVisualizerSingleCell
+        visualizer = LoggingVisualizerSingleCell(
+            spec.vis_cfg, spec.transport_map, spec.output_dir,
+            wandb_run=wandb_run,
+            inverse_transport_map=spec.inverse_transport_map,
+            **_viz_kw,
+        )
     else:
         if spec.train_cfg.image_shape is None:
             raise ValueError("image_shape must be set in train_cfg for image experiments.")

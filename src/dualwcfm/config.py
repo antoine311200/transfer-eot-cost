@@ -68,6 +68,13 @@ class FeedForwardConfig(ModelConfig):
     # point.  This eliminates crossing-path ambiguity and stabilises bridge training.
     use_conditional_bridge: bool = False
 
+    # SIREN (anti-spectral-bias) settings.
+    # When True, BidirectionalSirenStrategy replaces SELU MLPs with sinusoidal ones.
+    # Recommended for high-frequency transports: shear, radial warp, polar vortex.
+    use_siren: bool = False
+    siren_omega_0: float = 30.0      # first-layer angular frequency
+    siren_hidden_omega: float = 30.0 # hidden-layer angular frequency
+
     @property
     def is_image_model(self) -> bool:
         return self.image_shape is not None

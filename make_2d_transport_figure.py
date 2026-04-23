@@ -270,7 +270,7 @@ def _panel(
             xs = [snap[i, 0] for snap in trajs]
             ys = [snap[i, 1] for snap in trajs]
             ax.plot(xs, ys,
-                    color="#333333", alpha=line_alpha, linewidth=line_width,
+                    color="#cccccc", alpha=line_alpha, linewidth=line_width,
                     solid_capstyle="round", zorder=1)
 
     # ── True target ν' overlay (green, faint) — drawn first so it sits under ─
@@ -278,20 +278,20 @@ def _panel(
     if x_true_tgt is not None:
         sc_true = ax.scatter(
             x_true_tgt[:, 0], x_true_tgt[:, 1],
-            s=dot_size * 0.9, c="#229944", alpha=0.45,
-            linewidths=0.3, edgecolors="#145c2a",
+            s=dot_size * 0.9, c="#ffe033", alpha=0.65,
+            linewidths=0.3, edgecolors="#ccaa00",
             zorder=2, label=true_tgt_label,
         )
         legend_handles.append(sc_true)
 
     # ── Scatter: source (blue) and transported/target (red) ─────────────────
     sc_src = ax.scatter(x_src[:, 0], x_src[:, 1],
-                        s=dot_size, c="#0077bb", alpha=dot_alpha,
-                        linewidths=0.4, edgecolors="#004488",
+                        s=dot_size, c="#00cfff", alpha=dot_alpha,
+                        linewidths=0.4, edgecolors="#007aaa",
                         zorder=3, label=src_label)
     sc_tgt = ax.scatter(x_tgt[:, 0], x_tgt[:, 1],
-                        s=dot_size, c="#cc3311", alpha=dot_alpha,
-                        linewidths=0.4, edgecolors="#882200",
+                        s=dot_size, c="#ff4422", alpha=dot_alpha,
+                        linewidths=0.4, edgecolors="#cc2200",
                         zorder=3, label=tgt_label)
     legend_handles += [sc_src, sc_tgt]
 
@@ -359,7 +359,7 @@ def build_figure(
 
     # ── Resolve normalization scale ──────────────────────────────────────────
     sc = _detect_scale(spec, scale)
-    print(f"Normalization scale: {sc:.4f}  (source at ±{sc:.1f} → model sees ±1)")
+    print(f"Normalization scale: {sc:.4f}  (source at +/-{sc:.1f} -> model sees +/-1)")
 
     # ── 1. Reference coupling ────────────────────────────────────────────────
     print("Sampling reference coupling ...", flush=True)

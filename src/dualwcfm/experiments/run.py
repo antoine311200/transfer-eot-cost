@@ -54,7 +54,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── Experiment selection ─────────────────────────────────────────────────
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
-        "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color", "gushchin", "scalability"],
+        "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color",
+                           "gushchin", "scalability", "singlecell"],
         help="Experiment mode.  Required unless --all is given.",
     )
     sel.add_argument(
@@ -79,8 +80,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Exclude perturbed variants (run only non-perturbed experiments).",
     )
     sel.add_argument(
+        "--no-ot-cfm", action="store_true", dest="no_ot_cfm",
+        help="Do not use OT-CFM for training the velocity fields between source and new source (resp. target and new target)"
+    )
+    sel.add_argument(
         "--all", action="store_true", dest="run_all",
         help="Run every experiment (2D + 3D + image) sequentially.",
+    )
+    sel.add_argument(
+        "--data-path", default=None, dest="data_path", metavar="PATH",
+        help=(
+            "Path to the Sci-Plex3 h5ad file "
+            "(SrivatsanTrapnell2020_sciplex3.h5ad). "
+            "Required for --mode singlecell unless pertpy is installed "
+            "with the dataset cached locally."
+        ),
     )
 
     # ── Method ──────────────────────────────────────────────────────────────
@@ -195,6 +209,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--wandb-run", default=None, dest="wandb_run_name", metavar="RUN",
         help="W&B run display name.  Defaults to the experiment name.",
     )
+    wb.add_argument(
+        "--wandb-offline", action="store_true", dest="wandb_offline",
+        help=(
+            "Log W&B data offline (no network calls).  "
+            "Sync later with: wandb sync wandb/offline-run-*/"
+        ),
+    )
 
     # ── Output ───────────────────────────────────────────────────────────────
     out = parser.add_argument_group("output")
@@ -282,6 +303,7 @@ def main() -> None:
     from dualwcfm.experiments.exp_color         import make_color_experiments
     from dualwcfm.experiments.exp_gushchin      import make_gushchin_experiments
     from dualwcfm.experiments.exp_scalability   import make_scalability_experiments
+    from dualwcfm.experiments.exp_singlecell    import make_singlecell_experiments
     from dualwcfm.experiments.base              import run_experiment
 
     dims = tuple(getattr(args, "dims", [16, 32, 64, 128]))
@@ -296,6 +318,9 @@ def main() -> None:
         "color":       make_color_experiments,
         "gushchin":    make_gushchin_experiments,
         "scalability": lambda out: make_scalability_experiments(out, dims=dims),
+        "singlecell":  lambda out: make_singlecell_experiments(
+            data_path=getattr(args, "data_path", None), output_root=out
+        ),
     }
 
     # ── Run everything ───────────────────────────────────────────────────────
@@ -322,6 +347,7 @@ def main() -> None:
                     wandb_project    = getattr(args, "wandb_project", None),
                     wandb_entity     = getattr(args, "wandb_entity", None),
                     wandb_run_name   = getattr(args, "wandb_run_name", None),
+                    wandb_mode       = "offline" if getattr(args, "wandb_offline", False) else None,
                 )
         return
 
@@ -361,6 +387,7 @@ def main() -> None:
             wandb_project    = getattr(args, "wandb_project", None),
             wandb_entity     = getattr(args, "wandb_entity", None),
             wandb_run_name   = getattr(args, "wandb_run_name", None),
+            wandb_mode       = "offline" if getattr(args, "wandb_offline", False) else None,
         )
 
 
@@ -383,6 +410,9 @@ def _apply_train_overrides(spec, args: argparse.Namespace) -> None:
         spec.method_cfg.particle_ratio = args.particle_ratio
     if args.loss is not None:
         spec.method_cfg.loss = args.loss
+    if args.no_ot_cfm:
+        spec.method_cfg.use_ot_pretrain = False
+
 
 
 def _run_ablation(args: argparse.Namespace, base_specs) -> None:

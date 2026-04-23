@@ -82,7 +82,18 @@ experiments/
 *.fdb_latexmk
 *.fls
 *.toc
+*.bbl
+*.blg
+*.bib
+*.nav
+*.snm
+
+
 
 misc/
 results*/
 paper/
+
+*.sty
+*.tex
+*.md
