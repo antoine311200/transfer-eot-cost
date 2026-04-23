@@ -226,93 +226,6 @@ class Strategy:
         logger.info("Final trained models saved -> %s", save_dir)
 
 
-class BidirectionalSirenStrategy(Strategy):
-    """BidirectionalStrategy whose bridge, dual, and flow models use SIREN layers.
-
-    Activates when ``model_cfg.use_siren = True``.  All other training logic
-    (alternating forward/backward, optimizers, advance, checkpointing) is
-    inherited from :class:`BidirectionalStrategy` via the shared base; only
-    ``_create_models`` is overridden to swap SELU MLPs for sinusoidal ones.
-    """
-
-    def __init__(self, wrapper, config: FeedForwardConfig, change_of_measure: Optional[nn.Module] = None):
-        super().__init__(wrapper, config, change_of_measure)
-
-    def _make_siren(self, dim: int, out_dim: int, hidden_size: int, num_layers: int, time_varying: bool = False):
-        from dualwcfm.models.siren import SirenMLP
-        return SirenMLP(
-            dim=dim,
-            out_dim=out_dim,
-            w=hidden_size,
-            n_layers=num_layers,
-            time_varying=time_varying,
-            omega_0=getattr(self.config, "siren_omega_0", 30.0),
-            hidden_omega=getattr(self.config, "siren_hidden_omega", 30.0),
-        )
-
-    def _create_models(self, dim: int, hidden_size: int, num_layers: int = 2):
-        self._device = None
-        wrapper = self.wrapper
-        bridge_dim = 2 * dim if getattr(self.config, "use_conditional_bridge", False) else dim
-
-        mk = self._make_siren  # shorthand
-
-        self.mu_bridge = wrapper(mk(bridge_dim, dim, hidden_size, num_layers, time_varying=True))
-        self.nu_bridge = wrapper(mk(bridge_dim, dim, hidden_size, num_layers, time_varying=True))
-        self.f_dual    = wrapper(mk(dim, 1, hidden_size, num_layers, time_varying=False))
-        self.g_dual    = wrapper(mk(dim, 1, hidden_size, num_layers, time_varying=False))
-        self.h_dual    = mk(2 * dim, 1, hidden_size, num_layers, time_varying=False)
-
-        self.forward_model          = wrapper(mk(2 * dim, 2 * dim, hidden_size, num_layers, time_varying=True))
-        self.previous_forward_model = wrapper(mk(2 * dim, 2 * dim, hidden_size, num_layers, time_varying=True))
-        self.backward_model         = wrapper(mk(2 * dim, 2 * dim, hidden_size, num_layers, time_varying=True))
-        self.previous_backward_model = wrapper(mk(2 * dim, 2 * dim, hidden_size, num_layers, time_varying=True))
-
-        self.initial_mu_bridge      = wrapper(mk(bridge_dim, dim, hidden_size, num_layers, time_varying=True))
-        self.initial_nu_bridge      = wrapper(mk(bridge_dim, dim, hidden_size, num_layers, time_varying=True))
-        self.initial_forward_model  = wrapper(mk(2 * dim, 2 * dim, hidden_size, num_layers, time_varying=True))
-        self.initial_backward_model = wrapper(mk(2 * dim, 2 * dim, hidden_size, num_layers, time_varying=True))
-
-    def _model_attrs(self):
-        return [
-            "mu_bridge", "nu_bridge", "f_dual", "g_dual", "h_dual",
-            "forward_model", "previous_forward_model",
-            "backward_model", "previous_backward_model",
-            "initial_mu_bridge", "initial_nu_bridge",
-            "initial_forward_model", "initial_backward_model",
-        ]
-
-    def _create_optimizers(self, config: FeedForwardConfig):
-        super()._create_optimizers(config)
-        self.backward_optimizer = optim.Adam(
-            self.backward_model.parameters(),
-            lr=config.flow_learning_rate,
-            weight_decay=config.dual_l2_reg,
-        )
-
-    def get_flow(self, step: int, device):
-        self.to_device(device)
-        model     = self.forward_model  if step % 2 == 0 else self.backward_model
-        optimizer = self.forward_optimizer if step % 2 == 0 else self.backward_optimizer
-        return model, optimizer
-
-    def get_previous_flow(self, step: int, device):
-        self.to_device(device)
-        return self.previous_forward_model if step % 2 == 0 else self.previous_backward_model
-
-    def get_initial_flow(self, step: int, device):
-        self.to_device(device)
-        return self.initial_forward_model if step % 2 == 0 else self.initial_backward_model
-
-    def advance(self, step: int, x_mu_next: torch.Tensor, y_nu_next: torch.Tensor,
-                num_steps: int = 100, sigma: float = 0):
-        if step % 2 == 0:
-            return Strategy.advance(self, step, x_mu_next, y_nu_next, num_steps, sigma)
-        else:
-            y_next, x_next = Strategy.advance(self, step, y_nu_next, x_mu_next, num_steps, sigma)
-            return x_next, y_next
-
-
 class BidirectionalStrategy(Strategy):
     def __init__(self, wrapper, config: FeedForwardConfig, change_of_measure: Optional[nn.Module] = None):
         super().__init__(wrapper, config, change_of_measure)
@@ -357,3 +270,44 @@ class BidirectionalStrategy(Strategy):
         else:
             y_next, x_next = super().advance(step, y_nu_next, x_mu_next, num_steps, sigma)
             return x_next, y_next
+
+
+class BidirectionalSirenStrategy(BidirectionalStrategy):
+    """BidirectionalStrategy whose models use SIREN layers instead of SELU MLPs.
+
+    Only ``_create_models`` is overridden — every other bidirectional mechanism
+    (alternating forward/backward, ``isinstance`` checks, checkpointing, advance,
+    visualisation) is inherited from :class:`BidirectionalStrategy` unchanged.
+    """
+
+    def _make_siren(self, dim: int, out_dim: int, hidden_size: int, num_layers: int, time_varying: bool = False):
+        from dualwcfm.models.siren import SirenMLP
+        return SirenMLP(
+            dim=dim,
+            out_dim=out_dim,
+            w=hidden_size,
+            n_layers=num_layers,
+            time_varying=time_varying,
+            omega_0=getattr(self.config, "siren_omega_0", 30.0),
+            hidden_omega=getattr(self.config, "siren_hidden_omega", 30.0),
+        )
+
+    def _create_models(self, dim: int, hidden_size: int, num_layers: int = 2):
+        self._device = None
+        wrapper = self.wrapper
+        bridge_dim = 2 * dim if getattr(self.config, "use_conditional_bridge", False) else dim
+        mk = self._make_siren
+
+        self.mu_bridge              = wrapper(mk(bridge_dim, dim,     hidden_size, num_layers, time_varying=True))
+        self.nu_bridge              = wrapper(mk(bridge_dim, dim,     hidden_size, num_layers, time_varying=True))
+        self.f_dual                 = wrapper(mk(dim,        1,       hidden_size, num_layers, time_varying=False))
+        self.g_dual                 = wrapper(mk(dim,        1,       hidden_size, num_layers, time_varying=False))
+        self.h_dual                 =         mk(2 * dim,   1,       hidden_size, num_layers, time_varying=False)
+        self.forward_model          = wrapper(mk(2 * dim,   2 * dim, hidden_size, num_layers, time_varying=True))
+        self.previous_forward_model = wrapper(mk(2 * dim,   2 * dim, hidden_size, num_layers, time_varying=True))
+        self.backward_model         = wrapper(mk(2 * dim,   2 * dim, hidden_size, num_layers, time_varying=True))
+        self.previous_backward_model = wrapper(mk(2 * dim,  2 * dim, hidden_size, num_layers, time_varying=True))
+        self.initial_mu_bridge      = wrapper(mk(bridge_dim, dim,    hidden_size, num_layers, time_varying=True))
+        self.initial_nu_bridge      = wrapper(mk(bridge_dim, dim,    hidden_size, num_layers, time_varying=True))
+        self.initial_forward_model  = wrapper(mk(2 * dim,   2 * dim, hidden_size, num_layers, time_varying=True))
+        self.initial_backward_model = wrapper(mk(2 * dim,   2 * dim, hidden_size, num_layers, time_varying=True))
