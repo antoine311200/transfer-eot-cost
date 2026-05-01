@@ -92,6 +92,25 @@ def _default_train_cfg(device, n_pcs: int) -> TrainingConfig:
     )
 
 
+def _siren_train_cfg(device, n_pcs: int) -> TrainingConfig:
+    return TrainingConfig(
+        device                    = device,
+        dataset_size              = 100_000,
+        marginal_epochs           = 5_000,
+        pretrain_epochs           = 12_000,
+        dual_epochs               = 150,
+        cfm_epochs                = 750,
+        advance_steps             = 100,
+        iterations                = 100,
+        num_rectified_flow        = 0,
+        scale_factor              = 20,
+        batch_size                = 2048,
+        coupling_chunk_size       = 10_000,
+        save_coupling_checkpoints = False,
+        save_model_checkpoints    = False,
+    )
+
+
 def _default_method_cfg() -> MixtureConfig:
     return MixtureConfig(
         sigma              = 0.05,
@@ -121,6 +140,22 @@ def _default_model_cfg(n_pcs: int) -> FeedForwardConfig:
     )
 
 
+def _siren_model_cfg(n_pcs: int) -> FeedForwardConfig:
+    return FeedForwardConfig(
+        dimension          = n_pcs,
+        hidden_size        = 512,
+        num_layers         = 5,
+        flow_learning_rate = 5e-4,
+        nu_learning_rate   = 5e-4,
+        mu_learning_rate   = 5e-4,
+        dual_learning_rate = 5e-4,
+        dual_l2_reg        = 0,
+        use_siren          = True,
+        siren_omega_0      = 30.0,
+        siren_hidden_omega = 30.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Experiment factory
 # ---------------------------------------------------------------------------
@@ -129,6 +164,7 @@ def _singlecell(
     loader: SciplexLoader,
     perturbed: bool,
     output_root: str,
+    use_siren: bool = False,
 ) -> ExperimentSpec:
     """Build one ExperimentSpec from a fitted SciplexLoader.
 
@@ -167,9 +203,9 @@ def _singlecell(
 
     n_pcs = loader.n_pcs_actual
 
-    train_cfg  = _default_train_cfg(device, n_pcs)
+    train_cfg  = _siren_train_cfg(device, n_pcs)  if use_siren else _default_train_cfg(device, n_pcs)
     method_cfg = _default_method_cfg()
-    model_cfg  = _default_model_cfg(n_pcs)
+    model_cfg  = _siren_model_cfg(n_pcs)           if use_siren else _default_model_cfg(n_pcs)
 
     vis_cfg = VisualizeConfig(
         show_each          = 5,
@@ -179,9 +215,10 @@ def _singlecell(
         show_each_pretrain = 500,
     )
 
+    siren_suffix = "_siren" if use_siren else ""
     suffix = "_perturbed" if perturbed else ""
     return ExperimentSpec(
-        name                  = f"singlecell{suffix}",
+        name                  = f"singlecell{siren_suffix}{suffix}",
         mode                  = "singlecell",
         initial_coupling      = ref_coupling,
         new_source            = new_src,
@@ -225,10 +262,37 @@ def make_singlecell_experiments(
         Number of PCA dimensions (default 50, matching CellOT).
     """
     print(f"Loading Sci-Plex3 dataset (n_hvg={n_hvg}, n_pcs={n_pcs}) …")
-    loader = SciplexLoader(data_path=data_path, n_hvg=n_hvg, n_pcs=n_pcs)
+    loader = SciplexLoader(
+        data_path=data_path,
+        n_hvg=n_hvg,
+        n_pcs=n_pcs,
+        perturbations=[_DRUG_NAME],  # keep only Vehicle + Givinostat to avoid OOM
+    )
     print("  Done. Building experiment specs …")
 
     return [
         _singlecell(loader, False, output_root),
         _singlecell(loader, True,  output_root),
+    ]
+
+
+def make_singlecell_siren_experiments(
+    data_path: Optional[str] = None,
+    output_root: str = "results",
+    n_hvg: int = _N_HVG,
+    n_pcs: int = _N_PCS,
+) -> List[ExperimentSpec]:
+    """Like make_singlecell_experiments but with SIREN networks and more training epochs."""
+    print(f"Loading Sci-Plex3 dataset (n_hvg={n_hvg}, n_pcs={n_pcs}) ...")
+    loader = SciplexLoader(
+        data_path=data_path,
+        n_hvg=n_hvg,
+        n_pcs=n_pcs,
+        perturbations=[_DRUG_NAME],
+    )
+    print("  Done. Building SIREN experiment specs ...")
+
+    return [
+        _singlecell(loader, False, output_root, use_siren=True),
+        _singlecell(loader, True,  output_root, use_siren=True),
     ]

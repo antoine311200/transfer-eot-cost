@@ -49,8 +49,27 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
+from matplotlib.colors import LinearSegmentedColormap
+
+matplotlib.rcParams.update({
+    "font.family":        "serif",
+    "font.serif":         ["Times New Roman", "DejaVu Serif", "serif"],
+    "mathtext.fontset":   "dejavuserif",
+    "axes.titlesize":     10,
+    "axes.labelsize":     8,
+    "legend.fontsize":    7,
+})
 import numpy as np
 import torch
+
+_CMAP_WB = LinearSegmentedColormap.from_list(
+    "white_blue",
+    [(1.00, 1.00, 1.00),
+     (0.88, 0.93, 0.98),
+     (0.55, 0.75, 0.90),
+     (0.22, 0.52, 0.78),
+     (0.07, 0.28, 0.58)],
+)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR    = os.path.join(_SCRIPT_DIR, "src")
@@ -64,29 +83,34 @@ from dualwcfm.mlp import MLP, torch_wrapper
 # Palette (matches make_2d_transport_figure.py)
 # ---------------------------------------------------------------------------
 
-_C_SRC       = "#00cfff"   # bright cyan  – source μ'
-_C_SRC_EDGE  = "#007aaa"
-_C_TRN       = "#ff4422"   # bright orange-red – transported
-_C_TRN_EDGE  = "#cc2200"
-_C_TGT       = "#ffe033"   # bright yellow – new target ν' (reference)
-_C_LINE      = "#cccccc"   # light grey coupling lines (visible on dark bg)
-_C_TITLE     = "black"
+_C_SRC       = "#2C6FAC"   # deep blue     – source μ'
+_C_SRC_EDGE  = "#1a4d7a"
+_C_TRN       = "#C14D6B"   # rose          – transported
+_C_TRN_EDGE  = "#8f2d45"
+_C_TGT       = "#D4A835"   # warm gold     – new target ν' (reference)
+_C_LINE      = "#b8c8d8"   # blue-grey coupling lines
+_C_TITLE     = "#1a1e2a"
 
 
 # ---------------------------------------------------------------------------
 # Model helpers (identical to make_2d_transport_figure.py)
 # ---------------------------------------------------------------------------
 
+def _is_siren(state: dict) -> bool:
+    return any(k.startswith("model.net.") and ".linear.weight" in k for k in state)
+
+
 def _infer_arch_from_state(state: dict) -> tuple[int, int]:
-    """Infer (hidden_size, n_layers) from a torch_wrapper(MLP) state dict.
-
-    MLP.net indices (time_varying, no norm):
-      0 : Linear(2*dim+1, w)  — first layer
-      2, 4, ... : Linear(w, w) — hidden
-      2*n_layers : Linear(w, out_dim) — output
-
-    Returns (hidden, n_layers).
-    """
+    """Infer (hidden_size, n_layers) from a torch_wrapper(MLP or SirenMLP) state dict."""
+    if _is_siren(state):
+        siren_indices = [
+            int(k.split(".")[2])
+            for k in state
+            if k.startswith("model.net.") and k.endswith(".linear.weight")
+        ]
+        n_layers = max(siren_indices) + 1
+        hidden   = state["model.net.0.linear.weight"].shape[0]
+        return hidden, n_layers
     linear_indices = [
         int(k.split(".")[2])
         for k in state
@@ -100,14 +124,19 @@ def _infer_arch_from_state(state: dict) -> tuple[int, int]:
     return hidden, n_layers
 
 
-def _build_model(dim: int, hidden: int, n_layers: int, device: torch.device):
-    mlp   = MLP(dim=2 * dim, out_dim=2 * dim, w=hidden, n_layers=n_layers, time_varying=True)
+def _build_model(dim: int, hidden: int, n_layers: int, device: torch.device, siren: bool = False):
+    if siren:
+        from dualwcfm.models.siren import SirenMLP
+        mlp = SirenMLP(dim=2 * dim, out_dim=2 * dim, w=hidden, n_layers=n_layers, time_varying=True)
+    else:
+        mlp = MLP(dim=2 * dim, out_dim=2 * dim, w=hidden, n_layers=n_layers, time_varying=True)
     model = torch_wrapper(mlp).to(device)
     return model
 
 
 def _load_model(path: str, dim: int, hidden: int, n_layers: int, device: torch.device):
     state = torch.load(path, map_location=device, weights_only=True)
+    siren = _is_siren(state)
     ckpt_hidden, ckpt_layers = _infer_arch_from_state(state)
     if (ckpt_hidden, ckpt_layers) != (hidden, n_layers):
         print(
@@ -115,7 +144,9 @@ def _load_model(path: str, dim: int, hidden: int, n_layers: int, device: torch.d
             f"(overrides CLI: hidden={hidden} n_layers={n_layers})"
         )
         hidden, n_layers = ckpt_hidden, ckpt_layers
-    model = _build_model(dim, hidden, n_layers, device)
+    if siren:
+        print(f"  [SIREN] sinusoidal model detected  (hidden={hidden}, n_layers={n_layers})")
+    model = _build_model(dim, hidden, n_layers, device, siren=siren)
     model.load_state_dict(state)
     model.eval()
     return model
@@ -187,6 +218,12 @@ def _panel(
     ymax = all_pts[:, 1].max() + pad
     extent = (xmin, xmax, ymin, ymax)
 
+    ax.set_facecolor("white")
+
+    # ── Axis crosshairs through origin ───────────────────────────────────────
+    ax.axhline(0, color="#c8d4de", linewidth=0.7, zorder=0)
+    ax.axvline(0, color="#c8d4de", linewidth=0.7, zorder=0)
+
     # ── KDE — density of transported (current model output) ─────────────────
     z_src = _kde(x_src, extent, kde_res)
     z_trn = _kde(x_trn, extent, kde_res)
@@ -195,7 +232,7 @@ def _panel(
         z /= z.max()
     ax.imshow(
         z, extent=[xmin, xmax, ymin, ymax], origin="lower",
-        cmap="viridis", aspect="auto", alpha=1.0, zorder=0,
+        cmap=_CMAP_WB, aspect="auto", alpha=0.82, zorder=0,
     )
 
     # ── Coupling lines — random subset src → transported ────────────────────
@@ -234,23 +271,23 @@ def _panel(
     )
 
     if show_legend:
+        handles = [sc_src, sc_trn]
+        if show_target:
+            handles = [sc_src, sc_trn, sc_trg]
         ax.legend(
-            handles=[sc_src, sc_trn, sc_trg] if show_target else [sc_src, sc_trn],
+            handles=handles,
             loc="upper left", fontsize=7,
-            framealpha=0.5, facecolor="white", edgecolor="#aaaaaa",
-            labelcolor="black", handletextpad=0.4, borderpad=0.4,
+            framealpha=0.88, facecolor="white", edgecolor="#d0d8e4",
+            labelcolor=_C_TITLE, handletextpad=0.4, borderpad=0.4,
         )
 
-    # ── Title ────────────────────────────────────────────────────────────────
     ax.set_title(title, color=_C_TITLE, fontsize=10, fontweight="bold", pad=5)
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
-    ax.tick_params(colors="black", labelsize=6, length=2)
-    ax.set_xticks([])
-    ax.set_yticks([])
+    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
     for spine in ax.spines.values():
-        spine.set_color("#cccccc")
-        spine.set_linewidth(0.5)
+        spine.set_color("#d0d8e4")
+        spine.set_linewidth(0.6)
 
 
 # ---------------------------------------------------------------------------
@@ -384,11 +421,12 @@ def build_figure(
     n = len(panels_data)
     fig_w = max(2.5 * n, 6.0)
     fig, axes = plt.subplots(1, n, figsize=(fig_w, 2.8), dpi=200)
+    fig.patch.set_facecolor("white")
     if n == 1:
         axes = [axes]
 
     fig.suptitle(
-        f"Coupling Evolution — {exp_name}",
+        f"Coupling Evolution: {exp_name}",
         color=_C_TITLE, fontsize=12, fontweight="bold", y=1.03,
     )
 
@@ -398,7 +436,7 @@ def build_figure(
         elif it == ckpt_iters[-1][0]:
             panel_title = "Final"
         else:
-            panel_title = f"Iter.~{it + 1}"
+            panel_title = f"Iteration {it + 1}"
 
         _panel(
             ax, x_src_k, x_trn, x_tgt_raw,
@@ -415,7 +453,7 @@ def build_figure(
         out = output_stem + ext
         dpi = 200 if ext == ".png" else None
         kw = {"dpi": dpi} if dpi else {}
-        fig.savefig(out, bbox_inches="tight", facecolor=fig.get_facecolor(), **kw)
+        fig.savefig(out, bbox_inches="tight", facecolor="white", **kw)
         print(f"Saved: {out}")
 
     plt.close(fig)

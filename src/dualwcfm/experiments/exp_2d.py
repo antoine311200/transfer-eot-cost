@@ -45,7 +45,7 @@ from dualwcfm.experiments.base import ExperimentSpec, get_device
 def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 1_000_000,
+        dataset_size             = 200_000,
         marginal_epochs          = 2_000,
         pretrain_epochs          = 5_000,
         dual_epochs              = 100,
@@ -108,7 +108,7 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     def _anticorrelate(n: int):
         x = torch.randn(n, 2) * 0.5
-        y = -x + torch.tensor([0.0, perturbation])
+        y = -x# + torch.tensor([0.0, perturbation])
         return x, y
 
     coupling = FunctionalCouplingDistribution(_anticorrelate)
@@ -141,6 +141,61 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
 
     return ExperimentSpec(
         name                  = f"2d_simple{'_perturbed' if perturbed else ''}",
+        mode                  = "2d",
+        initial_coupling      = coupling,
+        new_source            = new_src,
+        new_target            = new_tgt,
+        train_cfg             = train_cfg,
+        model_cfg             = model_cfg,
+        vis_cfg               = vis_cfg,
+        transport_map         = transport_map,
+        inverse_transport_map = inverse_transport_map,
+        method_cfg            = method_cfg,
+        output_root           = output_root,
+    )
+
+def _far_away(perturbed: bool, output_root: str) -> ExperimentSpec:
+    device      = get_device()
+    perturbation = 2.0 if perturbed else 0.0
+    loc          = 10000.0
+
+    def _anticorrelate(n: int):
+        x = torch.randn(n, 2) * 0.5
+        y = -x# + torch.tensor([0.0, perturbation])
+        return x, y
+
+    coupling = FunctionalCouplingDistribution(_anticorrelate)
+    new_src  = Simple2DGaussianDistribution(
+        mean = torch.tensor([loc, loc]),
+        std  = torch.tensor([0.5, 0.5]),
+    )
+    new_tgt  = Simple2DGaussianDistribution(
+        mean = torch.tensor([-loc, -loc + perturbation]),
+        std  = torch.tensor([0.5, 0.5]),
+    )
+
+    def transport_map(x: torch.Tensor) -> torch.Tensor:
+        # T(x) = -x + [0, perturbation]
+        A = torch.tensor([[-1.0, 0.0], [0.0, -1.0]], device=x.device, dtype=x.dtype)
+        b = torch.tensor([0.0, perturbation], device=x.device, dtype=x.dtype)
+        return x @ A.T + b
+
+    # T is its own inverse: T(T(x)) = -(-x + [0,p]) + [0,p] = x
+    inverse_transport_map = transport_map
+
+    train_cfg  = _default_train_cfg(device)
+    train_cfg.marginal_epochs    = 10_000   # linear transport converges fast; fewer phases needed
+    # Modify scale_factor to avoid numerical instability from large loc=10000 values; this also tests the algorithm's ability to handle large scale jumps.
+    train_cfg.scale_factor   = 1000.0      # blobs at loc=10000; scale_factor=1000 normalises to ~10, avoiding overflow while preserving relative scale
+    # train_cfg.num_rectified_flow = 1       # one rectification pass is sufficient for a linear map
+    method_cfg = _default_method_cfg()
+    method_cfg.sigma = 0.03                # blobs are narrow (std=0.5) and far apart (loc=10000); small σ avoids over-spreading
+    method_cfg.sigma2 = 0.03
+    model_cfg  = _default_model_cfg()
+    vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
+
+    return ExperimentSpec(
+        name                  = f"2d_far{'_perturbed' if perturbed else ''}",
         mode                  = "2d",
         initial_coupling      = coupling,
         new_source            = new_src,
@@ -200,6 +255,7 @@ def _medium(perturbed: bool, output_root: str) -> ExperimentSpec:
     train_cfg.iterations   = 100
     method_cfg             = _default_method_cfg()
     model_cfg              = _default_model_cfg(hidden_size=64)   # 4-blob target needs more capacity than simple
+    model_cfg.use_siren = True
     vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 
     return ExperimentSpec(
@@ -551,6 +607,7 @@ def _circle(perturbed: bool, output_root: str) -> ExperimentSpec:
     method_cfg.use_ot_pretrain = True
     method_cfg.dual_warmup_epochs = 300
     model_cfg  = _default_model_cfg(hidden_size=128, num_layers=5)
+    model_cfg.use_siren = True
     vis_cfg    = VisualizeConfig(
         show_each=1, n_trajectories=2000, trajectory_stride=2,
         show_each_marginal=100, show_each_pretrain=1000,
@@ -630,6 +687,7 @@ def _radial_warp(perturbed: bool, output_root: str) -> ExperimentSpec:
     method_cfg.particle_ratio = 0.15
     method_cfg.lip_reg     = 1.0
     method_cfg.dual_warmup_epochs = 50
+    method_cfg.use_ot_pretrain = False
     model_cfg = _default_model_cfg(hidden_size=128, num_layers=3)
     model_cfg.use_siren = True  # cubic radial expansion has high-frequency content
     vis_cfg   = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2,
@@ -731,6 +789,7 @@ def _cubic_shear(perturbed: bool, output_root: str) -> ExperimentSpec:
     method_cfg.particle_ratio = 0.2
     method_cfg.lip_reg     = 1.0
     method_cfg.dual_warmup_epochs = 30
+    method_cfg.use_ot_pretrain = False
     model_cfg = _default_model_cfg(hidden_size=128, num_layers=3)
     model_cfg.use_siren = True  # polynomial shear bends low-freq inputs into high-freq S-curves
     vis_cfg   = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2,
@@ -818,6 +877,7 @@ def _polar_twist(perturbed: bool, output_root: str) -> ExperimentSpec:
     method_cfg.particle_ratio = 0.15
     method_cfg.lip_reg     = 1.0
     method_cfg.dual_warmup_epochs = 50
+    method_cfg.use_ot_pretrain = False
     model_cfg = _default_model_cfg(hidden_size=128, num_layers=3)
     model_cfg.use_siren = True  # polar vortex θ' = θ + sin(r) has intrinsic sinusoidal structure
     vis_cfg   = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2,
@@ -862,4 +922,6 @@ def make_2d_experiments(output_root: str = "results") -> List[ExperimentSpec]:
         _cubic_shear(True,   output_root),
         _polar_twist(False,  output_root),
         _polar_twist(True,   output_root),
+        _far_away(False,       output_root),
+        _far_away(True,        output_root),
     ]

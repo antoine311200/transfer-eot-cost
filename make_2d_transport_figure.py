@@ -43,8 +43,28 @@ import sys
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+from matplotlib.colors import LinearSegmentedColormap
+
+matplotlib.rcParams.update({
+    "font.family":        "serif",
+    "font.serif":         ["Times New Roman", "DejaVu Serif", "serif"],
+    "mathtext.fontset":   "dejavuserif",
+    "axes.titlesize":     12,
+    "axes.labelsize":     9,
+    "legend.fontsize":    8,
+})
 import numpy as np
 import torch
+
+_CMAP_WB = LinearSegmentedColormap.from_list(
+    "white_blue",
+    [(1.00, 1.00, 1.00),
+     (0.88, 0.93, 0.98),
+     (0.55, 0.75, 0.90),
+     (0.22, 0.52, 0.78),
+     (0.07, 0.28, 0.58)],
+)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR    = os.path.join(_SCRIPT_DIR, "src")
@@ -58,42 +78,43 @@ from dualwcfm.mlp import MLP, torch_wrapper
 # Model helpers
 # ---------------------------------------------------------------------------
 
+def _is_siren(state: dict) -> bool:
+    return any(k.startswith("model.net.") and ".linear.weight" in k for k in state)
+
+
 def _infer_arch_from_state(state: dict) -> tuple[int, int]:
-    """Infer (hidden_size, n_layers) from a torch_wrapper(MLP) state dict.
-
-    MLP.net layout (no norm, time_varying=True):
-      index 0 : Linear(2*dim+1, w)   ← net.0
-      index 1 : SELU
-      index 2 : Linear(w, w)         ← net.2  (repeated n_layers-1 times)
-      index 3 : SELU
-      ...
-      index 2*n_layers : Linear(w, out_dim)   ← last linear = output
-
-    So  n_layers = max_linear_index / 2
-    and hidden_size = net.0.weight shape[0].
-    """
+    """Infer (hidden_size, n_layers) from a torch_wrapper(MLP or SirenMLP) state dict."""
+    if _is_siren(state):
+        siren_indices = [
+            int(k.split(".")[2])
+            for k in state
+            if k.startswith("model.net.") and k.endswith(".linear.weight")
+        ]
+        n_layers = max(siren_indices) + 1
+        hidden   = state["model.net.0.linear.weight"].shape[0]
+        return hidden, n_layers
     linear_indices = []
     for key in state:
-        # keys: "model.net.N.weight"
         parts = key.split(".")
         if len(parts) == 4 and parts[0] == "model" and parts[1] == "net" and parts[3] == "weight":
             linear_indices.append(int(parts[2]))
-
     if not linear_indices:
-        return 64, 2  # safe fallback
-
-    max_idx   = max(linear_indices)
-    n_layers  = max_idx // 2          # e.g. max_idx=4 → n_layers=2; max_idx=6 → n_layers=3
-    # hidden = output size of the first linear layer
-    hidden    = state["model.net.0.weight"].shape[0]
+        return 64, 2
+    max_idx  = max(linear_indices)
+    n_layers = max_idx // 2
+    hidden   = state["model.net.0.weight"].shape[0]
     return hidden, n_layers
 
 
 def _build_forward_model(
-    dim: int, hidden_size: int, n_layers: int, device: torch.device
+    dim: int, hidden_size: int, n_layers: int, device: torch.device, siren: bool = False
 ) -> torch.nn.Module:
-    """Reconstruct the forward model architecture (matches Strategy._create_models)."""
-    mlp   = MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=n_layers, time_varying=True)
+    """Reconstruct the forward model architecture (handles both MLP and SIREN)."""
+    if siren:
+        from dualwcfm.models.siren import SirenMLP
+        mlp = SirenMLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=n_layers, time_varying=True)
+    else:
+        mlp = MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=n_layers, time_varying=True)
     model = torch_wrapper(mlp).to(device)
     return model
 
@@ -101,7 +122,7 @@ def _build_forward_model(
 def _load_model(path: str, dim: int, hidden_size: int, n_layers: int,
                 device: torch.device) -> torch.nn.Module:
     state = torch.load(path, map_location=device, weights_only=True)
-    # Auto-detect architecture from checkpoint; override CLI args if they differ.
+    siren = _is_siren(state)
     ckpt_hidden, ckpt_layers = _infer_arch_from_state(state)
     if (ckpt_hidden, ckpt_layers) != (hidden_size, n_layers):
         print(
@@ -109,7 +130,9 @@ def _load_model(path: str, dim: int, hidden_size: int, n_layers: int,
             f"checkpoint has hidden={ckpt_hidden} n_layers={ckpt_layers} — using checkpoint."
         )
         hidden_size, n_layers = ckpt_hidden, ckpt_layers
-    model = _build_forward_model(dim, hidden_size, n_layers, device)
+    if siren:
+        print(f"  [SIREN] sinusoidal model detected  (hidden={hidden_size}, n_layers={n_layers})")
+    model = _build_forward_model(dim, hidden_size, n_layers, device, siren=siren)
     model.load_state_dict(state)
     model.eval()
     return model
@@ -220,30 +243,21 @@ def _kde_image(
 
 def _panel(
     ax:           plt.Axes,
-    x_src:        np.ndarray,              # (N, 2) source particles (blue)
-    x_tgt:        np.ndarray,              # (N, 2) transported/target particles (red)
-    trajs:        list[np.ndarray] | None, # trajectory snapshots, or None
+    x_src:        np.ndarray,
+    x_tgt:        np.ndarray,
+    trajs:        list[np.ndarray] | None,
     title:        str,
     src_label:    str   = r"Source $\mu'$",
     tgt_label:    str   = r"Target $\nu'$",
-    x_true_tgt:   np.ndarray | None = None,  # (N, 2) true target ν' overlay (green)
+    x_true_tgt:   np.ndarray | None = None,
     true_tgt_label: str = r"True target $\nu'$",
     pad:          float = 1.2,
     kde_res:      int   = 300,
     dot_size:     int   = 9,
-    dot_alpha:    float = 0.55,
-    line_alpha:   float = 0.18,
+    dot_alpha:    float = 0.60,
+    line_alpha:   float = 0.22,
     line_width:   float = 0.6,
 ):
-    """Draw one transport panel onto *ax*.
-
-    *x_true_tgt*: when provided (e.g. for the pretrained panel), draws the
-    true new-target distribution ν' as small semi-transparent green scatter
-    points so the reader can see how far the pretrained transport deviates
-    from the desired output.
-    """
-
-    # ── Axis limits — expand to include true target if present ──────────────
     all_pts = np.vstack([x_src, x_tgt] + ([x_true_tgt] if x_true_tgt is not None else []))
     xmin = all_pts[:, 0].min() - pad
     xmax = all_pts[:, 0].max() + pad
@@ -251,16 +265,21 @@ def _panel(
     ymax = all_pts[:, 1].max() + pad
     extent = (xmin, xmax, ymin, ymax)
 
-    # ── KDE background — viridis density of source + transported combined ───
+    ax.set_facecolor("white")
+
+    # ── Axis crosshairs through origin ───────────────────────────────────────
+    ax.axhline(0, color="#c8d4de", linewidth=0.7, zorder=0)
+    ax.axvline(0, color="#c8d4de", linewidth=0.7, zorder=0)
+
+    # ── KDE background (white-to-blue) ───────────────────────────────────────
     z_src = _kde_image(x_src, extent, kde_res)
     z_tgt = _kde_image(x_tgt, extent, kde_res)
     z     = z_src + z_tgt
     if z.max() > 0:
         z /= z.max()
-
     ax.imshow(
         z, extent=[xmin, xmax, ymin, ymax], origin="lower",
-        cmap="viridis", aspect="auto", alpha=1.0, zorder=0,
+        cmap=_CMAP_WB, aspect="auto", alpha=0.82, zorder=0,
     )
 
     # ── Trajectory lines ────────────────────────────────────────────────────
@@ -269,46 +288,43 @@ def _panel(
         for i in range(N):
             xs = [snap[i, 0] for snap in trajs]
             ys = [snap[i, 1] for snap in trajs]
-            ax.plot(xs, ys,
-                    color="#cccccc", alpha=line_alpha, linewidth=line_width,
-                    solid_capstyle="round", zorder=1)
+            ax.plot(xs, ys, color="#b8c8d8", alpha=line_alpha,
+                    linewidth=line_width, solid_capstyle="round", zorder=1)
 
-    # ── True target ν' overlay (green, faint) — drawn first so it sits under ─
     legend_handles = []
     if x_true_tgt is not None:
         sc_true = ax.scatter(
             x_true_tgt[:, 0], x_true_tgt[:, 1],
-            s=dot_size * 0.9, c="#ffe033", alpha=0.65,
-            linewidths=0.3, edgecolors="#ccaa00",
+            s=dot_size * 0.9, c="#D4A835", alpha=0.65,
+            linewidths=0.3, edgecolors="#a07c1a",
             zorder=2, label=true_tgt_label,
         )
         legend_handles.append(sc_true)
 
-    # ── Scatter: source (blue) and transported/target (red) ─────────────────
     sc_src = ax.scatter(x_src[:, 0], x_src[:, 1],
-                        s=dot_size, c="#00cfff", alpha=dot_alpha,
-                        linewidths=0.4, edgecolors="#007aaa",
+                        s=dot_size, c="#2C6FAC", alpha=dot_alpha,
+                        linewidths=0.3, edgecolors="#1a4d7a",
                         zorder=3, label=src_label)
     sc_tgt = ax.scatter(x_tgt[:, 0], x_tgt[:, 1],
-                        s=dot_size, c="#ff4422", alpha=dot_alpha,
-                        linewidths=0.4, edgecolors="#cc2200",
+                        s=dot_size, c="#C14D6B", alpha=dot_alpha,
+                        linewidths=0.3, edgecolors="#8f2d45",
                         zorder=3, label=tgt_label)
     legend_handles += [sc_src, sc_tgt]
 
-    # ── Legend ───────────────────────────────────────────────────────────────
     leg = ax.legend(
         handles=legend_handles,
         loc="upper left", fontsize=8,
-        framealpha=0.5, facecolor="white", edgecolor="#aaaaaa",
-        labelcolor="black", handletextpad=0.4, borderpad=0.5,
+        framealpha=0.88, facecolor="white", edgecolor="#d0d8e4",
+        labelcolor="#1a1e2a", handletextpad=0.4, borderpad=0.5,
     )
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
-    ax.set_title(title, color="black", fontsize=13, fontweight="bold", pad=10)
-    ax.tick_params(colors="black", labelsize=8)
+    ax.set_title(title, color="#1a1e2a", fontsize=12, fontweight="bold", pad=10)
+    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
     for spine in ax.spines.values():
-        spine.set_color("#aaaaaa")
+        spine.set_color("#d0d8e4")
+        spine.set_linewidth(0.7)
 
 
 # ---------------------------------------------------------------------------
@@ -415,31 +431,32 @@ def build_figure(
             ["reference_coupling", "pretrained", "adapted"], panels
         ):
             fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+            fig.patch.set_facecolor("white")
             _panel(ax, x_s, x_t, trajs, title, src_label=slbl, tgt_label=tlbl,
                    x_true_tgt=x_ov, **_panel_kw)
             out = f"{output_stem}_{stem}.png"
-            fig.savefig(out, bbox_inches="tight", dpi=200, facecolor=fig.get_facecolor())
+            fig.savefig(out, bbox_inches="tight", dpi=200, facecolor="white")
             print(f"Saved: {out}")
             out_pdf = f"{output_stem}_{stem}.pdf"
-            fig.savefig(out_pdf, bbox_inches="tight", facecolor=fig.get_facecolor())
+            fig.savefig(out_pdf, bbox_inches="tight", facecolor="white")
             print(f"Saved: {out_pdf}")
             plt.close(fig)
     else:
         fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=200)
+        fig.patch.set_facecolor("white")
         fig.suptitle(
-            f"Transfer Learning of Data-based EOT — {exp_name}",
-            color="black", fontsize=14, fontweight="bold", y=1.02,
+            f"Transfer Learning: {exp_name}",
+            color="#1a1e2a", fontsize=13, fontweight="bold", y=1.02,
         )
         for ax, (x_s, x_t, trajs, title, slbl, tlbl, x_ov) in zip(axes, panels):
             _panel(ax, x_s, x_t, trajs, title, src_label=slbl, tgt_label=tlbl,
                    x_true_tgt=x_ov, **_panel_kw)
         plt.tight_layout(pad=0.5)
         out = f"{output_stem}.png"
-        fig.savefig(out, bbox_inches="tight", dpi=200, facecolor=fig.get_facecolor())
+        fig.savefig(out, bbox_inches="tight", dpi=200, facecolor="white")
         print(f"Saved: {out}")
-        # also PDF
         out_pdf = f"{output_stem}.pdf"
-        fig.savefig(out_pdf, bbox_inches="tight", dpi=200, facecolor=fig.get_facecolor())
+        fig.savefig(out_pdf, bbox_inches="tight", dpi=200, facecolor="white")
         print(f"Saved: {out_pdf}")
         plt.close(fig)
 

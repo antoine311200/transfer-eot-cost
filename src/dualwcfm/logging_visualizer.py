@@ -170,15 +170,35 @@ class _LoggingMixin:
                 self._eval_source = trainer.new_source.sample(n_eval).cpu()
                 self._eval_target = trainer.new_target.sample(n_eval).cpu()
 
+        _use_bridge = getattr(getattr(trainer.method, "config", None), "use_bridge_marginals", True)
+        _bridge_steps = getattr(getattr(trainer.method, "config", None), "bridge_marginal_steps", 50)
         with torch.no_grad():
-            mu_t = trainer.flow_matching.interpolate(
-                trainer.initial_coupling.sample_init(n).to(device),
-                trainer.new_source.sample(n).to(device),
-                t_tensor, sigma=0.0)
-            nu_t = trainer.flow_matching.interpolate(
-                trainer.initial_coupling.sample_target(n).to(device),
-                trainer.new_target.sample(n).to(device),
-                t_tensor, sigma=0.0)
+            if _use_bridge:
+                # NEW: evolve initial particles through bridge to time t
+                (mu_model_vis, _), (nu_model_vis, _) = trainer.strategy.get_bridges(device)
+                mu_model_vis.eval()
+                nu_model_vis.eval()
+                _conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
+                x0_log = trainer.initial_coupling.sample_init(n).to(device)
+                y0_log = trainer.initial_coupling.sample_target(n).to(device)
+                xt_log = trainer.flow_matching.evolve_to_time(x0_log, mu_model_vis, t, n_steps=_bridge_steps, extend=_conditional)
+                yt_log = trainer.flow_matching.evolve_to_time(y0_log, nu_model_vis, t, n_steps=_bridge_steps, extend=_conditional)
+                if _conditional:
+                    mu_t = xt_log[:, :x0_log.shape[1]]
+                    nu_t = yt_log[:, :y0_log.shape[1]]
+                else:
+                    mu_t = xt_log
+                    nu_t = yt_log
+            else:
+                # OLD: linear interpolation between initial and new marginals
+                mu_t = trainer.flow_matching.interpolate(
+                    trainer.initial_coupling.sample_init(n).to(device),
+                    trainer.new_source.sample(n).to(device),
+                    t_tensor, sigma=0.0)
+                nu_t = trainer.flow_matching.interpolate(
+                    trainer.initial_coupling.sample_target(n).to(device),
+                    trainer.new_target.sample(n).to(device),
+                    t_tensor, sigma=0.0)
             x, y = trainer.current_coupling.coupling_sample(n)
             x, y = x.to(device), y.to(device)
             log_w = trainer.strategy.log_weight(x, y, trainer.config.iterations)
@@ -203,9 +223,18 @@ class _LoggingMixin:
         # Rescale to original data space for cross-run comparability
         y_scaled      = y      * s
         nu_ref_scaled = nu_ref * s
-        mmd_nu         = _mmd(y_scaled, nu_ref_scaled)
-        energy_dist_nu = _ed(y_scaled,  nu_ref_scaled)
-        sinkhorn_div   = _sd(y_scaled,  nu_ref_scaled)
+        try:
+            mmd_nu = _mmd(y_scaled, nu_ref_scaled)
+        except Exception:
+            mmd_nu = float("nan")
+        try:
+            energy_dist_nu = _ed(y_scaled, nu_ref_scaled)
+        except Exception:
+            energy_dist_nu = float("nan")
+        try:
+            sinkhorn_div = _sd(y_scaled, nu_ref_scaled)
+        except Exception:
+            sinkhorn_div = float("nan")
 
         # Ground-truth map errors — only compute for the direction trained this step.
         # For BidirectionalStrategy: skip fwd error on backward steps and vice versa
@@ -220,26 +249,32 @@ class _LoggingMixin:
         compute_bwd = (not is_bidir) or is_bwd
 
         if compute_fwd and self._transport_map is not None and fwd_model is not None:
-            x_eval = trainer.new_source.sample(n_map).to(device)
-            with torch.no_grad():
-                evolved = trainer.flow_matching.evolve(
-                    x_eval, fwd_model, num_steps=200, sigma=0.0, extend=True)
-                y_hat = (evolved[:, : x_eval.shape[1], :, :]
-                         if is_image_tensor(x_eval)
-                         else evolved[:, : trainer.strategy.config.dimension])
-            map_err_fwd = _map_err((x_eval * s).cpu(), (y_hat * s).cpu(), self._transport_map)
+            try:
+                x_eval = trainer.new_source.sample(n_map).to(device)
+                with torch.no_grad():
+                    evolved = trainer.flow_matching.evolve(
+                        x_eval, fwd_model, num_steps=200, sigma=0.0, extend=True)
+                    y_hat = (evolved[:, : x_eval.shape[1], :, :]
+                             if is_image_tensor(x_eval)
+                             else evolved[:, : trainer.strategy.config.dimension])
+                map_err_fwd = _map_err((x_eval * s).cpu(), (y_hat * s).cpu(), self._transport_map)
+            except Exception:
+                map_err_fwd = float("nan")
         else:
             map_err_fwd = ""
 
         if compute_bwd and self._inverse_transport_map is not None and bwd_model is not None:
-            y_eval = trainer.new_target.sample(n_map).to(device)
-            with torch.no_grad():
-                evolved = trainer.flow_matching.evolve(
-                    y_eval, bwd_model, num_steps=200, sigma=0.0, extend=True)
-                x_hat = (evolved[:, : y_eval.shape[1], :, :]
-                         if is_image_tensor(y_eval)
-                         else evolved[:, : trainer.strategy.config.dimension])
-            map_err_bwd = _map_err((y_eval * s).cpu(), (x_hat * s).cpu(), self._inverse_transport_map)
+            try:
+                y_eval = trainer.new_target.sample(n_map).to(device)
+                with torch.no_grad():
+                    evolved = trainer.flow_matching.evolve(
+                        y_eval, bwd_model, num_steps=200, sigma=0.0, extend=True)
+                    x_hat = (evolved[:, : y_eval.shape[1], :, :]
+                             if is_image_tensor(y_eval)
+                             else evolved[:, : trainer.strategy.config.dimension])
+                map_err_bwd = _map_err((y_eval * s).cpu(), (x_hat * s).cpu(), self._inverse_transport_map)
+            except Exception:
+                map_err_bwd = float("nan")
         else:
             map_err_bwd = ""
 
@@ -248,15 +283,18 @@ class _LoggingMixin:
         # Requires a known transport map; skipped for images or when unavailable.
         bw2_val: "str | float" = ""
         if not is_image_tensor(x) and self._transport_map is not None:
-            n_bw = min(n, 2_000)
-            with torch.no_grad():
-                x_bw, y_bw = trainer.current_coupling.coupling_sample(n_bw)
-                x_gt = trainer.new_source.sample(n_bw).to(device)
-                y_gt = self._transport_map((x_gt * s).cpu()).to(x_gt.device) / s
-            bw2_val = _joint_bw2(
-                (x_bw * s).float().cpu(), (y_bw * s).float().cpu(),
-                (x_gt * s).float().cpu(), (y_gt * s).float().cpu(),
-            )
+            try:
+                n_bw = min(n, 2_000)
+                with torch.no_grad():
+                    x_bw, y_bw = trainer.current_coupling.coupling_sample(n_bw)
+                    x_gt = trainer.new_source.sample(n_bw).to(device)
+                    y_gt = self._transport_map((x_gt * s).cpu()).to(x_gt.device) / s
+                bw2_val = _joint_bw2(
+                    (x_bw * s).float().cpu(), (y_bw * s).float().cpu(),
+                    (x_gt * s).float().cpu(), (y_gt * s).float().cpu(),
+                )
+            except Exception:
+                bw2_val = float("nan")
 
         # Image-specific metrics (FID / KID) — provided by subclass hook
         img_metrics = self._compute_image_metrics(time_step, trainer)
@@ -566,7 +604,8 @@ class _LoggingMixin:
 
     def _save_weight_histogram(self, time_step: int, w: np.ndarray):
         fig, ax = plt.subplots(figsize=(5, 3))
-        ax.hist(w, bins=50, color="steelblue", edgecolor="white", linewidth=0.4)
+        w_finite = w[np.isfinite(w)]
+        ax.hist(w_finite if len(w_finite) > 0 else np.zeros(1), bins=50, color="steelblue", edgecolor="white", linewidth=0.4)
         ax.axvline(1.0, color="red", linestyle="--", linewidth=1, label="w=1")
         ax.set_xlabel("Weight $w_k$"); ax.set_ylabel("Count")
         ax.set_title(f"Weight distribution — iter {time_step}")
@@ -672,17 +711,38 @@ class LoggingVisualizer(_LoggingMixin, Visualizer):
         t_val = (iteration + 1) / trainer.config.iterations
         t_tensor = torch.full((n_samples // 10, 1), t_val, device=device)
 
+        _use_bridge_pp = getattr(getattr(trainer.method, "config", None), "use_bridge_marginals", True)
+        _bridge_steps_pp = getattr(getattr(trainer.method, "config", None), "bridge_marginal_steps", 50)
+        n_vis = n_samples // 10
         with torch.no_grad():
-            mu_samples = trainer.flow_matching.interpolate(
-                trainer.initial_coupling.sample_init(n_samples // 10).to(device),
-                trainer.new_source.sample(n_samples // 10).to(device),
-                t_tensor, 0.0,
-            )
-            nu_samples = trainer.flow_matching.interpolate(
-                trainer.initial_coupling.sample_target(n_samples // 10).to(device),
-                trainer.new_target.sample(n_samples // 10).to(device),
-                t_tensor, 0.0,
-            )
+            if _use_bridge_pp:
+                # NEW: evolve initial particles through bridge to time t
+                (mu_model_pp, _), (nu_model_pp, _) = trainer.strategy.get_bridges(device)
+                mu_model_pp.eval()
+                nu_model_pp.eval()
+                _cond_pp = getattr(trainer.strategy.config, "use_conditional_bridge", False)
+                x0_pp = trainer.initial_coupling.sample_init(n_vis).to(device)
+                y0_pp = trainer.initial_coupling.sample_target(n_vis).to(device)
+                xt_pp = trainer.flow_matching.evolve_to_time(x0_pp, mu_model_pp, t_val, n_steps=_bridge_steps_pp, extend=_cond_pp)
+                yt_pp = trainer.flow_matching.evolve_to_time(y0_pp, nu_model_pp, t_val, n_steps=_bridge_steps_pp, extend=_cond_pp)
+                if _cond_pp:
+                    mu_samples = xt_pp[:, :x0_pp.shape[1]]
+                    nu_samples = yt_pp[:, :y0_pp.shape[1]]
+                else:
+                    mu_samples = xt_pp
+                    nu_samples = yt_pp
+            else:
+                # OLD: linear interpolation between initial and new marginals
+                mu_samples = trainer.flow_matching.interpolate(
+                    trainer.initial_coupling.sample_init(n_vis).to(device),
+                    trainer.new_source.sample(n_vis).to(device),
+                    t_tensor, 0.0,
+                )
+                nu_samples = trainer.flow_matching.interpolate(
+                    trainer.initial_coupling.sample_target(n_vis).to(device),
+                    trainer.new_target.sample(n_vis).to(device),
+                    t_tensor, 0.0,
+                )
         mu_coup, nu_coup = trainer.current_coupling.coupling_sample(n_coup)
         mu_cpu, nu_cpu = mu_coup.cpu(), nu_coup.cpu()
         mu_s = mu_samples.cpu()
@@ -754,17 +814,38 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
         t_val = (iteration + 1) / trainer.config.iterations
         t_tensor = torch.full((n_samples // 10, 1), t_val, device=device)
 
+        _use_bridge_3d = getattr(getattr(trainer.method, "config", None), "use_bridge_marginals", True)
+        _bridge_steps_3d = getattr(getattr(trainer.method, "config", None), "bridge_marginal_steps", 50)
+        n_vis_3d = n_samples // 10
         with torch.no_grad():
-            mu_samples = trainer.flow_matching.interpolate(
-                trainer.initial_coupling.sample_init(n_samples // 10).to(device),
-                trainer.new_source.sample(n_samples // 10).to(device),
-                t_tensor, 0.0,
-            )
-            nu_samples = trainer.flow_matching.interpolate(
-                trainer.initial_coupling.sample_target(n_samples // 10).to(device),
-                trainer.new_target.sample(n_samples // 10).to(device),
-                t_tensor, 0.0,
-            )
+            if _use_bridge_3d:
+                # NEW: evolve initial particles through bridge to time t
+                (mu_model_3d, _), (nu_model_3d, _) = trainer.strategy.get_bridges(device)
+                mu_model_3d.eval()
+                nu_model_3d.eval()
+                _cond_3d = getattr(trainer.strategy.config, "use_conditional_bridge", False)
+                x0_3d = trainer.initial_coupling.sample_init(n_vis_3d).to(device)
+                y0_3d = trainer.initial_coupling.sample_target(n_vis_3d).to(device)
+                xt_3d = trainer.flow_matching.evolve_to_time(x0_3d, mu_model_3d, t_val, n_steps=_bridge_steps_3d, extend=_cond_3d)
+                yt_3d = trainer.flow_matching.evolve_to_time(y0_3d, nu_model_3d, t_val, n_steps=_bridge_steps_3d, extend=_cond_3d)
+                if _cond_3d:
+                    mu_samples = xt_3d[:, :x0_3d.shape[1]]
+                    nu_samples = yt_3d[:, :y0_3d.shape[1]]
+                else:
+                    mu_samples = xt_3d
+                    nu_samples = yt_3d
+            else:
+                # OLD: linear interpolation between initial and new marginals
+                mu_samples = trainer.flow_matching.interpolate(
+                    trainer.initial_coupling.sample_init(n_vis_3d).to(device),
+                    trainer.new_source.sample(n_vis_3d).to(device),
+                    t_tensor, 0.0,
+                )
+                nu_samples = trainer.flow_matching.interpolate(
+                    trainer.initial_coupling.sample_target(n_vis_3d).to(device),
+                    trainer.new_target.sample(n_vis_3d).to(device),
+                    t_tensor, 0.0,
+                )
         mu_coup, nu_coup = trainer.current_coupling.coupling_sample(n_coup)
         mu_cpu, nu_cpu = mu_coup.cpu(), nu_coup.cpu()
         mu_s = mu_samples.cpu()

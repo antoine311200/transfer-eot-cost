@@ -79,8 +79,15 @@ def apply_pca(X: np.ndarray, components: np.ndarray, mean: np.ndarray) -> np.nda
 # Model loading
 # ---------------------------------------------------------------------------
 
-def _infer_arch(state: dict) -> tuple[int, int]:
-    """Infer (hidden_size, n_layers) from a torch_wrapper(MLP) state dict."""
+def _infer_arch(state: dict) -> tuple[int, int, bool]:
+    """Infer (hidden_size, n_layers, is_siren) from a torch_wrapper state dict."""
+    # SIREN models have keys like "model.net.0.linear.weight" and "model.final.weight"
+    is_siren = any("model.final.weight" in k or ".linear.weight" in k for k in state)
+    if is_siren:
+        hidden = state["model.net.0.linear.weight"].shape[0]
+        n_siren = sum(1 for k in state if k.startswith("model.net.") and k.endswith(".linear.weight"))
+        return hidden, n_siren, True
+    # MLP models: "model.net.0.weight", "model.net.2.weight", ... (every other index)
     linear_idx = []
     for key in state:
         parts = key.split(".")
@@ -88,18 +95,23 @@ def _infer_arch(state: dict) -> tuple[int, int]:
                 parts[1] == "net" and parts[3] == "weight"):
             linear_idx.append(int(parts[2]))
     if not linear_idx:
-        return 256, 4
+        return 256, 4, False
     n_layers = max(linear_idx) // 2
     hidden   = state["model.net.0.weight"].shape[0]
-    return hidden, n_layers
+    return hidden, n_layers, False
 
 
 def load_model(path: str, dim: int, device: torch.device) -> torch.nn.Module:
     state = torch.load(path, map_location=device, weights_only=True)
-    hidden, n_layers = _infer_arch(state)
-    mlp   = MLP(dim=2 * dim, out_dim=2 * dim, w=hidden,
-                n_layers=n_layers, time_varying=True)
-    model = torch_wrapper(mlp).to(device)
+    hidden, n_layers, is_siren = _infer_arch(state)
+    if is_siren:
+        from dualwcfm.models.siren import SirenMLP
+        net   = SirenMLP(dim=2 * dim, out_dim=2 * dim, w=hidden,
+                         n_layers=n_layers, time_varying=True)
+    else:
+        net   = MLP(dim=2 * dim, out_dim=2 * dim, w=hidden,
+                    n_layers=n_layers, time_varying=True)
+    model = torch_wrapper(net).to(device)
     model.load_state_dict(state)
     model.eval()
     return model

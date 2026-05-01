@@ -237,8 +237,9 @@ def map_error(
 # Gaussian-specific metrics (Gushchin benchmark)
 # ---------------------------------------------------------------------------
 
-def _matrix_sqrt(A: torch.Tensor) -> torch.Tensor:
+def _matrix_sqrt(A: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Symmetric PSD matrix square root via eigendecomposition."""
+    A = A + eps * torch.eye(A.shape[0], dtype=A.dtype, device=A.device)
     L, V = torch.linalg.eigh(A)
     L = L.clamp(min=0.0)
     return V @ torch.diag(L.sqrt()) @ V.T

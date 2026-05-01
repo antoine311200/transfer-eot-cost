@@ -55,7 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
         "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color",
-                           "gushchin", "scalability", "singlecell"],
+                           "gushchin", "scalability", "singlecell", "singlecell-siren"],
         help="Experiment mode.  Required unless --all is given.",
     )
     sel.add_argument(
@@ -223,6 +223,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output", default="results",
         help="Root directory for experiment output (default: 'results').",
     )
+    out.add_argument(
+        "--iter-subdir", action="store_true", dest="iter_subdir",
+        help="Save each run in a subdirectory iter_N inside the experiment folder.",
+    )
 
     return parser
 
@@ -303,7 +307,7 @@ def main() -> None:
     from dualwcfm.experiments.exp_color         import make_color_experiments
     from dualwcfm.experiments.exp_gushchin      import make_gushchin_experiments
     from dualwcfm.experiments.exp_scalability   import make_scalability_experiments
-    from dualwcfm.experiments.exp_singlecell    import make_singlecell_experiments
+    from dualwcfm.experiments.exp_singlecell    import make_singlecell_experiments, make_singlecell_siren_experiments
     from dualwcfm.experiments.base              import run_experiment
 
     dims = tuple(getattr(args, "dims", [16, 32, 64, 128]))
@@ -319,6 +323,9 @@ def main() -> None:
         "gushchin":    make_gushchin_experiments,
         "scalability": lambda out: make_scalability_experiments(out, dims=dims),
         "singlecell":  lambda out: make_singlecell_experiments(
+            data_path=getattr(args, "data_path", None), output_root=out
+        ),
+        "singlecell-siren": lambda out: make_singlecell_siren_experiments(
             data_path=getattr(args, "data_path", None), output_root=out
         ),
     }
@@ -395,6 +402,8 @@ def _apply_train_overrides(spec, args: argparse.Namespace) -> None:
     """Apply CLI training overrides (iterations, batch_size, checkpointing) to *spec* in place."""
     if args.iterations is not None:
         spec.train_cfg.iterations = args.iterations
+        if getattr(args, "iter_subdir", False):
+            spec.output_dir_override = os.path.join(spec.output_dir, f"iter_{args.iterations}")
     if args.batch_size is not None:
         spec.train_cfg.batch_size = args.batch_size
     if args.checkpoint_every > 0:

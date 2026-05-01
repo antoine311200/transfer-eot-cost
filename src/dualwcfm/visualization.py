@@ -346,17 +346,38 @@ class Visualizer:
         t = (time_step + 1) / config.iterations
         t_tensor = torch.full((n_samples, 1), t, device=device)
 
+        _use_bridge = getattr(getattr(trainer, "method", None), "config", None)
+        _use_bridge = getattr(_use_bridge, "use_bridge_marginals", True)
+        _bridge_steps = getattr(getattr(getattr(trainer, "method", None), "config", None), "bridge_marginal_steps", 50)
         with torch.no_grad():
-            mu_t = trainer.flow_matching.interpolate(
-                trainer.initial_coupling.sample_init(n_samples).to(device),
-                trainer.new_source.sample(n_samples).to(device),
-                t_tensor, sigma=0.0,
-            )
-            nu_t = trainer.flow_matching.interpolate(
-                trainer.initial_coupling.sample_target(n_samples).to(device),
-                trainer.new_target.sample(n_samples).to(device),
-                t_tensor, sigma=0.0,
-            )
+            if _use_bridge:
+                # NEW: evolve initial particles through bridge to time t
+                (mu_model, _), (nu_model, _) = trainer.strategy.get_bridges(device)
+                mu_model.eval()
+                nu_model.eval()
+                conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
+                x0_vis = trainer.initial_coupling.sample_init(n_samples).to(device)
+                y0_vis = trainer.initial_coupling.sample_target(n_samples).to(device)
+                xt_vis = trainer.flow_matching.evolve_to_time(x0_vis, mu_model, t, n_steps=_bridge_steps, extend=conditional)
+                yt_vis = trainer.flow_matching.evolve_to_time(y0_vis, nu_model, t, n_steps=_bridge_steps, extend=conditional)
+                if conditional:
+                    mu_t = xt_vis[:, :x0_vis.shape[1]]
+                    nu_t = yt_vis[:, :y0_vis.shape[1]]
+                else:
+                    mu_t = xt_vis
+                    nu_t = yt_vis
+            else:
+                # OLD: linear interpolation between initial and new marginals
+                mu_t = trainer.flow_matching.interpolate(
+                    trainer.initial_coupling.sample_init(n_samples).to(device),
+                    trainer.new_source.sample(n_samples).to(device),
+                    t_tensor, sigma=0.0,
+                )
+                nu_t = trainer.flow_matching.interpolate(
+                    trainer.initial_coupling.sample_target(n_samples).to(device),
+                    trainer.new_target.sample(n_samples).to(device),
+                    t_tensor, sigma=0.0,
+                )
             x_coupling, y_coupling = trainer.current_coupling.coupling_sample(n_samples)
             x_coupling = x_coupling.to(device)
             y_coupling = y_coupling.to(device)

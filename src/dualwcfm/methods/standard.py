@@ -159,6 +159,15 @@ class StandardConfig(MethodConfig):
     ot_reg: float = 0.05              # Entropic regularisation (only used when ot_method="sinkhorn")
     ot_normalize_cost: bool = False   # Normalise cost matrix by its max before solving
 
+    # Marginal sampling strategy for dual training, postprocess, and visualisation.
+    # True  – evolve initial particles through the pretrained bridge ODE to time t
+    #         (bridge CFM); the sampled x_t lies on the learned flow trajectory so
+    #         u_t / v_t are well-aligned with the dual gradient field.
+    # False – linear interpolation (1-t)*x0 + t*x1 between initial and new marginals
+    #         (original behaviour).
+    use_bridge_marginals: bool = True
+    bridge_marginal_steps: int = 50   # Euler steps used in evolve_to_time
+
 class StandardMethod(Method):
     """Standard DualWCFM method: interpolation-based marginals, weighted/implicit CFM.
 
@@ -573,7 +582,7 @@ class StandardMethod(Method):
 
             # Sample marginals at time t, (x_mu, y_nu) ~ (μ_t, ν_t)
             # x0/y0 are the un-interpolated starting points used by conditional bridges.
-            x_mu, y_nu, x0_bridge, y0_bridge = self._sample_marginals(trainer, t_tensor, backward, batch_size, device)
+            x_mu, y_nu, x0_bridge, y0_bridge = self._sample_marginals(trainer, t_tensor, backward, batch_size, device, mu_model, nu_model)
             conditional = x0_bridge is not None
 
             with torch.no_grad():
@@ -709,7 +718,8 @@ class StandardMethod(Method):
             },
         )
 
-    def _sample_marginals(self, trainer: Trainer, t_tensor, backward, batch_size, device):
+    def _sample_marginals(self, trainer: Trainer, t_tensor, backward, batch_size, device,
+                          mu_model=None, nu_model=None):
         """Return (x_mu, y_nu, x0, y0) samples representing μ_t and ν_t.
 
         x0 / y0 are the un-interpolated starting points; they are needed when
@@ -718,11 +728,29 @@ class StandardMethod(Method):
         """
         conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
         x0 = trainer.initial_coupling.sample_init(batch_size).to(device)
-        x1 = trainer.new_source.sample(batch_size).to(device)
         y0 = trainer.initial_coupling.sample_target(batch_size).to(device)
-        y1 = trainer.new_target.sample(batch_size).to(device)
-        x_mu = trainer.flow_matching.interpolate(x0, x1, t_tensor, sigma=trainer._sigma)
-        y_nu = trainer.flow_matching.interpolate(y0, y1, t_tensor, sigma=trainer._sigma)
+        if self.config.use_bridge_marginals:
+            # NEW: evolve x0/y0 through the bridge to time t so the field aligns with ut/vt
+            if mu_model is None or nu_model is None:
+                (mu_model, _), (nu_model, _) = trainer.strategy.get_bridges(device)
+                mu_model.eval()
+                nu_model.eval()
+            t_val = t_tensor[0, 0].item()
+            n_steps = self.config.bridge_marginal_steps
+            xt_full = trainer.flow_matching.evolve_to_time(x0, mu_model, t_val, n_steps=n_steps, extend=conditional)
+            yt_full = trainer.flow_matching.evolve_to_time(y0, nu_model, t_val, n_steps=n_steps, extend=conditional)
+            if conditional:
+                x_mu = xt_full[:, :x0.shape[1]]
+                y_nu = yt_full[:, :y0.shape[1]]
+            else:
+                x_mu = xt_full
+                y_nu = yt_full
+        else:
+            # OLD: linear interpolation between initial and new marginals
+            x1 = trainer.new_source.sample(batch_size).to(device)
+            y1 = trainer.new_target.sample(batch_size).to(device)
+            x_mu = trainer.flow_matching.interpolate(x0, x1, t_tensor, sigma=trainer._sigma)
+            y_nu = trainer.flow_matching.interpolate(y0, y1, t_tensor, sigma=trainer._sigma)
         if conditional:
             return x_mu, y_nu, x0, y0
         return x_mu, y_nu, None, None
@@ -851,6 +879,7 @@ class StandardMethod(Method):
     def step_postprocess(self, trainer: Trainer, iteration: int, ctx: dict) -> None:
         backward = ctx["backward"]
         device = trainer.device
+        conditional = getattr(trainer.strategy.config, "use_conditional_bridge", False)
 
         chunk_size = (
             trainer.current_coupling.chunk_size
@@ -872,29 +901,31 @@ class StandardMethod(Method):
                 i = chunk_idx * chunk_size
                 actual = min(chunk_size, trainer.current_coupling.size - i)
 
-                t_next = torch.full(
-                    (actual, 1),
-                    (iteration + 1) / trainer.config.iterations,
-                    device=device,
-                )
-                x_mu_next = self._interpolate(
-                    trainer.initial_mu_distribution,
-                    trainer.new_source,
-                    trainer,
-                    actual,
-                    t_next,
-                    trainer._sigma,
-                    device,
-                )
-                y_nu_next = self._interpolate(
-                    trainer.initial_nu_distribution,
-                    trainer.new_target,
-                    trainer,
-                    actual,
-                    t_next,
-                    trainer._sigma,
-                    device,
-                )
+                t_val = (iteration + 1) / trainer.config.iterations
+                if self.config.use_bridge_marginals:
+                    # NEW: evolve initial particles through bridge to time t_{n+1}
+                    n_steps = self.config.bridge_marginal_steps
+                    x0_chunk = trainer.initial_mu_distribution.sample(actual).to(device)
+                    y0_chunk = trainer.initial_nu_distribution.sample(actual).to(device)
+                    xt_full = trainer.flow_matching.evolve_to_time(x0_chunk, mu_model, t_val, n_steps=n_steps, extend=conditional)
+                    yt_full = trainer.flow_matching.evolve_to_time(y0_chunk, nu_model, t_val, n_steps=n_steps, extend=conditional)
+                    if conditional:
+                        x_mu_next = xt_full[:, :x0_chunk.shape[1]]
+                        y_nu_next = yt_full[:, :y0_chunk.shape[1]]
+                    else:
+                        x_mu_next = xt_full
+                        y_nu_next = yt_full
+                else:
+                    # OLD: linear interpolation to get starting point for flow evolution
+                    t_next = torch.full((actual, 1), t_val, device=device)
+                    x_mu_next = self._interpolate(
+                        trainer.initial_mu_distribution, trainer.new_source,
+                        trainer, actual, t_next, trainer._sigma, device,
+                    )
+                    y_nu_next = self._interpolate(
+                        trainer.initial_nu_distribution, trainer.new_target,
+                        trainer, actual, t_next, trainer._sigma, device,
+                    )
 
                 x_next, y_next = self._advance_chunk(
                     trainer,
