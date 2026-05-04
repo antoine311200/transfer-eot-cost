@@ -205,7 +205,7 @@ def _default_train_cfg(device: torch.device) -> TrainingConfig:
         pretrain_epochs          = 5_000,
         dual_epochs              = 100,
         cfm_epochs               = 500,
-        advance_steps            = 100,
+        advance_steps            = 30,
         iterations               = 50,
         num_rectified_flow       = 0,
         scale_factor             = 50,
@@ -442,9 +442,40 @@ def _complex(perturbed: bool, output_root: str) -> ExperimentSpec:
 # Public catalogue
 # ---------------------------------------------------------------------------
 
-def make_3d_experiments(output_root: str = "results") -> List[ExperimentSpec]:
-    """Return all 3-D experiment specs (simple / medium / complex × standard / perturbed)."""
-    return [
+def _apply_siren(spec: "ExperimentSpec") -> "ExperimentSpec":
+    """Swap the model config to a SIREN backbone (in-place, returns spec)."""
+    dim = spec.model_cfg.dimension
+    # Match hidden_size from existing config but use SIREN activations
+    hs  = max(spec.model_cfg.hidden_size, 128)
+    nl  = spec.model_cfg.num_layers
+    spec.model_cfg = FeedForwardConfig(
+        dimension            = dim,
+        hidden_size          = hs,
+        num_layers           = nl,
+        flow_learning_rate   = 5e-4,   # SIREN benefits from slightly lower LR
+        nu_learning_rate     = 5e-4,
+        mu_learning_rate     = 5e-4,
+        dual_learning_rate   = 5e-4,
+        dual_l2_reg          = spec.model_cfg.dual_l2_reg,
+        use_siren            = True,
+        siren_omega_0        = 30.0,
+        siren_hidden_omega   = 30.0,
+        use_conditional_bridge = getattr(spec.model_cfg, "use_conditional_bridge", True),
+    )
+    return spec
+
+
+def make_3d_experiments(output_root: str = "results",
+                        use_siren: bool = False) -> List["ExperimentSpec"]:
+    """Return all 3-D experiment specs (simple / medium / complex × standard / perturbed).
+
+    Parameters
+    ----------
+    use_siren:
+        If True, replace the MLP backbone with a SIREN network.  Recommended for
+        complex geometries with high-frequency transport maps.
+    """
+    specs = [
         _simple(False,  output_root),
         _simple(True,   output_root),
         _medium(False,  output_root),
@@ -452,3 +483,6 @@ def make_3d_experiments(output_root: str = "results") -> List[ExperimentSpec]:
         _complex(False, output_root),
         _complex(True,  output_root),
     ]
+    if use_siren:
+        specs = [_apply_siren(s) for s in specs]
+    return specs

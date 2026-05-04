@@ -14,6 +14,8 @@ Saved to:
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +23,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paper_theme
 
 # ---------------------------------------------------------------------------
 # Data
@@ -50,31 +55,22 @@ C_ref = np.exp(log_C)
 print(f"\nO(sqrt(d)) reference C = {C_ref:.4f}")
 
 # ---------------------------------------------------------------------------
-# Style — matches make_far_convergence_figure.py
+# Style
 # ---------------------------------------------------------------------------
+paper_theme.setup_style()
 matplotlib.rcParams.update({
-    "text.usetex":          False,
-    "mathtext.fontset":     "cm",
-    "font.family":          "serif",
-    "font.size":            12,
-    "axes.labelsize":       13,
-    "axes.titlesize":       12,
-    "legend.fontsize":      10.5,
-    "xtick.labelsize":      11,
-    "ytick.labelsize":      11,
-    "axes.linewidth":       0.85,
-    "lines.linewidth":      1.8,
-    "grid.linewidth":       0.45,
-    "grid.alpha":           0.30,
-    "figure.dpi":           150,
-    "figure.facecolor":     "white",
-    "axes.facecolor":       "white",
-    "savefig.facecolor":    "white",
+    "axes.labelsize":  11,
+    "axes.titlesize":  11,
+    "legend.fontsize": 9,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "axes.linewidth":  0.85,
+    "lines.linewidth": 1.8,
 })
 
-BLUE   = "#1D4ED8"    # W2_nu (left axis)
-ORANGE = "#C2410C"    # BW2   (right axis)
-GRAY   = "#6B7280"    # reference line / annotations
+BLUE   = paper_theme.BLUE
+ORANGE = paper_theme.PURPLE
+GRAY   = paper_theme.SLATE
 
 # ---------------------------------------------------------------------------
 # Figure
@@ -143,11 +139,12 @@ ax2.spines["right"].set_edgecolor(ORANGE)
 ax2.spines["right"].set_linewidth(1.2)
 
 ax1.set_xlabel(r"Dimension $d$")
-ax1.grid(True, which="major", linestyle=":", color="#aaaaaa", alpha=0.4)
+ax1.grid(True, which="major", linestyle=":", color=paper_theme.BORDER, alpha=0.5)
+paper_theme.style_axes(ax1)
 
 # --- title ---
 ax1.set_title(
-    r"Scalability  —  Anti-correlation benchmark  $T(x)=-x$",
+    r"Scalability  —  anti-correlation benchmark  $T(x)=-x$",
     pad=9, fontweight="bold",
 )
 
@@ -155,8 +152,7 @@ ax1.set_title(
 handles1, labels1 = ax1.get_legend_handles_labels()
 handles2, labels2 = ax2.get_legend_handles_labels()
 ax1.legend(handles1 + handles2, labels1 + labels2,
-           loc="upper left", framealpha=0.93,
-           edgecolor="#cccccc", borderpad=0.75)
+           loc="upper left", **paper_theme.legend_kw(borderpad=0.75))
 
 fig.tight_layout(pad=0.7)
 

@@ -165,7 +165,7 @@ class StandardConfig(MethodConfig):
     #         u_t / v_t are well-aligned with the dual gradient field.
     # False – linear interpolation (1-t)*x0 + t*x1 between initial and new marginals
     #         (original behaviour).
-    use_bridge_marginals: bool = True
+    use_bridge_marginals: bool = False
     bridge_marginal_steps: int = 50   # Euler steps used in evolve_to_time
 
 class StandardMethod(Method):

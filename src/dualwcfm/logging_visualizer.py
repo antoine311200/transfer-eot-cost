@@ -72,8 +72,11 @@ class _LoggingMixin:
             "energy_dist_nu",    # Energy distance (kernel-free)
             "sinkhorn_div",      # Debiased Sinkhorn divergence (W2 proxy, distribution-only)
             # Ground-truth transport map errors (present only when T is known)
-            "map_err_fwd",       # sqrt(E[||T(x) - y||²])   forward direction
-            "map_err_bwd",       # sqrt(E[||T⁻¹(y) - x||²]) backward direction
+            "map_err_fwd",       # sqrt(E[||T(x) - y||²])   forward direction (marginal)
+            "map_err_bwd",       # sqrt(E[||T⁻¹(y) - x||²]) backward direction (marginal)
+            # Coupling-level map errors: evaluate T on stored (X,Y)~π_t pairs
+            "coupling_map_err_fwd",  # sqrt(E_{π_t}[||T(X) - Y||²])   — tracks if coupling → true OT plan
+            "coupling_map_err_bwd",  # sqrt(E_{π_t}[||T⁻¹(Y) - X||²]) — backward coupling quality
             # Gushchin coupling quality
             "bw2",               # BW₂ between learned joint coupling and reference joint coupling
             # Image-specific quality (empty for non-image experiments)
@@ -170,7 +173,7 @@ class _LoggingMixin:
                 self._eval_source = trainer.new_source.sample(n_eval).cpu()
                 self._eval_target = trainer.new_target.sample(n_eval).cpu()
 
-        _use_bridge = getattr(getattr(trainer.method, "config", None), "use_bridge_marginals", True)
+        _use_bridge = getattr(getattr(trainer.method, "config", None), "use_bridge_marginals", False)
         _bridge_steps = getattr(getattr(trainer.method, "config", None), "bridge_marginal_steps", 50)
         with torch.no_grad():
             if _use_bridge:
@@ -296,20 +299,46 @@ class _LoggingMixin:
             except Exception:
                 bw2_val = float("nan")
 
+        # Coupling-level map errors — evaluate T on stored (X,Y)~π_t pairs directly.
+        # This measures whether the learned coupling is converging toward the true OT plan,
+        # complementing the marginal-level map_err which samples fresh points through the model.
+        _x_coupl: "torch.Tensor | None" = None
+        _y_coupl: "torch.Tensor | None" = None
+        coupling_map_err_fwd_val: "str | float" = ""
+        coupling_map_err_bwd_val: "str | float" = ""
+        if not is_image_tensor(x):
+            try:
+                n_cm = min(n, 2_000)
+                with torch.no_grad():
+                    _x_coupl, _y_coupl = trainer.current_coupling.coupling_sample(n_cm)
+                if self._transport_map is not None:
+                    coupling_map_err_fwd_val = _map_err(
+                        (_x_coupl * s).cpu(), (_y_coupl * s).cpu(), self._transport_map
+                    )
+                if self._inverse_transport_map is not None:
+                    coupling_map_err_bwd_val = _map_err(
+                        (_y_coupl * s).cpu(), (_x_coupl * s).cpu(), self._inverse_transport_map
+                    )
+            except Exception:
+                coupling_map_err_fwd_val = float("nan")
+                coupling_map_err_bwd_val = float("nan")
+
         # Image-specific metrics (FID / KID) — provided by subclass hook
         img_metrics = self._compute_image_metrics(time_step, trainer)
         fid_val = img_metrics.get("fid", "")
         kid_val = img_metrics.get("kid", "")
 
         row = {
-            "iteration":      time_step,
+            "iteration":              time_step,
             **distances,
-            "mmd_nu":         mmd_nu,
-            "energy_dist_nu": energy_dist_nu,
-            "sinkhorn_div":   sinkhorn_div,
-            "map_err_fwd":    map_err_fwd,
-            "map_err_bwd":    map_err_bwd,
-            "bw2":            bw2_val,
+            "mmd_nu":                 mmd_nu,
+            "energy_dist_nu":         energy_dist_nu,
+            "sinkhorn_div":           sinkhorn_div,
+            "map_err_fwd":            map_err_fwd,
+            "map_err_bwd":            map_err_bwd,
+            "coupling_map_err_fwd":   coupling_map_err_fwd_val,
+            "coupling_map_err_bwd":   coupling_map_err_bwd_val,
+            "bw2":                    bw2_val,
             "fid":            fid_val,
             "kid":            kid_val,
             "weight_mean":    float(w_np.mean()),
@@ -346,6 +375,8 @@ class _LoggingMixin:
                 wb["W2_nu"] = distances["W2_nu"]
                 if map_err_fwd != "":
                     wb["map_err_fwd"] = map_err_fwd
+                if coupling_map_err_fwd_val != "":
+                    wb["coupling_map_err_fwd"] = coupling_map_err_fwd_val
 
             # Backward metrics: only log on backward steps
             if compute_bwd:
@@ -353,6 +384,8 @@ class _LoggingMixin:
                 wb["W2_mu"] = distances["W2_mu"]
                 if map_err_bwd != "":
                     wb["map_err_bwd"] = map_err_bwd
+                if coupling_map_err_bwd_val != "":
+                    wb["coupling_map_err_bwd"] = coupling_map_err_bwd_val
 
             self._wandb_run.log(wb, step=time_step)
 
@@ -711,7 +744,7 @@ class LoggingVisualizer(_LoggingMixin, Visualizer):
         t_val = (iteration + 1) / trainer.config.iterations
         t_tensor = torch.full((n_samples // 10, 1), t_val, device=device)
 
-        _use_bridge_pp = getattr(getattr(trainer.method, "config", None), "use_bridge_marginals", True)
+        _use_bridge_pp = getattr(getattr(trainer.method, "config", None), "use_bridge_marginals", False)
         _bridge_steps_pp = getattr(getattr(trainer.method, "config", None), "bridge_marginal_steps", 50)
         n_vis = n_samples // 10
         with torch.no_grad():
@@ -814,7 +847,7 @@ class LoggingVisualizer3D(_LoggingMixin, Visualizer3D):
         t_val = (iteration + 1) / trainer.config.iterations
         t_tensor = torch.full((n_samples // 10, 1), t_val, device=device)
 
-        _use_bridge_3d = getattr(getattr(trainer.method, "config", None), "use_bridge_marginals", True)
+        _use_bridge_3d = getattr(getattr(trainer.method, "config", None), "use_bridge_marginals", False)
         _bridge_steps_3d = getattr(getattr(trainer.method, "config", None), "bridge_marginal_steps", 50)
         n_vis_3d = n_samples // 10
         with torch.no_grad():

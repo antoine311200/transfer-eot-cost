@@ -347,7 +347,7 @@ class Visualizer:
         t_tensor = torch.full((n_samples, 1), t, device=device)
 
         _use_bridge = getattr(getattr(trainer, "method", None), "config", None)
-        _use_bridge = getattr(_use_bridge, "use_bridge_marginals", True)
+        _use_bridge = getattr(_use_bridge, "use_bridge_marginals", False)
         _bridge_steps = getattr(getattr(getattr(trainer, "method", None), "config", None), "bridge_marginal_steps", 50)
         with torch.no_grad():
             if _use_bridge:

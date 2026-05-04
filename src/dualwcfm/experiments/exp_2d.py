@@ -45,12 +45,12 @@ from dualwcfm.experiments.base import ExperimentSpec, get_device
 def _default_train_cfg(device: torch.device) -> TrainingConfig:
     return TrainingConfig(
         device                   = device,
-        dataset_size             = 200_000,
+        dataset_size             = 1_000_000,
         marginal_epochs          = 2_000,
         pretrain_epochs          = 5_000,
         dual_epochs              = 100,
         cfm_epochs               = 500,
-        advance_steps            = 100,
+        advance_steps            = 20,
         iterations               = 50,
         num_rectified_flow       = 0,
         scale_factor             = 50,
@@ -135,7 +135,7 @@ def _simple(perturbed: bool, output_root: str) -> ExperimentSpec:
     # train_cfg.num_rectified_flow = 1       # one rectification pass is sufficient for a linear map
     method_cfg = _default_method_cfg()
     method_cfg.sigma = 0.03                # blobs are narrow (std=0.5) and far apart (loc=10); small σ avoids over-spreading
-    method_cfg.sigma2 = 0.03
+    method_cfg.sigma2 = 0.1               # wider bridge on s-time axis; confirmed optimal in W&B run te1d2h6c
     model_cfg  = _default_model_cfg()
     vis_cfg    = VisualizeConfig(show_each=1, n_trajectories=2000, trajectory_stride=2, show_each_marginal=100, show_each_pretrain=1000)
 

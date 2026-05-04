@@ -49,27 +49,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
-from matplotlib.colors import LinearSegmentedColormap
-
-matplotlib.rcParams.update({
-    "font.family":        "serif",
-    "font.serif":         ["Times New Roman", "DejaVu Serif", "serif"],
-    "mathtext.fontset":   "dejavuserif",
-    "axes.titlesize":     10,
-    "axes.labelsize":     8,
-    "legend.fontsize":    7,
-})
 import numpy as np
 import torch
 
-_CMAP_WB = LinearSegmentedColormap.from_list(
-    "white_blue",
-    [(1.00, 1.00, 1.00),
-     (0.88, 0.93, 0.98),
-     (0.55, 0.75, 0.90),
-     (0.22, 0.52, 0.78),
-     (0.07, 0.28, 0.58)],
-)
+import paper_theme
+paper_theme.setup_style()
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR    = os.path.join(_SCRIPT_DIR, "src")
@@ -80,16 +64,13 @@ from dualwcfm.mlp import MLP, torch_wrapper
 
 
 # ---------------------------------------------------------------------------
-# Palette (matches make_2d_transport_figure.py)
+# Palette — delegates to paper_theme
 # ---------------------------------------------------------------------------
 
-_C_SRC       = "#2C6FAC"   # deep blue     – source μ'
-_C_SRC_EDGE  = "#1a4d7a"
-_C_TRN       = "#C14D6B"   # rose          – transported
-_C_TRN_EDGE  = "#8f2d45"
-_C_TGT       = "#D4A835"   # warm gold     – new target ν' (reference)
-_C_LINE      = "#b8c8d8"   # blue-grey coupling lines
-_C_TITLE     = "#1a1e2a"
+_C_SRC   = paper_theme.TEAL
+_C_TRN   = paper_theme.PURPLE
+_C_TGT   = paper_theme.PINK
+_C_LINE  = paper_theme.LBLUE
 
 
 # ---------------------------------------------------------------------------
@@ -220,11 +201,11 @@ def _panel(
 
     ax.set_facecolor("white")
 
-    # ── Axis crosshairs through origin ───────────────────────────────────────
-    ax.axhline(0, color="#c8d4de", linewidth=0.7, zorder=0)
-    ax.axvline(0, color="#c8d4de", linewidth=0.7, zorder=0)
+    # ── Axis crosshairs ──────────────────────────────────────────────────────
+    ax.axhline(0, color=paper_theme.BORDER, linewidth=0.6, zorder=0)
+    ax.axvline(0, color=paper_theme.BORDER, linewidth=0.6, zorder=0)
 
-    # ── KDE — density of transported (current model output) ─────────────────
+    # ── KDE background ───────────────────────────────────────────────────────
     z_src = _kde(x_src, extent, kde_res)
     z_trn = _kde(x_trn, extent, kde_res)
     z     = z_src + z_trn
@@ -232,10 +213,10 @@ def _panel(
         z /= z.max()
     ax.imshow(
         z, extent=[xmin, xmax, ymin, ymax], origin="lower",
-        cmap=_CMAP_WB, aspect="auto", alpha=0.82, zorder=0,
+        cmap=paper_theme.CMAP_DENSITY, aspect="auto", alpha=0.72, zorder=0,
     )
 
-    # ── Coupling lines — random subset src → transported ────────────────────
+    # ── Coupling lines ───────────────────────────────────────────────────────
     idx = np.random.choice(len(x_src), size=min(n_lines, len(x_src)), replace=False)
     for i in idx:
         ax.plot(
@@ -249,7 +230,7 @@ def _panel(
     if show_target:
         sc_trg = ax.scatter(
             x_tgt[:, 0], x_tgt[:, 1],
-            s=dot_size * 0.6, c=_C_TGT, alpha=0.30,
+            s=dot_size * 0.6, c=_C_TGT, alpha=0.28,
             linewidths=0, zorder=2,
             label=r"Target $\nu'$",
         )
@@ -258,36 +239,28 @@ def _panel(
     sc_trn = ax.scatter(
         x_trn[:, 0], x_trn[:, 1],
         s=dot_size, c=_C_TRN, alpha=dot_alpha,
-        linewidths=0.3, edgecolors=_C_TRN_EDGE,
-        zorder=4, label="Transported",
+        linewidths=0, zorder=4, label="Transported",
     )
 
     # ── Source scatter ───────────────────────────────────────────────────────
     sc_src = ax.scatter(
         x_src[:, 0], x_src[:, 1],
         s=dot_size, c=_C_SRC, alpha=dot_alpha,
-        linewidths=0.3, edgecolors=_C_SRC_EDGE,
-        zorder=4, label=r"Source $\mu'$",
+        linewidths=0, zorder=4, label=r"Source $\mu'$",
     )
 
     if show_legend:
         handles = [sc_src, sc_trn]
         if show_target:
             handles = [sc_src, sc_trn, sc_trg]
-        ax.legend(
-            handles=handles,
-            loc="upper left", fontsize=7,
-            framealpha=0.88, facecolor="white", edgecolor="#d0d8e4",
-            labelcolor=_C_TITLE, handletextpad=0.4, borderpad=0.4,
-        )
+        ax.legend(handles=handles, loc="upper left",
+                  **paper_theme.legend_kw(fontsize=7))
 
-    ax.set_title(title, color=_C_TITLE, fontsize=10, fontweight="bold", pad=5)
+    ax.set_title(title, color=paper_theme.DARK, fontsize=9, fontweight="bold", pad=4)
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
-    for spine in ax.spines.values():
-        spine.set_color("#d0d8e4")
-        spine.set_linewidth(0.6)
+    paper_theme.style_axes(ax)
 
 
 # ---------------------------------------------------------------------------
@@ -420,14 +393,14 @@ def build_figure(
     # ── Figure ───────────────────────────────────────────────────────────────
     n = len(panels_data)
     fig_w = max(2.5 * n, 6.0)
-    fig, axes = plt.subplots(1, n, figsize=(fig_w, 2.8), dpi=200)
+    fig, axes = plt.subplots(1, n, figsize=(fig_w, 2.8))
     fig.patch.set_facecolor("white")
     if n == 1:
         axes = [axes]
 
     fig.suptitle(
-        f"Coupling Evolution: {exp_name}",
-        color=_C_TITLE, fontsize=12, fontweight="bold", y=1.03,
+        f"Coupling evolution: {exp_name}",
+        color=paper_theme.DARK, fontsize=11, fontweight="bold", y=1.03,
     )
 
     for ax_i, (ax, (it, t_k, x_src_k, x_trn)) in enumerate(zip(axes, panels_data)):
@@ -451,9 +424,7 @@ def build_figure(
 
     for ext in (".pdf", ".png"):
         out = output_stem + ext
-        dpi = 200 if ext == ".png" else None
-        kw = {"dpi": dpi} if dpi else {}
-        fig.savefig(out, bbox_inches="tight", facecolor="white", **kw)
+        fig.savefig(out, bbox_inches="tight")
         print(f"Saved: {out}")
 
     plt.close(fig)

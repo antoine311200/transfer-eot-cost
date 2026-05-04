@@ -61,6 +61,9 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR    = os.path.join(_SCRIPT_DIR, "src")
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
+sys.path.insert(0, _SCRIPT_DIR)
+
+import paper_theme
 
 from dualwcfm.mlp import MLP, torch_wrapper
 
@@ -70,44 +73,26 @@ from dualwcfm.mlp import MLP, torch_wrapper
 # ---------------------------------------------------------------------------
 
 def _apply_style() -> None:
+    paper_theme.setup_style(serif=True)
     plt.rcParams.update({
-        "font.family":        "sans-serif",
-        "font.sans-serif":    ["Helvetica Neue", "Arial", "DejaVu Sans"],
-        "font.size":          9,
-        "axes.titlesize":     10,
-        "axes.labelsize":     9,
-        "xtick.labelsize":    7.5,
-        "ytick.labelsize":    7.5,
-        "legend.fontsize":    7.5,
-        "figure.dpi":         200,
-        "savefig.dpi":        300,
-        "savefig.bbox":       "tight",
-        "axes.spines.top":    False,
-        "axes.spines.right":  False,
-        "axes.linewidth":     0.7,
-        "grid.linewidth":     0.4,
-        "grid.alpha":         0.30,
-        "lines.linewidth":    1.5,
-        "patch.linewidth":    0.5,
+        "axes.titlesize": 10,
+        "axes.labelsize": 9,
+        "xtick.labelsize": 7.5,
+        "ytick.labelsize": 7.5,
+        "legend.fontsize": 7.5,
     })
 
 
 # ---------------------------------------------------------------------------
-# Colour palette
+# Colour palette — paper theme
 # ---------------------------------------------------------------------------
 
-_COLOR_SRC    = "#4878d0"   # control / source  — blue
-_COLOR_TGT    = "#d65f5f"   # true treated       — red
-_COLOR_PRED   = "#6acc65"   # DualWCFM predicted — green
-_COLOR_TRUE   = "#ffcf3e"   # true new target overlay — amber
-_COLOR_SIREN  = "#956cb4"   # SIREN variant line — purple
+_COLOR_SRC   = paper_theme.TEAL    # control / source
+_COLOR_TGT   = paper_theme.PINK    # true treated
+_COLOR_PRED  = paper_theme.PURPLE  # TACO predicted
+_COLOR_TRUE  = paper_theme.BLUE    # reference true target overlay
 
-_CMAP_DENSITY = LinearSegmentedColormap.from_list(
-    "cell_density",
-    ["#0d0221", "#1a0a4e", "#3a1278", "#6a2d9f", "#9c4bc7",
-     "#c873d8", "#e6a8e0", "#f8d8f0", "#ffffff"],
-    N=256,
-)
+_CMAP_DENSITY = paper_theme.CMAP_CELL
 
 
 # ---------------------------------------------------------------------------
@@ -326,22 +311,21 @@ def draw_transport_panel(
     all_kde = np.vstack([src_2d, tgt_2d])
     _kde_background(ax, all_kde, xlim, ylim)
 
-    if snaps_raw is not None:
-        snaps_2d = [proj(s) for s in snaps_raw]
-        N        = len(src_2d)
-        step     = max(1, N // n_traj_lines)
-        for i in range(0, N, step):
-            xs = [s[i, 0] for s in snaps_2d if i < len(s)]
-            ys = [s[i, 1] for s in snaps_2d if i < len(s)]
-            ax.plot(xs, ys, c="white", alpha=line_alpha, lw=0.45,
-                    solid_capstyle="round", zorder=1)
-
     if true_tgt_raw is not None:
         tt_2d = proj(true_tgt_raw)
         ax.scatter(tt_2d[:, 0], tt_2d[:, 1],
-                   s=dot_size * 0.75, c=_COLOR_TRUE, alpha=0.60,
-                   linewidths=0.3, edgecolors="#b89300",
-                   zorder=2, label=true_tgt_label, marker="D")
+                   s=dot_size * 0.75, c=_COLOR_TGT, alpha=0.40,
+                   linewidths=0, zorder=2, label=true_tgt_label, marker="D")
+
+    if snaps_raw is not None:
+        snaps_2d = [proj(s) for s in snaps_raw]
+        N    = len(src_2d)
+        step = max(1, N // n_traj_lines)
+        for i in range(0, N, step):
+            xs = [s[i, 0] for s in snaps_2d if i < len(s)]
+            ys = [s[i, 1] for s in snaps_2d if i < len(s)]
+            ax.plot(xs, ys, c=paper_theme.LBLUE, alpha=line_alpha, lw=0.45,
+                    solid_capstyle="round", zorder=1)
 
     kw = dict(linewidths=0, zorder=3, alpha=dot_alpha)
     ax.scatter(src_2d[:, 0], src_2d[:, 1], c=_COLOR_SRC, s=dot_size,
@@ -350,13 +334,12 @@ def draw_transport_panel(
                marker="^", label=tgt_label, **kw)
 
     ax.set_xlim(*xlim); ax.set_ylim(*ylim)
-    ax.set_xlabel(proj.x_label, fontsize=8)
-    ax.set_ylabel(proj.y_label, fontsize=8)
+    ax.set_xlabel(proj.x_label)
+    ax.set_ylabel(proj.y_label)
     ax.set_title(title, fontsize=10, fontweight="bold", pad=6)
     ax.set_aspect("equal")
-    ax.legend(fontsize=6.5, loc="upper right", framealpha=0.7,
-              facecolor="#fafafa", edgecolor="#cccccc",
-              handletextpad=0.4, borderpad=0.5)
+    ax.legend(loc="upper right", **paper_theme.legend_kw(fontsize=6.5))
+    paper_theme.style_axes(ax)
 
     if show_metrics and metrics:
         lines = [f"{k} = {v:.3f}" for k, v in metrics.items()]
@@ -364,7 +347,7 @@ def draw_transport_panel(
                 transform=ax.transAxes, fontsize=6,
                 va="bottom", ha="left",
                 bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                          alpha=0.75, edgecolor="#cccccc"))
+                          alpha=0.80, edgecolor=paper_theme.BORDER))
 
 
 # ---------------------------------------------------------------------------
@@ -484,18 +467,20 @@ def build_main_transport_figure(
     if separate:
         for stem, p in zip(_stems, panels):
             fig, ax = plt.subplots(figsize=(5.5, 5.5))
+            fig.patch.set_facecolor("white")
             draw_transport_panel(ax, **{k: v for k, v in p.items() if k != "metrics"},
                                  **_panel_kw, metrics=p.get("metrics"))
             _save(fig, f"{output_stem}_{stem}")
             plt.close(fig)
     else:
-        fig, axes = plt.subplots(1, 3, figsize=(17, 5.5))
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
+        fig.patch.set_facecolor("white")
         for ax, p in zip(axes, panels):
             draw_transport_panel(ax, **{k: v for k, v in p.items() if k != "metrics"},
                                  **_panel_kw, metrics=p.get("metrics"))
         fig.suptitle(
-            f"DualWCFM — Single-Cell Drug Response Transfer ({drug})",
-            fontsize=11, fontweight="bold", y=1.01,
+            f"TACO — single-cell drug response transfer ({drug})",
+            color=paper_theme.DARK, fontsize=11, fontweight="bold", y=1.01,
         )
         plt.tight_layout(w_pad=1.2)
         _save(fig, output_stem)
@@ -624,8 +609,8 @@ def build_dual_transport_figure(
                 ax.set_ylabel(proj.y_label, fontsize=8)
 
     fig.suptitle(
-        f"DualWCFM — Cross-Cell-Line Drug Response Transfer ({std['drug']})",
-        fontsize=12, fontweight="bold", y=1.01,
+        f"TACO — cross-cell-line drug response transfer ({std['drug']})",
+        color=paper_theme.DARK, fontsize=12, fontweight="bold", y=1.01,
     )
     _save(fig, output_stem)
     plt.close(fig)
@@ -661,27 +646,28 @@ def _read_csv(path: str) -> tuple[list[int], dict[str, list]]:
 
 def build_convergence_figure(
     std_dir:    Optional[str],
-    siren_dir:  Optional[str] = None,
+    pert_dir:   Optional[str] = None,
     output_stem: str = "singlecell_convergence",
 ) -> None:
     """6-panel convergence dashboard: SW₂, MMD, Energy, Sinkhorn, ESS, SW₂_source."""
     iters_std,  data_std  = _read_csv(os.path.join(std_dir or "", "metrics.csv"))
-    iters_sir,  data_sir  = _read_csv(os.path.join(siren_dir or "", "metrics.csv"))
+    iters_pert, data_pert = _read_csv(os.path.join(pert_dir or "", "metrics.csv"))
 
-    if not iters_std and not iters_sir:
+    if not iters_std and not iters_pert:
         print("  No metrics.csv found; skipping convergence figure.")
         return
 
-    panels = [
-        ("W2_nu",        "SW₂ (target marginal)",   "SW₂",  False),
-        ("mmd_nu",       "MMD (target marginal)",    "MMD",  True),
-        ("energy_dist_nu","Energy distance",         "E-dist",False),
-        ("sinkhorn_div", "Sinkhorn divergence",      "Sink.", True),
-        ("weight_ess",   "Effective Sample Size",    "ESS",  False),
-        ("W2_mu",        "SW₂ (source marginal)",   "SW₂",  False),
+    metric_panels = [
+        ("W2_nu",         "SW₂ (target marginal)",   "SW₂",   False),
+        ("mmd_nu",        "MMD (target marginal)",    "MMD",   True),
+        ("energy_dist_nu","Energy distance",          "E-dist",False),
+        ("sinkhorn_div",  "Sinkhorn divergence",      "Sink.", True),
+        ("weight_ess",    "Effective sample size",    "ESS",   False),
+        ("W2_mu",         "SW₂ (source marginal)",   "SW₂",   False),
     ]
 
-    fig, axes = plt.subplots(2, 3, figsize=(14, 7.5))
+    fig, axes = plt.subplots(2, 3, figsize=(13, 7.5))
+    fig.patch.set_facecolor("white")
     axes_flat = axes.ravel()
 
     def _plot_series(ax, key, iters, data, color, label, logy):
@@ -700,24 +686,26 @@ def build_convergence_figure(
             except Exception:
                 pass
 
-    for ax, (key, title, ylabel, logy) in zip(axes_flat, panels):
+    for ax, (key, title, ylabel, logy) in zip(axes_flat, metric_panels):
         if iters_std:
-            _plot_series(ax, key, iters_std, data_std, "#4878d0", "MLP", logy)
-        if iters_sir:
-            _plot_series(ax, key, iters_sir, data_sir, _COLOR_SIREN, "SIREN", logy)
+            _plot_series(ax, key, iters_std,  data_std,  paper_theme.BLUE,   "Standard",  logy)
+        if iters_pert:
+            _plot_series(ax, key, iters_pert, data_pert, paper_theme.PURPLE, "Perturbed", logy)
 
         if key == "weight_ess":
-            ax.axhline(1.0, color="#ff8c00", lw=1.0, ls="--", label="ideal (1.0)", zorder=2)
+            ax.axhline(1.0, color=paper_theme.PINK, lw=1.0, ls="--",
+                       label="ideal (1.0)", zorder=2)
             ax.set_ylim(0, 1.05)
 
         ax.set_title(title, fontsize=9.5, fontweight="bold")
-        ax.set_xlabel("DualWCFM iteration", fontsize=8)
-        ax.set_ylabel(ylabel, fontsize=8)
-        ax.legend(fontsize=7, framealpha=0.7)
-        ax.grid(True, alpha=0.25, linestyle="--", zorder=0)
+        ax.set_xlabel("TACO iteration")
+        ax.set_ylabel(ylabel)
+        ax.legend(**paper_theme.legend_kw(fontsize=7))
+        ax.grid(True, alpha=0.20, linestyle=":", color=paper_theme.BORDER, zorder=0)
+        paper_theme.style_axes(ax)
 
-    fig.suptitle("DualWCFM Training Convergence — Single-Cell Experiment",
-                 fontsize=11, fontweight="bold")
+    fig.suptitle("TACO training convergence — single-cell experiment",
+                 color=paper_theme.DARK, fontsize=11, fontweight="bold")
     plt.tight_layout(rect=[0, 0, 1, 0.97])
     _save(fig, output_stem)
     plt.close(fig)
@@ -926,10 +914,9 @@ def build_metrics_bar_figure(
     device:         torch.device,
     n_particles:    int  = 600,
     n_steps:        int  = 120,
-    siren_dir:      Optional[str] = None,
     output_stem:    str  = "singlecell_metrics_bar",
 ) -> None:
-    """Bar chart comparing pretrained vs DualWCFM (and optionally SIREN) on final metrics."""
+    """Bar chart comparing pretrained vs TACO on final metrics."""
     from dualwcfm.metrics import sliced_wasserstein, mmd as _mmd, energy_distance, sinkhorn_divergence
 
     def _np(t):
@@ -976,17 +963,9 @@ def build_metrics_bar_figure(
         if r:
             results.append(r)
     if p_final and os.path.isfile(p_final):
-        r = _eval_path(p_final, "DualWCFM (MLP)")
+        r = _eval_path(p_final, "TACO")
         if r:
             results.append(r)
-    if siren_dir:
-        sp = os.path.join(siren_dir, "forward_model.pth")
-        if not os.path.isfile(sp):
-            sp = find_latest_checkpoint(siren_dir, "forward") or ""
-        if sp and os.path.isfile(sp):
-            r = _eval_path(sp, "DualWCFM (SIREN)")
-            if r:
-                results.append(r)
 
     if not results:
         print("  No models to evaluate; skipping metrics bar figure.")
@@ -995,26 +974,29 @@ def build_metrics_bar_figure(
     metric_keys = ["SW₂", "MMD", "E-dist", "Sink."]
     n_metrics   = len(metric_keys)
     n_models    = len(results)
-    bar_colors  = [_COLOR_PRED, "#4878d0", _COLOR_SIREN, "#ee854a"][:n_models]
+    bar_colors  = [paper_theme.SLATE, paper_theme.PURPLE][:n_models]
 
     x    = np.arange(n_metrics)
     wid  = 0.75 / n_models
-    fig, ax = plt.subplots(figsize=(9, 4.5))
+    fig, ax = plt.subplots(figsize=(8.5, 4.5))
+    fig.patch.set_facecolor("white")
 
     for j, (res, col) in enumerate(zip(results, bar_colors)):
         vals   = [res[k] for k in metric_keys]
         offset = (j - (n_models - 1) / 2) * wid
         bars   = ax.bar(x + offset, vals, width=wid * 0.9,
-                        color=col, label=res["label"], alpha=0.85, zorder=3)
+                        color=col, label=res["label"], alpha=0.88, zorder=3)
         for bar, val in zip(bars, vals):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
-                    f"{val:.3f}", ha="center", va="bottom", fontsize=6.5, color="#333333")
+                    f"{val:.3f}", ha="center", va="bottom",
+                    fontsize=6.5, color=paper_theme.DARK)
 
-    ax.set_xticks(x); ax.set_xticklabels(metric_keys, fontsize=9)
-    ax.set_ylabel("Metric value (lower = better)", fontsize=8.5)
-    ax.set_title("DualWCFM — Final metric comparison", fontsize=11, fontweight="bold")
-    ax.legend(fontsize=8, framealpha=0.7)
-    ax.grid(axis="y", alpha=0.25, linestyle="--", zorder=0)
+    ax.set_xticks(x); ax.set_xticklabels(metric_keys)
+    ax.set_ylabel("Metric value (lower is better)")
+    ax.set_title("TACO — final metric comparison", fontweight="bold")
+    ax.legend(**paper_theme.legend_kw(fontsize=8))
+    ax.grid(axis="y", alpha=0.20, linestyle=":", color=paper_theme.BORDER, zorder=0)
+    paper_theme.style_axes(ax)
     plt.tight_layout()
     _save(fig, output_stem)
     plt.close(fig)
@@ -1047,7 +1029,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     dirs = p.add_argument_group("experiment directories")
     dirs.add_argument("--std-dir",   default="results_cell/singlecell",       dest="std_dir")
-    dirs.add_argument("--siren-dir", default="results_cell_siren/singlecell_siren", dest="siren_dir")
+    dirs.add_argument("--siren-dir", default=None, dest="siren_dir",
+                      help="(Deprecated — kept for backwards compatibility, ignored.)")
     dirs.add_argument("--pert-dir",  default=None, dest="pert_dir",
                       help="Optional: separate dir for perturbed variant (MCF7).")
     dirs.add_argument("--output-dir", default="figures/singlecell", dest="output_dir")
@@ -1091,8 +1074,7 @@ def main() -> None:
     do_coupling   = do in ("coupling", "all")
     do_bars       = do in ("metrics_bar", "all")
 
-    std_dir   = args.std_dir
-    siren_dir = args.siren_dir if os.path.isdir(args.siren_dir or "") else None
+    std_dir = args.std_dir
 
     # Load experiment specs (requires data)
     needs_spec = do_transport or do_perturbed or do_dual or do_evolution or do_coupling or do_bars
@@ -1118,8 +1100,6 @@ def main() -> None:
     # Perturbed model: fallback to std_dir (same experiment root, different spec)
     models_pert  = (os.path.join(pert_dir_arg, "models")
                     if pert_dir_arg else models_std)
-    models_siren = os.path.join(siren_dir or "", "models") if siren_dir else None
-
     kw = dict(device=device, n_particles=args.n_particles,
               n_steps=args.n_steps, use_umap=args.umap)
 
@@ -1166,8 +1146,8 @@ def main() -> None:
     if do_conv:
         print("\n[4/7] Convergence figure …")
         build_convergence_figure(
-            std_dir   = std_dir,
-            siren_dir = siren_dir,
+            std_dir  = std_dir,
+            pert_dir = pert_dir_arg,
             output_stem = os.path.join(out, "singlecell_convergence"),
         )
 
@@ -1200,7 +1180,6 @@ def main() -> None:
             spec_std, models_std, device,
             n_particles = args.n_particles,
             n_steps     = args.n_steps,
-            siren_dir   = models_siren,
             output_stem = os.path.join(out, "singlecell_metrics_bar"),
         )
 

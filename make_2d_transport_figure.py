@@ -44,32 +44,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-from matplotlib.colors import LinearSegmentedColormap
-
-matplotlib.rcParams.update({
-    "font.family":        "serif",
-    "font.serif":         ["Times New Roman", "DejaVu Serif", "serif"],
-    "mathtext.fontset":   "dejavuserif",
-    "axes.titlesize":     12,
-    "axes.labelsize":     9,
-    "legend.fontsize":    8,
-})
-import numpy as np
-import torch
-
-_CMAP_WB = LinearSegmentedColormap.from_list(
-    "white_blue",
-    [(1.00, 1.00, 1.00),
-     (0.88, 0.93, 0.98),
-     (0.55, 0.75, 0.90),
-     (0.22, 0.52, 0.78),
-     (0.07, 0.28, 0.58)],
-)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR    = os.path.join(_SCRIPT_DIR, "src")
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
+
+import paper_theme
+paper_theme.setup_style()
+
+import numpy as np
+import torch
 
 from dualwcfm.mlp import MLP, torch_wrapper
 
@@ -249,6 +234,8 @@ def _panel(
     title:        str,
     src_label:    str   = r"Source $\mu'$",
     tgt_label:    str   = r"Target $\nu'$",
+    src_color:    str   = paper_theme.BLUE,
+    tgt_color:    str   = paper_theme.PURPLE,
     x_true_tgt:   np.ndarray | None = None,
     true_tgt_label: str = r"True target $\nu'$",
     pad:          float = 1.2,
@@ -268,10 +255,10 @@ def _panel(
     ax.set_facecolor("white")
 
     # ── Axis crosshairs through origin ───────────────────────────────────────
-    ax.axhline(0, color="#c8d4de", linewidth=0.7, zorder=0)
-    ax.axvline(0, color="#c8d4de", linewidth=0.7, zorder=0)
+    ax.axhline(0, color=paper_theme.BORDER, linewidth=0.7, zorder=0)
+    ax.axvline(0, color=paper_theme.BORDER, linewidth=0.7, zorder=0)
 
-    # ── KDE background (white-to-blue) ───────────────────────────────────────
+    # ── KDE background ───────────────────────────────────────────────────────
     z_src = _kde_image(x_src, extent, kde_res)
     z_tgt = _kde_image(x_tgt, extent, kde_res)
     z     = z_src + z_tgt
@@ -279,7 +266,7 @@ def _panel(
         z /= z.max()
     ax.imshow(
         z, extent=[xmin, xmax, ymin, ymax], origin="lower",
-        cmap=_CMAP_WB, aspect="auto", alpha=0.82, zorder=0,
+        cmap=paper_theme.CMAP_DENSITY, aspect="auto", alpha=0.72, zorder=0,
     )
 
     # ── Trajectory lines ────────────────────────────────────────────────────
@@ -288,43 +275,36 @@ def _panel(
         for i in range(N):
             xs = [snap[i, 0] for snap in trajs]
             ys = [snap[i, 1] for snap in trajs]
-            ax.plot(xs, ys, color="#b8c8d8", alpha=line_alpha,
+            ax.plot(xs, ys, color=paper_theme.LBLUE, alpha=line_alpha,
                     linewidth=line_width, solid_capstyle="round", zorder=1)
 
     legend_handles = []
     if x_true_tgt is not None:
         sc_true = ax.scatter(
             x_true_tgt[:, 0], x_true_tgt[:, 1],
-            s=dot_size * 0.9, c="#D4A835", alpha=0.65,
-            linewidths=0.3, edgecolors="#a07c1a",
-            zorder=2, label=true_tgt_label,
+            s=dot_size * 0.9, c=paper_theme.PINK, alpha=0.55,
+            linewidths=0, zorder=2, label=true_tgt_label,
         )
         legend_handles.append(sc_true)
 
     sc_src = ax.scatter(x_src[:, 0], x_src[:, 1],
-                        s=dot_size, c="#2C6FAC", alpha=dot_alpha,
-                        linewidths=0.3, edgecolors="#1a4d7a",
-                        zorder=3, label=src_label)
+                        s=dot_size, c=src_color, alpha=dot_alpha,
+                        linewidths=0, zorder=3, label=src_label)
     sc_tgt = ax.scatter(x_tgt[:, 0], x_tgt[:, 1],
-                        s=dot_size, c="#C14D6B", alpha=dot_alpha,
-                        linewidths=0.3, edgecolors="#8f2d45",
-                        zorder=3, label=tgt_label)
+                        s=dot_size, c=tgt_color, alpha=dot_alpha,
+                        linewidths=0, zorder=3, label=tgt_label)
     legend_handles += [sc_src, sc_tgt]
 
-    leg = ax.legend(
-        handles=legend_handles,
-        loc="upper left", fontsize=8,
-        framealpha=0.88, facecolor="white", edgecolor="#d0d8e4",
-        labelcolor="#1a1e2a", handletextpad=0.4, borderpad=0.5,
-    )
+    ax.legend(handles=legend_handles, loc="upper left",
+              **paper_theme.legend_kw(fontsize=8))
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
-    ax.set_title(title, color="#1a1e2a", fontsize=12, fontweight="bold", pad=10)
-    ax.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
-    for spine in ax.spines.values():
-        spine.set_color("#d0d8e4")
-        spine.set_linewidth(0.7)
+    ax.set_title(title, color=paper_theme.DARK, fontsize=11, fontweight="bold", pad=8)
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=4, integer=True))
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=4, integer=True))
+    ax.tick_params(labelsize=7, length=3, width=0.6, colors=paper_theme.DARK)
+    paper_theme.style_axes(ax)
 
 
 # ---------------------------------------------------------------------------
@@ -408,55 +388,57 @@ def build_figure(
     del model_final
 
     # ── Figure ───────────────────────────────────────────────────────────────
-    # Each entry: (x_src, x_tgt, trajs, title, src_label, tgt_label, x_true_tgt_overlay)
+    # Each entry: (x_src, x_tgt, trajs, title, src_label, tgt_label,
+    #              src_color, tgt_color, x_true_tgt_overlay)
     panels = [
         (x_ref_np,  y_ref_np,            ref_trajs,
-         "Reference Coupling $\\pi$",
+         "Reference coupling $\\pi$",
          r"Source $\mu$",  r"Target $\nu$",
-         None),
+         paper_theme.BLUE, paper_theme.PINK, None),
         (x_new_np,  x_init_transported,  init_trajs,
          "Pretrained (before adaptation)",
-         r"Source $\mu'$", r"Transported (pretrained)",
-         x_new_tgt_np),   # ← true ν' shown in green so the gap is visible
+         r"New source $\mu'$", r"Transported",
+         paper_theme.TEAL, paper_theme.PURPLE,
+         x_new_tgt_np),
         (x_new_np,  x_final_transported, final_trajs,
-         "Adapted (final model)",
-         r"Source $\mu'$", r"Transported (adapted)",
-         None),
+         "TACO (adapted)",
+         r"New source $\mu'$", r"Transported",
+         paper_theme.TEAL, paper_theme.PURPLE, None),
     ]
 
     _panel_kw = dict(pad=pad, dot_size=dot_size, dot_alpha=dot_alpha)
 
     if separate:
-        for stem, (x_s, x_t, trajs, title, slbl, tlbl, x_ov) in zip(
+        for stem, (x_s, x_t, trajs, title, slbl, tlbl, sc, tc, x_ov) in zip(
             ["reference_coupling", "pretrained", "adapted"], panels
         ):
-            fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+            fig, ax = plt.subplots(figsize=(5.5, 5.5))
             fig.patch.set_facecolor("white")
             _panel(ax, x_s, x_t, trajs, title, src_label=slbl, tgt_label=tlbl,
-                   x_true_tgt=x_ov, **_panel_kw)
+                   src_color=sc, tgt_color=tc, x_true_tgt=x_ov, **_panel_kw)
             out = f"{output_stem}_{stem}.png"
-            fig.savefig(out, bbox_inches="tight", dpi=200, facecolor="white")
+            fig.savefig(out, bbox_inches="tight")
             print(f"Saved: {out}")
             out_pdf = f"{output_stem}_{stem}.pdf"
-            fig.savefig(out_pdf, bbox_inches="tight", facecolor="white")
+            fig.savefig(out_pdf, bbox_inches="tight")
             print(f"Saved: {out_pdf}")
             plt.close(fig)
     else:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=200)
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
         fig.patch.set_facecolor("white")
         fig.suptitle(
-            f"Transfer Learning: {exp_name}",
-            color="#1a1e2a", fontsize=13, fontweight="bold", y=1.02,
+            f"Transfer learning: {exp_name}",
+            color=paper_theme.DARK, fontsize=12, fontweight="bold", y=1.02,
         )
-        for ax, (x_s, x_t, trajs, title, slbl, tlbl, x_ov) in zip(axes, panels):
+        for ax, (x_s, x_t, trajs, title, slbl, tlbl, sc, tc, x_ov) in zip(axes, panels):
             _panel(ax, x_s, x_t, trajs, title, src_label=slbl, tgt_label=tlbl,
-                   x_true_tgt=x_ov, **_panel_kw)
+                   src_color=sc, tgt_color=tc, x_true_tgt=x_ov, **_panel_kw)
         plt.tight_layout(pad=0.5)
         out = f"{output_stem}.png"
-        fig.savefig(out, bbox_inches="tight", dpi=200, facecolor="white")
+        fig.savefig(out, bbox_inches="tight")
         print(f"Saved: {out}")
         out_pdf = f"{output_stem}.pdf"
-        fig.savefig(out_pdf, bbox_inches="tight", dpi=200, facecolor="white")
+        fig.savefig(out_pdf, bbox_inches="tight")
         print(f"Saved: {out_pdf}")
         plt.close(fig)
 

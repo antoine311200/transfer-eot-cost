@@ -10,11 +10,17 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+
+import paper_theme
 
 # ---------------------------------------------------------------------------
 # Data extraction
@@ -61,26 +67,20 @@ print(f"\nFitted C = {C_fit:.1f}  (delta = 1/N)")
 # ---------------------------------------------------------------------------
 # Style
 # ---------------------------------------------------------------------------
+paper_theme.setup_style()
 matplotlib.rcParams.update({
-    "text.usetex":          False,
-    "mathtext.fontset":     "cm",
-    "font.family":          "serif",
-    "font.size":            12,
-    "axes.labelsize":       13,
-    "axes.titlesize":       12,
-    "legend.fontsize":      11,
-    "xtick.labelsize":      11,
-    "ytick.labelsize":      11,
-    "axes.linewidth":       0.85,
-    "lines.linewidth":      1.8,
-    "grid.linewidth":       0.45,
-    "grid.alpha":           0.30,
-    "figure.dpi":           150,
+    "axes.labelsize":   11,
+    "axes.titlesize":   11,
+    "legend.fontsize":  9,
+    "xtick.labelsize":  9,
+    "ytick.labelsize":  9,
+    "axes.linewidth":   0.85,
+    "lines.linewidth":  1.8,
 })
 
-BLUE   = "#1D4ED8"   # data points
-ORANGE = "#C2410C"   # fit line
-GRAY   = "#6B7280"   # annotations
+BLUE   = paper_theme.BLUE
+ORANGE = paper_theme.PINK
+GRAY   = paper_theme.SLATE
 
 # ---------------------------------------------------------------------------
 # Figure
@@ -161,12 +161,12 @@ ax.yaxis.set_major_formatter(
     mticker.FuncFormatter(lambda y, _: f"${y:.4g}$"))
 ax.tick_params(axis="x", which="minor", bottom=False)
 
-ax.grid(True, which="major", linestyle=":", color="#aaaaaa")
-ax.grid(True, which="minor", linestyle=":", color="#e0e0e0", linewidth=0.3)
+ax.grid(True, which="major", linestyle=":", color=paper_theme.BORDER)
+ax.grid(True, which="minor", linestyle=":", color=paper_theme.BORDER, linewidth=0.3)
+paper_theme.style_axes(ax)
 
 # — legend —
-legend = ax.legend(loc="upper right", framealpha=0.93,
-                   edgecolor="#cccccc", borderpad=0.75)
+legend = ax.legend(loc="upper right", **paper_theme.legend_kw(borderpad=0.75))
 
 fig.tight_layout(pad=0.7)
 
