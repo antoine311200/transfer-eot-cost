@@ -97,3 +97,4 @@ paper/
 *.sty
 *.tex
 *.md
+!README.md

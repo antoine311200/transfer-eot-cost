@@ -152,9 +152,13 @@ class ExperimentSpec:
     #: Used by custom modes (e.g. ``"singlecell"``) to pass mode-specific data
     #: such as cluster centres and cell-type names.
     visualizer_kwargs: dict = field(default_factory=dict)
+    #: When set, overrides output_dir without changing the experiment name.
+    output_dir_override: Optional[str] = None
 
     @property
     def output_dir(self) -> str:
+        if self.output_dir_override is not None:
+            return self.output_dir_override
         return os.path.join(self.output_root, self.name)
 
 

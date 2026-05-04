@@ -55,7 +55,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sel = parser.add_argument_group("experiment selection")
     sel.add_argument(
         "--mode", choices=["2d", "3d", "manifold", "image", "image-v2", "color",
-                           "gushchin", "scalability", "singlecell"],
+                           "gushchin", "scalability", "singlecell", "singlecell-siren",
+                           "singlecell-extra", "singlecell-otcfm"],
         help="Experiment mode.  Required unless --all is given.",
     )
     sel.add_argument(
@@ -82,6 +83,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sel.add_argument(
         "--no-ot-cfm", action="store_true", dest="no_ot_cfm",
         help="Do not use OT-CFM for training the velocity fields between source and new source (resp. target and new target)"
+    )
+    sel.add_argument(
+        "--use-siren", action="store_true", dest="use_siren",
+        help="Replace MLP backbone with SIREN network (3D and singlecell modes).",
     )
     sel.add_argument(
         "--all", action="store_true", dest="run_all",
@@ -159,6 +164,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--checkpoint-coupling", action="store_true", dest="checkpoint_coupling",
         help="Also checkpoint the coupling dataset at each checkpoint iteration (can be large).",
     )
+    train.add_argument(
+        "--seed", type=int, default=None,
+        help="Global random seed for reproducibility in single-experiment runs.",
+    )
 
     # ── Ablation ─────────────────────────────────────────────────────────────
     abl = parser.add_argument_group("ablation study")
@@ -222,6 +231,10 @@ def _build_parser() -> argparse.ArgumentParser:
     out.add_argument(
         "--output", default="results",
         help="Root directory for experiment output (default: 'results').",
+    )
+    out.add_argument(
+        "--iter-subdir", action="store_true", dest="iter_subdir",
+        help="Save each run in a subdirectory iter_N inside the experiment folder.",
     )
 
     return parser
@@ -303,7 +316,10 @@ def main() -> None:
     from dualwcfm.experiments.exp_color         import make_color_experiments
     from dualwcfm.experiments.exp_gushchin      import make_gushchin_experiments
     from dualwcfm.experiments.exp_scalability   import make_scalability_experiments
-    from dualwcfm.experiments.exp_singlecell    import make_singlecell_experiments
+    from dualwcfm.experiments.exp_singlecell    import (
+        make_singlecell_experiments, make_singlecell_siren_experiments,
+        make_singlecell_extra_experiments, make_singlecell_otcfm_baselines,
+    )
     from dualwcfm.experiments.base              import run_experiment
 
     dims = tuple(getattr(args, "dims", [16, 32, 64, 128]))
@@ -311,7 +327,7 @@ def main() -> None:
     # ── Catalogue factory ────────────────────────────────────────────────────
     catalogue_factories = {
         "2d":          make_2d_experiments,
-        "3d":          make_3d_experiments,
+        "3d":          lambda out: make_3d_experiments(out, use_siren=getattr(args, "use_siren", False)),
         "manifold":    make_3d_manifold_experiments,
         "image":       make_image_experiments,
         "image-v2":    make_image_experiments_v2,
@@ -319,6 +335,15 @@ def main() -> None:
         "gushchin":    make_gushchin_experiments,
         "scalability": lambda out: make_scalability_experiments(out, dims=dims),
         "singlecell":  lambda out: make_singlecell_experiments(
+            data_path=getattr(args, "data_path", None), output_root=out
+        ),
+        "singlecell-siren": lambda out: make_singlecell_siren_experiments(
+            data_path=getattr(args, "data_path", None), output_root=out
+        ),
+        "singlecell-extra": lambda out: make_singlecell_extra_experiments(
+            data_path=getattr(args, "data_path", None), output_root=out
+        ),
+        "singlecell-otcfm": lambda out: make_singlecell_otcfm_baselines(
             data_path=getattr(args, "data_path", None), output_root=out
         ),
     }
@@ -376,6 +401,17 @@ def main() -> None:
         return
 
     # ── Single experiment ────────────────────────────────────────────────────
+    _seed = getattr(args, "seed", None)
+    if _seed is not None:
+        import random
+        import numpy as np
+        import torch
+        random.seed(_seed)
+        np.random.seed(_seed)
+        torch.manual_seed(_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(_seed)
+
     for spec in matching:
         _apply_train_overrides(spec, args)
         # spec.method_cfg = _build_method_cfg(args.method, args)
@@ -395,6 +431,8 @@ def _apply_train_overrides(spec, args: argparse.Namespace) -> None:
     """Apply CLI training overrides (iterations, batch_size, checkpointing) to *spec* in place."""
     if args.iterations is not None:
         spec.train_cfg.iterations = args.iterations
+        if getattr(args, "iter_subdir", False):
+            spec.output_dir_override = os.path.join(spec.output_dir, f"iter_{args.iterations}")
     if args.batch_size is not None:
         spec.train_cfg.batch_size = args.batch_size
     if args.checkpoint_every > 0:

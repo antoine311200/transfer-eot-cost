@@ -145,19 +145,31 @@ class MixtureMethod(StandardMethod):
 
                 # --- Flow pairs: standard transport ---
                 if n_flow > 0:
-                    t_next = torch.full(
-                        (n_flow, 1),
-                        (iteration + 1) / trainer.config.iterations,
-                        device=device,
-                    )
-                    x_mu_flow = self._interpolate(
-                        trainer.initial_source, trainer.new_source, trainer,
-                        n_flow, t_next, trainer._sigma, device
-                    )
-                    y_nu_flow = self._interpolate(
-                        trainer.initial_target, trainer.new_target, trainer,
-                        n_flow, t_next, trainer._sigma, device
-                    )
+                    t_val_flow = (iteration + 1) / trainer.config.iterations
+                    if self.config.use_bridge_marginals:
+                        # NEW: evolve initial particles through bridge to time t_{n+1}
+                        n_steps = self.config.bridge_marginal_steps
+                        x0_flow = trainer.initial_source.sample(n_flow).to(device)
+                        y0_flow = trainer.initial_target.sample(n_flow).to(device)
+                        x_evo = trainer.flow_matching.evolve_to_time(x0_flow, mu_model, t_val_flow, n_steps=n_steps, extend=conditional)
+                        y_evo = trainer.flow_matching.evolve_to_time(y0_flow, nu_model, t_val_flow, n_steps=n_steps, extend=conditional)
+                        if conditional:
+                            x_mu_flow = x_evo[:, :x0_flow.shape[1]]
+                            y_nu_flow = y_evo[:, :y0_flow.shape[1]]
+                        else:
+                            x_mu_flow = x_evo
+                            y_nu_flow = y_evo
+                    else:
+                        # OLD: linear interpolation to starting point for flow evolution
+                        t_next = torch.full((n_flow, 1), t_val_flow, device=device)
+                        x_mu_flow = self._interpolate(
+                            trainer.initial_source, trainer.new_source, trainer,
+                            n_flow, t_next, trainer._sigma, device
+                        )
+                        y_nu_flow = self._interpolate(
+                            trainer.initial_target, trainer.new_target, trainer,
+                            n_flow, t_next, trainer._sigma, device
+                        )
                     x_flow, y_flow = self._advance_chunk(
                         trainer, x_mu_flow, y_nu_flow, flow_fwd, flow_bwd, backward,
                     )

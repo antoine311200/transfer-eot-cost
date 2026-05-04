@@ -44,18 +44,22 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR    = os.path.join(_SCRIPT_DIR, "src")
 if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
+sys.path.insert(0, _SCRIPT_DIR)
+
+import paper_theme
+paper_theme.setup_style()
 
 from dualwcfm.mlp import MLP, torch_wrapper
 
 
 # ---------------------------------------------------------------------------
-# Colour scheme
+# Colour scheme — paper palette
 # ---------------------------------------------------------------------------
 
-_COLOR_SRC    = "#4878d0"   # control / source
-_COLOR_TGT    = "#d65f5f"   # true treated / target
-_COLOR_PRED   = "#6acc65"   # model prediction
-_COLOR_TRUE   = "#ffe033"   # true new target overlay (yellow)
+_COLOR_SRC  = paper_theme.TEAL    # control / source
+_COLOR_TGT  = paper_theme.PINK    # true treated / target
+_COLOR_PRED = paper_theme.PURPLE  # model prediction
+_COLOR_TRUE = paper_theme.BLUE    # reference true target overlay
 
 
 # ---------------------------------------------------------------------------
@@ -79,8 +83,15 @@ def apply_pca(X: np.ndarray, components: np.ndarray, mean: np.ndarray) -> np.nda
 # Model loading
 # ---------------------------------------------------------------------------
 
-def _infer_arch(state: dict) -> tuple[int, int]:
-    """Infer (hidden_size, n_layers) from a torch_wrapper(MLP) state dict."""
+def _infer_arch(state: dict) -> tuple[int, int, bool]:
+    """Infer (hidden_size, n_layers, is_siren) from a torch_wrapper state dict."""
+    # SIREN models have keys like "model.net.0.linear.weight" and "model.final.weight"
+    is_siren = any("model.final.weight" in k or ".linear.weight" in k for k in state)
+    if is_siren:
+        hidden = state["model.net.0.linear.weight"].shape[0]
+        n_siren = sum(1 for k in state if k.startswith("model.net.") and k.endswith(".linear.weight"))
+        return hidden, n_siren, True
+    # MLP models: "model.net.0.weight", "model.net.2.weight", ... (every other index)
     linear_idx = []
     for key in state:
         parts = key.split(".")
@@ -88,18 +99,23 @@ def _infer_arch(state: dict) -> tuple[int, int]:
                 parts[1] == "net" and parts[3] == "weight"):
             linear_idx.append(int(parts[2]))
     if not linear_idx:
-        return 256, 4
+        return 256, 4, False
     n_layers = max(linear_idx) // 2
     hidden   = state["model.net.0.weight"].shape[0]
-    return hidden, n_layers
+    return hidden, n_layers, False
 
 
 def load_model(path: str, dim: int, device: torch.device) -> torch.nn.Module:
     state = torch.load(path, map_location=device, weights_only=True)
-    hidden, n_layers = _infer_arch(state)
-    mlp   = MLP(dim=2 * dim, out_dim=2 * dim, w=hidden,
-                n_layers=n_layers, time_varying=True)
-    model = torch_wrapper(mlp).to(device)
+    hidden, n_layers, is_siren = _infer_arch(state)
+    if is_siren:
+        from dualwcfm.models.siren import SirenMLP
+        net   = SirenMLP(dim=2 * dim, out_dim=2 * dim, w=hidden,
+                         n_layers=n_layers, time_varying=True)
+    else:
+        net   = MLP(dim=2 * dim, out_dim=2 * dim, w=hidden,
+                    n_layers=n_layers, time_varying=True)
+    model = torch_wrapper(net).to(device)
     model.load_state_dict(state)
     model.eval()
     return model
@@ -191,14 +207,14 @@ def _draw_panel(
         res  = 220
         xx, yy = np.meshgrid(np.linspace(xmin, xmax, res),
                              np.linspace(ymin, ymax, res))
-        grid   = np.vstack([xx.ravel(), yy.ravel()])
+        grid    = np.vstack([xx.ravel(), yy.ravel()])
         pts_kde = np.vstack([src_2d, tgt_2d])
-        kde    = gaussian_kde(pts_kde.T, bw_method="scott")
-        z      = kde(grid).reshape(res, res)
+        kde     = gaussian_kde(pts_kde.T, bw_method="scott")
+        z       = kde(grid).reshape(res, res)
         if z.max() > 0:
             z /= z.max()
         ax.imshow(z, extent=[xmin, xmax, ymin, ymax], origin="lower",
-                  cmap="viridis", aspect="auto", alpha=0.80, zorder=0)
+                  cmap=paper_theme.CMAP_CELL, aspect="auto", alpha=0.55, zorder=0)
     except Exception:
         pass
 
@@ -209,29 +225,29 @@ def _draw_panel(
         for i in range(0, N, step):
             xs = [snap[i, 0] for snap in trajs_2d if i < len(snap)]
             ys = [snap[i, 1] for snap in trajs_2d if i < len(snap)]
-            ax.plot(xs, ys, color="white", alpha=line_alpha, lw=0.5,
+            ax.plot(xs, ys, color=paper_theme.LBLUE, alpha=line_alpha, lw=0.5,
                     solid_capstyle="round", zorder=1)
 
     # True target overlay
     if true_tgt_2d is not None:
         ax.scatter(true_tgt_2d[:, 0], true_tgt_2d[:, 1],
-                   s=dot_size * 0.8, c=_COLOR_TRUE, alpha=0.55,
-                   linewidths=0.3, edgecolors="#ccaa00",
-                   zorder=2, label=true_tgt_label)
+                   s=dot_size * 0.8, c=_COLOR_TGT, alpha=0.40,
+                   linewidths=0, zorder=2, label=true_tgt_label)
 
+    tgt_c = _COLOR_PRED if "True" not in tgt_label else _COLOR_TGT
     kw = dict(linewidths=0, zorder=3, alpha=dot_alpha, s=dot_size)
     ax.scatter(src_2d[:, 0], src_2d[:, 1], c=_COLOR_SRC,
                label=src_label, marker="o", **kw)
-    ax.scatter(tgt_2d[:, 0], tgt_2d[:, 1], c=_COLOR_PRED if "True" not in tgt_label else _COLOR_TGT,
+    ax.scatter(tgt_2d[:, 0], tgt_2d[:, 1], c=tgt_c,
                label=tgt_label, marker="^", **kw)
 
     ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
-    ax.set_xlabel("PC 1", fontsize=9); ax.set_ylabel("PC 2", fontsize=9)
-    ax.set_title(title, fontsize=12, fontweight="bold", pad=8)
+    ax.set_xlabel("PC 1"); ax.set_ylabel("PC 2")
+    ax.set_title(title, fontsize=10, fontweight="bold", pad=6)
     ax.tick_params(labelsize=7)
     ax.set_aspect("equal")
-    ax.legend(fontsize=7, loc="upper right", framealpha=0.6,
-              facecolor="white", edgecolor="#aaaaaa")
+    ax.legend(loc="upper right", **paper_theme.legend_kw(fontsize=7))
+    paper_theme.style_axes(ax)
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +373,8 @@ def build_figure(
 
     if separate:
         for stem, p in zip(_stems, panels):
-            fig, ax = plt.subplots(figsize=(6, 6), dpi=200)
+            fig, ax = plt.subplots(figsize=(5.5, 5.5))
+            fig.patch.set_facecolor("white")
             _draw_panel(
                 ax, p["src_2d"], p["tgt_2d"], p["trajs"], p["title"],
                 src_label=p["src_label"], tgt_label=p["tgt_label"],
@@ -367,15 +384,15 @@ def build_figure(
             )
             for ext in (".png", ".pdf"):
                 out = f"{output_stem}_{stem}{ext}"
-                fig.savefig(out, bbox_inches="tight", dpi=200)
+                fig.savefig(out, bbox_inches="tight")
                 print(f"Saved: {out}")
             plt.close(fig)
     else:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 6), dpi=200)
-        exp_name = os.path.basename((spec.output_dir or "").rstrip("/\\"))
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
+        fig.patch.set_facecolor("white")
         fig.suptitle(
-            f"Single-Cell Drug Response Transfer ({drug_name}) — DualWCFM",
-            fontsize=13, fontweight="bold", y=1.02,
+            f"Single-cell drug response transfer ({drug_name}) — TACO",
+            color=paper_theme.DARK, fontsize=12, fontweight="bold", y=1.02,
         )
         for ax, p in zip(axes, panels):
             _draw_panel(
@@ -388,7 +405,7 @@ def build_figure(
         plt.tight_layout(pad=0.5)
         for ext in (".png", ".pdf"):
             out = f"{output_stem}{ext}"
-            fig.savefig(out, bbox_inches="tight", dpi=200)
+            fig.savefig(out, bbox_inches="tight")
             print(f"Saved: {out}")
         plt.close(fig)
 
@@ -437,13 +454,15 @@ def build_metrics_figure(exp_dir: str, output_stem: str | None = None) -> None:
             except Exception: pass
 
     _plot(axes[0, 0],
-          [("W2_nu", "#ee854a", "SW₂ target"), ("W2_mu", "#4878d0", "SW₂ source")],
+          [("W2_nu", paper_theme.PINK, "SW₂ target"),
+           ("W2_mu", paper_theme.TEAL, "SW₂ source")],
           "Sliced Wasserstein (marginals)", "SW₂")
     _plot(axes[0, 1],
-          [("mmd_nu", "#6acc65", "MMD target"), ("mmd_mu", "#4878d0", "MMD source")],
+          [("mmd_nu", paper_theme.PURPLE, "MMD target"),
+           ("mmd_mu", paper_theme.TEAL, "MMD source")],
           "MMD (distribution quality)", "MMD", logy=True)
     _plot(axes[1, 0],
-          [("sinkhorn_div", "#d65f5f", "Sinkhorn div")],
+          [("sinkhorn_div", paper_theme.PINK, "Sinkhorn div")],
           "Sinkhorn divergence", logy=True)
 
     ess = _get("weight_ess")

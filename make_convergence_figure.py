@@ -14,31 +14,23 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+import sys
+sys.path.insert(0, os.path.dirname(__file__))
+import paper_theme
+paper_theme.setup_style()
+
 # ── Config ───────────────────────────────────────────────────────────────────
 ENTITY   = "antoine311200"
 PROJECT  = "exp_2d_simple"
 SIGMA    = 0.01
 SIGMA2   = 0.01
-PR       = 1.0           # particle_ratio=1 gives cleanest monotone decrease
+PR       = 1.0
 OUT_DIR  = Path("plots")
 
-CRANE_YELLOW = "#FFD200"
-COLOR_EDGE   = "#8B6D00"
-COLOR_REF    = "#E05000"
-FIGSIZE      = (4.8, 3.2)
-
-plt.rcParams.update({
-    "font.family":       "serif",
-    "font.size":         9,
-    "axes.titlesize":    10,
-    "axes.labelsize":    9,
-    "xtick.labelsize":   8,
-    "ytick.labelsize":   8,
-    "legend.fontsize":   8,
-    "figure.dpi":        150,
-    "axes.spines.top":   False,
-    "axes.spines.right": False,
-})
+COLOR_BAR  = paper_theme.BLUE
+COLOR_EDGE = paper_theme.BLUE_DARK
+COLOR_REF  = paper_theme.PINK
+FIGSIZE    = (5.0, 3.4)
 
 # ── Wandb API helpers ─────────────────────────────────────────────────────────
 def _api_key() -> str:
@@ -123,7 +115,7 @@ def bar_plot(data: dict[int, float], ax: plt.Axes, show_odelta: bool = False) ->
     errs    = np.array([data[n] for n in ns])
     x       = np.arange(len(ns))
 
-    ax.bar(x, errs, color=CRANE_YELLOW, edgecolor=COLOR_EDGE, linewidth=0.8, zorder=3)
+    ax.bar(x, errs, color=COLOR_BAR, edgecolor=COLOR_EDGE, linewidth=0.8, zorder=3)
 
     if show_odelta:
         deltas = np.array([1.0 / n for n in ns])

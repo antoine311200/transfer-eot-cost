@@ -10,6 +10,7 @@ images/scalability/scalability_wandb.png
 
 import json
 import os
+import sys
 import warnings
 
 import matplotlib as mpl
@@ -19,6 +20,9 @@ import numpy as np
 import wandb
 
 warnings.filterwarnings("ignore")
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import paper_theme
 
 # ── 0. Paths ───────────────────────────────────────────────────────────────────
 OUT_DIR = os.path.join(os.path.dirname(__file__), "images", "scalability")
@@ -58,30 +62,24 @@ for d, rid in RUN_IDS.items():
           f"  BW2={finals[d]['bw2']:.3f}  MapErr={finals[d]['map_err']:.3f}")
 
 # ── 2. Style ───────────────────────────────────────────────────────────────────
+paper_theme.setup_style()
 mpl.rcParams.update({
-    "figure.facecolor":  "white",
-    "axes.facecolor":    "white",
-    "savefig.facecolor": "white",
-    "savefig.transparent": False,
-    "font.family":       "sans-serif",
-    "font.size":         11,
-    "axes.titlesize":    12,
-    "axes.labelsize":    11,
-    "legend.fontsize":   9.5,
-    "xtick.labelsize":   9.5,
-    "ytick.labelsize":   9.5,
-    "axes.spines.top":   False,
-    "axes.spines.right": False,
-    "axes.grid":         True,
-    "grid.color":        "#E0E0E0",
-    "grid.linewidth":    0.6,
-    "lines.linewidth":   2.0,
+    "axes.titlesize":  11,
+    "axes.labelsize":  10,
+    "legend.fontsize": 9,
+    "xtick.labelsize": 9,
+    "ytick.labelsize": 9,
+    "axes.grid":       True,
+    "grid.color":      paper_theme.BORDER,
+    "grid.linewidth":  0.5,
+    "lines.linewidth": 1.8,
 })
 
-DIMS   = [8, 16, 32, 64, 128]
-# Yellow→teal palette (5 shades that work on white)
-COLORS = ["#E6A817", "#C8720F", "#7B8B3A", "#2E7D9C", "#1A4E6E"]
-DIM_COLOR = dict(zip(DIMS, COLORS))
+DIMS = [8, 16, 32, 64, 128]
+# Palette: light blue → blue → purple (5 shades)
+_DIM_PALETTE = [paper_theme.LBLUE, "#5090D8", paper_theme.BLUE,
+                "#5A3CB8", paper_theme.PURPLE]
+DIM_COLOR = dict(zip(DIMS, _DIM_PALETTE))
 
 # ── 3. Figure layout ───────────────────────────────────────────────────────────
 # Three panels:
@@ -103,8 +101,9 @@ for d in DIMS:
 ax_conv.set_xlabel("Iteration")
 ax_conv.set_ylabel(r"$W_2(\hat\nu,\,\nu)$")
 ax_conv.set_title("A  Target-marginal quality over training", loc="left", fontweight="bold")
-ax_conv.legend(title="Dimension", framealpha=0.85,
-               ncol=1, loc="upper right", handlelength=1.5)
+ax_conv.legend(title="Dimension", ncol=1, loc="upper right",
+               handlelength=1.5, **paper_theme.legend_kw(framealpha=0.85))
+paper_theme.style_axes(ax_conv)
 ax_conv.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.3f"))
 
 # ── Panel B: final W2_nu vs d ─────────────────────────────────────────────────
@@ -122,14 +121,15 @@ for bar, val in zip(bars, w2_vals):
                f"{val:.3f}", ha="center", va="bottom", fontsize=8.5,
                fontweight="bold")
 
-# Reference line: pretrained W2_nu for d=8 (huge, draw as dashed cap)
-ax_w2.axhline(0.12, ls="--", color="#888888", lw=1.2, label="Pretrained (d=8): 5.4")
+# Reference line
+ax_w2.axhline(0.12, ls="--", color=paper_theme.SLATE, lw=1.2,
+              label="Pretrained (d=8): 5.4")
 
-# Arrow annotation showing flatness
+# Flatness annotation
 ax_w2.annotate("nearly flat!", xy=(4, w2_vals[-1]),
                xytext=(2.5, max(w2_vals) * 1.25),
-               arrowprops=dict(arrowstyle="->", color="#555555", lw=1.1),
-               fontsize=9, color="#444444", ha="center")
+               arrowprops=dict(arrowstyle="->", color=paper_theme.SLATE, lw=1.0),
+               fontsize=9, color=paper_theme.DARK, ha="center")
 
 ax_w2.set_xticks(x)
 ax_w2.set_xticklabels([str(d) for d in DIMS])
@@ -137,17 +137,19 @@ ax_w2.set_xlabel("Dimension $d$")
 ax_w2.set_ylabel(r"Final $W_2(\hat\nu,\,\nu)$")
 ax_w2.set_title("B  Marginal error stays flat with $d$", loc="left", fontweight="bold")
 ax_w2.set_ylim(0, max(w2_vals) * 1.55)
-ax_w2.legend(fontsize=8.5, framealpha=0.8)
+ax_w2.legend(**paper_theme.legend_kw(fontsize=8.5))
+paper_theme.style_axes(ax_w2)
 
 # ── Panel C: BW2 vs d ─────────────────────────────────────────────────────────
-ax_bw.plot(DIMS, bw2_vals, "o-", color="#2E7D9C", lw=2.2,
-           ms=7, markerfacecolor="white", markeredgewidth=2, zorder=3,
-           label="DualWCFM")
+ax_bw.plot(DIMS, bw2_vals, "o-", color=paper_theme.PURPLE, lw=2.0,
+           ms=7, markerfacecolor="white",
+           markeredgewidth=2, markeredgecolor=paper_theme.PURPLE,
+           zorder=3, label="TACO")
 
-# Theoretical reference: BW2 of identity map with unit covariance = sqrt(2d)
+# Theoretical reference: BW2 ≈ sqrt(2d)
 bw2_ref = [np.sqrt(2 * d) for d in DIMS]
-ax_bw.plot(DIMS, bw2_ref, "s--", color="#C0C0C0", lw=1.4,
-           ms=5, markerfacecolor="#C0C0C0", label=r"$\sqrt{2d}$ ref.")
+ax_bw.plot(DIMS, bw2_ref, "s--", color=paper_theme.SLATE, lw=1.4,
+           ms=5, markerfacecolor=paper_theme.SLATE, label=r"$\sqrt{2d}$ ref.")
 
 ax_bw.set_xlabel("Dimension $d$")
 ax_bw.set_ylabel(r"Final $\mathrm{BW}_2$")
@@ -156,13 +158,14 @@ ax_bw.set_title(r"C  Bures–Wasserstein $\mathrm{BW}_2$ vs $d$", loc="left",
 ax_bw.set_xscale("log", base=2)
 ax_bw.set_yscale("log")
 ax_bw.xaxis.set_major_formatter(ticker.FuncFormatter(lambda v, _: str(int(v))))
-ax_bw.legend(framealpha=0.85)
+ax_bw.legend(**paper_theme.legend_kw(framealpha=0.85))
+paper_theme.style_axes(ax_bw)
 
 # ── 4. Shared super-title ─────────────────────────────────────────────────────
+fig.patch.set_facecolor("white")
 fig.suptitle(
-    "DualWCFM Scalability  —  Anti-correlation benchmark  "
-    r"$T(x)=-x$,  $d\in\{8,16,32,64,128\}$",
-    fontsize=12, fontweight="bold", y=0.97,
+    r"TACO scalability  —  anti-correlation benchmark  $T(x)=-x$",
+    color=paper_theme.DARK, fontsize=12, fontweight="bold", y=0.97,
 )
 
 # ── 5. Save ────────────────────────────────────────────────────────────────────

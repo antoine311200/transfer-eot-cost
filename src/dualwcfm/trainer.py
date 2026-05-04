@@ -189,13 +189,16 @@ class Trainer:
                     if is_first or is_last or is_nth:
                         self._save_iteration_checkpoint(iteration, save_checkpoints)
 
-            self.visualizer.display(iteration, self)
-            distances = self.visualizer.analyse(iteration, self)
-            logger.info(
-                f"  SW distances — "
-                f"W1_mu={distances['W1_mu']:.4f}  W2_mu={distances['W2_mu']:.4f}  "
-                f"W1_nu={distances['W1_nu']:.4f}  W2_nu={distances['W2_nu']:.4f}"
-            )
+            try:
+                self.visualizer.display(iteration, self)
+                distances = self.visualizer.analyse(iteration, self)
+                logger.info(
+                    f"  SW distances — "
+                    f"W1_mu={distances['W1_mu']:.4f}  W2_mu={distances['W2_mu']:.4f}  "
+                    f"W1_nu={distances['W1_nu']:.4f}  W2_nu={distances['W2_nu']:.4f}"
+                )
+            except Exception as _viz_err:
+                logger.warning(f"  Visualizer error at iteration {iteration}: {_viz_err}")
 
         # Save final trained models after all iterations.
         if save and self.config.save_final_models:

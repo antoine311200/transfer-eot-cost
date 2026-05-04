@@ -125,3 +125,38 @@ class ConditionalFlowMatching:
                 states.append(xt.clone())
 
         return torch.stack(states, dim=0)  # (num_steps+1, N, D)
+
+    def evolve_to_time(
+        self, x_init: torch.Tensor, model: nn.Module, t_end: float,
+        n_steps: int = 50, extend: bool = False,
+    ) -> torch.Tensor:
+        """Euler-integrate a bridge ODE from t=0 to t=t_end (not t=1).
+
+        Unlike evolve(), dt = t_end / n_steps so integration stops at t_end.
+        When extend=True the frozen-condition convention is used (same as evolve):
+        state is doubled, only first half updated, second half stays frozen.
+        Returns the full doubled tensor when extend=True.
+        """
+        if t_end <= 0.0:
+            if extend:
+                return torch.cat([x_init, x_init], dim=1)
+            return x_init.clone()
+        n_steps = max(1, n_steps)
+        dt = t_end / n_steps
+        device = x_init.device
+        with torch.no_grad():
+            if extend:
+                xt = torch.cat([x_init, x_init], dim=1)
+            else:
+                xt = x_init.clone()
+            for i in range(n_steps):
+                t = torch.full((x_init.shape[0], 1), i * dt, device=device)
+                vt = model(t, xt)
+                if extend:
+                    xt = torch.cat([
+                        xt[:, :x_init.shape[1]] + vt[:, :x_init.shape[1]] * dt,
+                        xt[:, x_init.shape[1]:],
+                    ], dim=1)
+                else:
+                    xt = xt + vt * dt
+        return xt
