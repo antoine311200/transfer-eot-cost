@@ -12,7 +12,7 @@ Run OT-CFM on 2D simple::
 
     python -m dualwcfm.baselines.run --baseline otcfm --mode 2d --level simple
 
-Run the pretrained-only baseline (requires a prior DualWCFM run)::
+Run the pretrained-only baseline (requires a prior TACO run)::
 
     python -m dualwcfm.baselines.run --baseline pretrained --mode 2d --level simple
 
@@ -48,7 +48,7 @@ logger = logging.getLogger("dualwcfm")
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog        = "python -m dualwcfm.baselines.run",
-        description = "DualWCFM baseline runner",
+        description = "TACO baseline runner",
         formatter_class = argparse.RawDescriptionHelpFormatter,
         epilog      = __doc__,
     )
@@ -69,7 +69,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "otcfm=OT-paired CFM from scratch, "
             "cfm=random-paired CFM from scratch, "
-            "pretrained=DualWCFM without adaptation, "
+            "pretrained=TACO without adaptation, "
             "dsb=Diffusion Schrödinger Bridge (IPF), "
             "lightsb=LightSB (dual potentials + interpolant), "
             "metaot=Neural W2 OT via ICNN (MetaOT inner loop), "

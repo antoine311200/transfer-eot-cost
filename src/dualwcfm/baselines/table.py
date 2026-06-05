@@ -4,7 +4,7 @@ Aggregate baseline results into LaTeX tables and wide-format CSVs.
 
 Reads two sources:
   - ``{output_root}/baselines_summary.csv`` — one row per (experiment, baseline)
-  - ``{output_root}/{exp}/metrics.csv``     — final row per DualWCFM experiment
+  - ``{output_root}/{exp}/metrics.csv``     — final row per TACO experiment
 
 Produces a pivot table: rows = experiments, columns = methods, cells = metric value.
 
@@ -48,7 +48,7 @@ def _load_baseline_csv(output_root: str) -> List[Dict]:
 
 
 def _load_main_metrics(output_root: str) -> List[Dict]:
-    """Read the *final* row from each experiment's metrics.csv as a DualWCFM row."""
+    """Read the *final* row from each experiment's metrics.csv as a TACO row."""
     rows = []
     for exp_name in sorted(os.listdir(output_root)):
         metrics_path = os.path.join(output_root, exp_name, "metrics.csv")
@@ -58,7 +58,7 @@ def _load_main_metrics(output_root: str) -> List[Dict]:
             data = list(csv.DictReader(f))
         if data:
             last = data[-1]
-            row = {"experiment": exp_name, "baseline": "DualWCFM"}
+            row = {"experiment": exp_name, "baseline": "TACO"}
             for m in _ALL_METRICS:
                 row[m] = last.get(m, "")
             rows.append(row)
@@ -136,15 +136,15 @@ def build_comparison_table(
     table       = _pivot(all_rows, metric)
     experiments = sorted(table.keys())
 
-    # Column order: DualWCFM first, then alphabetical baselines
+    # Column order: TACO first, then alphabetical baselines
     bl_set: List[str] = []
     for vals in table.values():
         for k in vals:
             if k not in bl_set:
                 bl_set.append(k)
-    if "DualWCFM" in bl_set:
-        bl_set.remove("DualWCFM")
-    all_baselines = ["DualWCFM"] + sorted(bl_set)
+    if "TACO" in bl_set:
+        bl_set.remove("TACO")
+    all_baselines = ["TACO"] + sorted(bl_set)
 
     # ------------------------------------------------------------------
     # LaTeX

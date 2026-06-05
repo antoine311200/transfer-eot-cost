@@ -6,7 +6,7 @@ Package layout
 --------------
 base       -- BaselineSpec, BaselineRunner, evaluate_metrics, append_summary_csv
 otcfm      -- OT-CFM trained from scratch on (mu', nu') — primary quantitative baseline
-pretrained -- DualWCFM pretrained-only (no dual-potential adaptation) — ablation baseline
+pretrained -- TACO pretrained-only (no dual-potential adaptation) — ablation baseline
 dsb        -- Diffusion Schrödinger Bridge via IPF (De Bortoli et al., NeurIPS 2021)
 lightsb    -- LightSB via dual potentials + stochastic interpolant (Korotin et al., ICML 2023)
 metaot     -- Neural W₂-OT map via ICNN potential (inner loop of MetaOT, Amos et al., NeurIPS 2022)

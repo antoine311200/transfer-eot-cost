@@ -1,5 +1,5 @@
 """
-DualWCFM Experiment Runner
+TACO Experiment Runner
 ==========================
 Experiments for generative transfer of entropic optimal transport dynamics.
 
@@ -886,7 +886,7 @@ def _all_experiments(output_root="results"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DualWCFM experiment runner")
+    parser = argparse.ArgumentParser(description="TACO experiment runner")
     parser.add_argument("--mode", choices=["2d", "3d", "image"], default=None)
     parser.add_argument("--level", choices=["simple", "medium", "complex"], default=None)
     parser.add_argument("--perturbed", action="store_true")

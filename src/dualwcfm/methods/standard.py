@@ -169,7 +169,7 @@ class StandardConfig(MethodConfig):
     bridge_marginal_steps: int = 50   # Euler steps used in evolve_to_time
 
 class StandardMethod(Method):
-    """Standard DualWCFM method: interpolation-based marginals, weighted/implicit CFM.
+    """Standard TACO method: interpolation-based marginals, weighted/implicit CFM.
 
     Does not include correction steps or particle mixing.
     """

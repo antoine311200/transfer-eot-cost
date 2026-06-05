@@ -1,4 +1,4 @@
-"""Optional Weights & Biases integration for DualWCFM.
+"""Optional Weights & Biases integration for TACO.
 
 Falls back gracefully to a no-op stub if wandb is not installed or the user
 did not supply a project name.  All callers should therefore be written as::

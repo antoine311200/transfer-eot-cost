@@ -4,7 +4,7 @@ High-dimensional scalability experiments on top of the Gushchin framework.
 
 Objective
 ---------
-Test how DualWCFM scales to high-dimensional settings (d = 16, 32, 64, 128)
+Test how TACO scales to high-dimensional settings (d = 16, 32, 64, 128)
 using a *simple, analytically-known* fixed-cost transport: the anticorrelation
 map  T(x) = −x.
 

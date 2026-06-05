@@ -5,7 +5,7 @@ Single-cell drug response transfer experiment using the Sci-Plex3 dataset
 
 Experimental design
 -------------------
-We apply DualWCFM to the problem of cross-cell-line drug response transfer —
+We apply TACO to the problem of cross-cell-line drug response transfer —
 a canonical challenge in computational biology addressed by CellOT (Bunne et al., NeurIPS 2022).
 
 Reference coupling (source cell line, e.g. A549):

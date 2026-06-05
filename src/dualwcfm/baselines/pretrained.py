@@ -1,15 +1,15 @@
 """dualwcfm.baselines.pretrained
 ================================
-"Pretrained-only" baseline: apply the DualWCFM pretrained forward model
+"Pretrained-only" baseline: apply the TACO pretrained forward model
 to new marginals (mu', nu') *without* running the dual-potential adaptation loop.
 
 This isolates the contribution of the adaptation phase.  If pretrained-only
-already matches DualWCFM quality, adaptation adds no value.  If it fails,
+already matches TACO quality, adaptation adds no value.  If it fails,
 adaptation is essential — providing a clear ablation story for the paper.
 
 How it works
 ------------
-After the DualWCFM pretrain phase the strategy holds:
+After the TACO pretrain phase the strategy holds:
 
   ``initial_forward_model.pth``  — CFM flow trained on the reference coupling pi_0
 
@@ -24,7 +24,7 @@ adaptation starts (``visualization.py:Visualizer.display_pretrained``).
 
 Usage
 -----
-Requires a prior DualWCFM run with ``save_models=True`` (the default) on the
+Requires a prior TACO run with ``save_models=True`` (the default) on the
 same experiment spec.  The weights are read from ``{output_dir}/models/``.
 """
 from __future__ import annotations
@@ -41,19 +41,19 @@ logger = logging.getLogger("dualwcfm")
 
 
 class PretrainedOnlyRunner(BaselineRunner):
-    """Apply a pretrained DualWCFM forward model to new marginals without adaptation.
+    """Apply a pretrained TACO forward model to new marginals without adaptation.
 
     Parameters
     ----------
     spec:
         Baseline specification (source/target distributions, device, …).
     pretrain_dir:
-        Path to the ``models/`` directory produced by a DualWCFM run,
+        Path to the ``models/`` directory produced by a TACO run,
         e.g. ``results/2d_simple/models/``.  Must contain
         ``initial_forward_model.pth``.
     hidden_size:
         Hidden size of the MLP used to reconstruct the model architecture.
-        Must match the value used in the original DualWCFM run.
+        Must match the value used in the original TACO run.
     num_layers:
         Number of hidden layers.  Inferred from the checkpoint when called
         via ``compute_pretrained_results``; otherwise must match training.
@@ -88,7 +88,7 @@ class PretrainedOnlyRunner(BaselineRunner):
         if not os.path.exists(fwd_path):
             raise FileNotFoundError(
                 f"Pretrained weight not found: {fwd_path}\n"
-                f"Run DualWCFM with save_models=True on the same experiment first."
+                f"Run TACO with save_models=True on the same experiment first."
             )
 
         from dualwcfm.config import FeedForwardConfig
