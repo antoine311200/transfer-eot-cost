@@ -568,6 +568,12 @@ class StandardMethod(Method):
         mu_model.eval()
         nu_model.eval()
 
+        # EMOT: martingale dual m_t(X): R^d → R^d adds E_π[(a+b+m·(Y-X))²] term
+        use_mart = getattr(trainer.strategy.config, "use_martingale", False)
+        if use_mart:
+            m_model, m_optimizer = trainer.strategy.get_martingale_dual(device)
+            m_model.train()
+
         use_ema_gauge = batch_size < 512
         ema_a_mean = torch.tensor(0.0, device=device)
         ema_b_mean = torch.tensor(0.0, device=device)
@@ -609,15 +615,13 @@ class StandardMethod(Method):
             a, a_mu = a - a_mean, a_mu - a_mean
             b, b_nu = b - b_mean, b_nu - b_mean
 
-            # Coupling term (with optional change_of_measure)
-            # com = trainer.strategy.change_of_measure
-            # com_opt = trainer.strategy.get_com_optimizer()
-            # if com is not None:
-            #     xy = torch.cat([x.view(x.shape[0], -1), y.view(y.shape[0], -1)], dim=1)
-            #     d = com(xy)
-            #     coupling_term = torch.mean((a + b + d) ** 2)
-            # else:
-            coupling_term = torch.mean((a + b) ** 2)
+            # Coupling term — EMOT adds m_t(X)·(Y-X) third potential
+            if use_mart:
+                m_x = m_model(x)                                       # [B, d]
+                martingale_term = (m_x * (y - x)).sum(dim=1, keepdim=True)  # [B, 1]
+                coupling_term = torch.mean((a + b + martingale_term) ** 2)
+            else:
+                coupling_term = torch.mean((a + b) ** 2)
 
             # Gradient / divergence terms
             grad_a = torch.autograd.grad(a_mu.sum(), x_mu, create_graph=True, retain_graph=True, only_inputs=True)[0]
@@ -695,9 +699,16 @@ class StandardMethod(Method):
             loss += penalty
 
             dual_optimizer.zero_grad()
+            if use_mart:
+                m_optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(list(f_dual.parameters()) + list(g_dual.parameters()), max_norm=1.0)
+            _clip_params = list(f_dual.parameters()) + list(g_dual.parameters())
+            if use_mart:
+                _clip_params += list(m_model.parameters())
+            nn.utils.clip_grad_norm_(_clip_params, max_norm=1.0)
             dual_optimizer.step()
+            if use_mart:
+                m_optimizer.step()
 
             pbar.set_postfix({"Dual Loss": loss.item()})
 

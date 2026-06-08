@@ -65,7 +65,8 @@ class Strategy:
         self.nu_bridge = wrapper(MLP(dim=bridge_dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=True))
         self.f_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, n_layers=num_layers, time_varying=False))
         self.g_dual = wrapper(MLP(dim=dim, out_dim=1, w=hidden_size, n_layers=num_layers, time_varying=False))
-        self.h_dual = MLP(dim=2*dim, out_dim=1, w=hidden_size, n_layers=num_layers, time_varying=False)
+        # Martingale dual m_t: R^d → R^d (third potential for EMOT constraint)
+        self.m_dual = MLP(dim=dim, out_dim=dim, w=hidden_size, n_layers=num_layers, time_varying=False)
         self.forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
         self.previous_forward_model = wrapper(MLP(dim=2 * dim, out_dim=2 * dim, w=hidden_size, n_layers=num_layers, time_varying=True))
 
@@ -87,7 +88,7 @@ class Strategy:
     def _model_attrs(self):
         """Return names of all model attributes."""
         return [
-            "mu_bridge", "nu_bridge", "f_dual", "g_dual", "h_dual",
+            "mu_bridge", "nu_bridge", "f_dual", "g_dual", "m_dual",
             "forward_model", "previous_forward_model",
             "initial_mu_bridge", "initial_nu_bridge", "initial_forward_model",
         ]
@@ -103,19 +104,22 @@ class Strategy:
         self.mu_optimizer = optim.Adam(self.mu_bridge.parameters(), lr=config.mu_learning_rate, weight_decay=config.dual_l2_reg)
         self.nu_optimizer = optim.Adam(self.nu_bridge.parameters(), lr=config.nu_learning_rate, weight_decay=config.dual_l2_reg)
         self.dual_optimizer = optim.Adam(dual_params, lr=config.dual_learning_rate, weight_decay=config.dual_l2_reg)
-        self.dual_mismatch_optimizer = optim.Adam(self.h_dual.parameters(), lr=config.dual_learning_rate)
+        self.martingale_optimizer = optim.Adam(self.m_dual.parameters(), lr=config.dual_learning_rate)
         self.forward_optimizer = optim.Adam(self.forward_model.parameters(), lr=config.flow_learning_rate, weight_decay=config.dual_l2_reg)
 
     def log_weight(self, x: torch.Tensor, y: torch.Tensor, n_iter: int) -> torch.Tensor:
-        """Compute log-weight (f(x) + g(y) [+ com(x,y)]) / n_iter."""
+        """Compute log-weight (f(x) + g(y) [+ m(x)·(y-x)] [+ com(x,y)]) / n_iter."""
         f, g, _ = self.get_duals(x.device)
         a, b = f(x), g(y)
+        log_w = a + b
+        if getattr(self.config, "use_martingale", False):
+            m, _ = self.get_martingale_dual(x.device)
+            log_w = log_w + (m(x) * (y - x)).sum(dim=1, keepdim=True)
         if self.change_of_measure is not None:
             xy = torch.cat([x.view(x.shape[0], -1), y.view(y.shape[0], -1)], dim=1)
             d = self.change_of_measure(xy)
-        else:
-            d = 0.0
-        return (a + b + d) / n_iter
+            log_w = log_w + d
+        return log_w / n_iter
 
     def weight(self, x: torch.Tensor, y: torch.Tensor, n_iter: int) -> torch.Tensor:
         """Compute importance weight exp(log_weight(x, y, n_iter))."""
@@ -128,9 +132,10 @@ class Strategy:
         self.to_device(device)
         return self.f_dual, self.g_dual, self.dual_optimizer
 
-    def get_dual_mismatch(self, device):
+    def get_martingale_dual(self, device):
+        """Return (m_dual, martingale_optimizer) for the EMOT martingale constraint."""
         self.to_device(device)
-        return self.h_dual, self.dual_mismatch_optimizer
+        return self.m_dual, self.martingale_optimizer
 
     def get_bridges(self, device):
         self.to_device(device)
@@ -222,7 +227,7 @@ class Strategy:
         torch.save(self.nu_bridge.state_dict(),  f"{save_dir}/nu_bridge.pth")
         torch.save(self.f_dual.state_dict(),     f"{save_dir}/f_dual.pth")
         torch.save(self.g_dual.state_dict(),     f"{save_dir}/g_dual.pth")
-        torch.save(self.h_dual.state_dict(),     f"{save_dir}/h_dual.pth")
+        torch.save(self.m_dual.state_dict(),     f"{save_dir}/m_dual.pth")
         logger.info("Final trained models saved -> %s", save_dir)
 
 
@@ -302,7 +307,7 @@ class BidirectionalSirenStrategy(BidirectionalStrategy):
         self.nu_bridge              = wrapper(mk(bridge_dim, dim,     hidden_size, num_layers, time_varying=True))
         self.f_dual                 = wrapper(mk(dim,        1,       hidden_size, num_layers, time_varying=False))
         self.g_dual                 = wrapper(mk(dim,        1,       hidden_size, num_layers, time_varying=False))
-        self.h_dual                 =         mk(2 * dim,   1,       hidden_size, num_layers, time_varying=False)
+        self.m_dual                 =         mk(dim,        dim,     hidden_size, num_layers, time_varying=False)
         self.forward_model          = wrapper(mk(2 * dim,   2 * dim, hidden_size, num_layers, time_varying=True))
         self.previous_forward_model = wrapper(mk(2 * dim,   2 * dim, hidden_size, num_layers, time_varying=True))
         self.backward_model         = wrapper(mk(2 * dim,   2 * dim, hidden_size, num_layers, time_varying=True))
