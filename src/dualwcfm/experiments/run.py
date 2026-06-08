@@ -1,6 +1,6 @@
 """dualwcfm.experiments.run
 ===========================
-Command-line interface for running DualWCFM experiments and ablation studies.
+Command-line interface for running TACO experiments and ablation studies.
 
 Usage examples
 --------------
@@ -46,7 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog        = "python -m dualwcfm.experiments.run",
-        description = "DualWCFM experiment runner",
+        description = "TACO experiment runner",
         formatter_class = argparse.RawDescriptionHelpFormatter,
         epilog      = __doc__,
     )
