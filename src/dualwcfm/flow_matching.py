@@ -5,6 +5,36 @@ from dualwcfm.utils import is_image_tensor
 
 
 class ConditionalFlowMatching:
+    """Interpolants, regression targets and ODE integration for the coupling flows.
+
+    ``source_std`` controls the *source* of the conditional coupling flow.
+
+    * ``source_std == 0`` (default, original behaviour): the state starts at the
+      conditioning point itself, i.e. the conditional source is a Dirac mass at
+      ``x0``.  Integrating a deterministic ODE from a Dirac mass returns a single
+      point, so the generated coupling is always the graph of a map
+      ``y = G(x)``.  Importance weights ``exp(delta * (a(x) + b(y)))`` are then
+      constant for each condition ``x0`` and weighted flow matching cannot tilt
+      the conditional law: the tilting step is a no-op.
+    * ``source_std > 0``: the state starts at ``x0 + source_std * xi`` with
+      ``xi ~ N(0, I)`` while the model is still conditioned on ``x0``.  The
+      conditional flow then transports a non-degenerate source onto the
+      conditional law ``pi(dy | x0)``, so diffuse couplings (entropic OT plans)
+      can be represented and weighted re-training implements the kernel tilt
+      ``pi(dy | x) -> exp(delta * b(y)) pi(dy | x) / Z(x)``.
+
+    The value is expressed in the *normalised* coordinates used by the trainer;
+    ``Trainer`` sets it from ``method.config.source_std / scale``.
+    """
+
+    def __init__(self, source_std: float = 0.0):
+        self.source_std = source_std
+
+    def source(self, x0: torch.Tensor) -> torch.Tensor:
+        """Sample the starting state of the conditional flow given the condition ``x0``."""
+        if self.source_std > 0.0:
+            return x0 + self.source_std * torch.randn_like(x0)
+        return x0
 
     def random_time(self, batch_size, device, eps=1e-3):
         s = torch.rand(batch_size, 1, device=device)
@@ -54,7 +84,7 @@ class ConditionalFlowMatching:
 
     def evolve(
         self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_index: int = 0, start_time: float = 0.0, verbose: bool = False,
-        condition: torch.Tensor = None,
+        condition: torch.Tensor = None, noise_source: bool = True,
     ) -> torch.Tensor:
         """Evolve the points x_init over time t using Euler integration.
 
@@ -63,13 +93,19 @@ class ConditionalFlowMatching:
         When *condition* is provided the model is called as model(t, xt, condition)
         with the condition tensor held fixed throughout integration (e.g. the t=0
         starting point for a conditional bridge model).
+
+        With ``extend=True`` (coupling flows) the evolved state starts at
+        ``self.source(x_init)`` and the second half holds the condition
+        ``x_init``.  Pass ``noise_source=False`` for marginal bridges, which
+        must always start at ``x_init``.
         """
         device = x_init.device
         dt = 1.0 / num_steps
 
         with torch.no_grad():
             if extend:
-                xt = torch.cat([x_init, x_init], dim=1)
+                start = self.source(x_init) if noise_source else x_init
+                xt = torch.cat([start, x_init], dim=1)
             else:
                 xt = x_init.clone()
 
@@ -91,7 +127,7 @@ class ConditionalFlowMatching:
 
     def evolve_trajectory(
         self, x_init: torch.Tensor, model: nn.Module, num_steps: int = 100, sigma: float = 0.0, extend: bool = True, start_index: int = 0, start_time: float = 0.0,
-        condition: torch.Tensor = None,
+        condition: torch.Tensor = None, noise_source: bool = True,
     ) -> torch.Tensor:
         """Like evolve, but returns all intermediate states as (num_steps+1, N, D).
 
@@ -106,7 +142,8 @@ class ConditionalFlowMatching:
 
         with torch.no_grad():
             if extend:
-                xt = torch.cat([x_init, x_init], dim=1)
+                start = self.source(x_init) if noise_source else x_init
+                xt = torch.cat([start, x_init], dim=1)
             else:
                 xt = x_init.clone()
 

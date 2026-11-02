@@ -168,6 +168,24 @@ class StandardConfig(MethodConfig):
     use_bridge_marginals: bool = False
     bridge_marginal_steps: int = 50   # Euler steps used in evolve_to_time
 
+    # Source of the conditional coupling flow (original coordinates, divided by
+    # the normalisation scale in Trainer).  0.0 = Dirac source at the condition
+    # (original behaviour): generated couplings are graphs of maps and the
+    # tilt is inert.  > 0: state starts at x0 + source_std * N(0, I), which is
+    # required to represent diffuse (entropic) couplings.
+    source_std: float = 0.0
+
+    # Gradient penalty scaling.  The coupling term E[(a+b)^2] scales like
+    # Var(x) * |grad a|^2, so an absolute penalty lip_reg * E|grad a|^2 dominates
+    # it by a factor lip_reg / Var(x) (~1e4 for 2D experiments after scaling)
+    # and shrinks the dual potentials by the same factor.  With
+    # lip_reg_relative=True the penalty is multiplied by the (detached) batch
+    # variance of the coupling samples, making lip_reg a relative strength.
+    lip_reg_relative: bool = False
+
+    # Ablation switch: re-train the coupling flow without importance weights.
+    disable_tilt: bool = False
+
 class StandardMethod(Method):
     """Standard DualWCFM method: interpolation-based marginals, weighted/implicit CFM.
 
@@ -351,8 +369,8 @@ class StandardMethod(Method):
                         #     y1 = self._evolve_bridge_conditional(y0, previous_nu_model, trainer.config.advance_steps, device)
                         # else:
                         with torch.no_grad():
-                            x1 = trainer.flow_matching.evolve(x0, previous_mu_model, num_steps=trainer.config.advance_steps, extend=conditional)
-                            y1 = trainer.flow_matching.evolve(y0, previous_nu_model, num_steps=trainer.config.advance_steps, extend=conditional)
+                            x1 = trainer.flow_matching.evolve(x0, previous_mu_model, num_steps=trainer.config.advance_steps, extend=conditional, noise_source=False)
+                            y1 = trainer.flow_matching.evolve(y0, previous_nu_model, num_steps=trainer.config.advance_steps, extend=conditional, noise_source=False)
                             # evolve() with extend=True returns [N, 2*dim]; extract state half.
                             if conditional:
                                 x1 = x1[:, :x0.shape[1]]
@@ -480,7 +498,9 @@ class StandardMethod(Method):
                 x0, x1 = x1, x0
 
             s = trainer.flow_matching.random_time(batch_size, device)
-            x_s = trainer.flow_matching.interpolate(x0, x1, s, trainer._sigma2)
+            # x0 is the condition; the state starts at z (noise source if enabled).
+            z = trainer.flow_matching.source(x0)
+            x_s = trainer.flow_matching.interpolate(z, x1, s, trainer._sigma2)
 
             optimizer.zero_grad()
             u_s = model(s, x_s, x0)
@@ -488,7 +508,7 @@ class StandardMethod(Method):
             # the (1-2t)/(2t(1-t))*sigma*noise correction term has std ~sigma/(2*sqrt(eps))
             # near t=0, which can equal or exceed the drift x1-x0 on normalized data.
             # The score correction is only meaningful for the main SDE-based CFM training.
-            u_s_true = trainer.flow_matching.vector_field(x_s, s, x0, x1, noisy=False)
+            u_s_true = trainer.flow_matching.vector_field(x_s, s, z, x1, noisy=False)
             loss = loss_fn(u_s, u_s_true)
             loss.backward()
             optimizer.step()
@@ -568,6 +588,12 @@ class StandardMethod(Method):
         mu_model.eval()
         nu_model.eval()
 
+        # EMOT: martingale dual m_t(X): R^d → R^d adds E_π[(a+b+m·(Y-X))²] term
+        use_mart = getattr(trainer.strategy.config, "use_martingale", False)
+        if use_mart:
+            m_model, m_optimizer = trainer.strategy.get_martingale_dual(device)
+            m_model.train()
+
         use_ema_gauge = batch_size < 512
         ema_a_mean = torch.tensor(0.0, device=device)
         ema_b_mean = torch.tensor(0.0, device=device)
@@ -609,15 +635,13 @@ class StandardMethod(Method):
             a, a_mu = a - a_mean, a_mu - a_mean
             b, b_nu = b - b_mean, b_nu - b_mean
 
-            # Coupling term (with optional change_of_measure)
-            # com = trainer.strategy.change_of_measure
-            # com_opt = trainer.strategy.get_com_optimizer()
-            # if com is not None:
-            #     xy = torch.cat([x.view(x.shape[0], -1), y.view(y.shape[0], -1)], dim=1)
-            #     d = com(xy)
-            #     coupling_term = torch.mean((a + b + d) ** 2)
-            # else:
-            coupling_term = torch.mean((a + b) ** 2)
+            # Coupling term — EMOT adds m_t(X)·(Y-X) third potential
+            if use_mart:
+                m_x = m_model(x)                                       # [B, d]
+                martingale_term = (m_x * (y - x)).sum(dim=1, keepdim=True)  # [B, 1]
+                coupling_term = torch.mean((a + b + martingale_term) ** 2)
+            else:
+                coupling_term = torch.mean((a + b) ** 2)
 
             # Gradient / divergence terms
             grad_a = torch.autograd.grad(a_mu.sum(), x_mu, create_graph=True, retain_graph=True, only_inputs=True)[0]
@@ -686,6 +710,11 @@ class StandardMethod(Method):
                 # 4. Final Penalty (Squared Norm centered at 0)
                 gp_f = grad_a_hat.view(batch_size, -1).pow(2).sum(dim=1).mean()
                 gp_g = grad_b_hat.view(batch_size, -1).pow(2).sum(dim=1).mean()
+                if self.config.lip_reg_relative:
+                    # Put the penalty on the same scale as the coupling term
+                    # E[(a+b)^2] ~ Var(x) |grad a|^2 (per-coordinate variance).
+                    gp_f = gp_f * x.detach().view(batch_size, -1).var(dim=0).mean()
+                    gp_g = gp_g * y.detach().view(batch_size, -1).var(dim=0).mean()
 
                 grad_energy = gp_f + gp_g
 
@@ -695,9 +724,16 @@ class StandardMethod(Method):
             loss += penalty
 
             dual_optimizer.zero_grad()
+            if use_mart:
+                m_optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(list(f_dual.parameters()) + list(g_dual.parameters()), max_norm=1.0)
+            _clip_params = list(f_dual.parameters()) + list(g_dual.parameters())
+            if use_mart:
+                _clip_params += list(m_model.parameters())
+            nn.utils.clip_grad_norm_(_clip_params, max_norm=1.0)
             dual_optimizer.step()
+            if use_mart:
+                m_optimizer.step()
 
             pbar.set_postfix({"Dual Loss": loss.item()})
 

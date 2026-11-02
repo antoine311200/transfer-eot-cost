@@ -70,7 +70,6 @@ data/
 *.npy
 *.pkl
 
-experiments/
 !src/dualwcfm/experiments/
 .claude
 *.gif

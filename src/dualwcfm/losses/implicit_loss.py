@@ -4,7 +4,7 @@ import torch.optim as optim
 
 from dualwcfm.strategy import Strategy
 from dualwcfm.flow_matching import ConditionalFlowMatching
-from dualwcfm.losses.base import FlowLoss, _expand_weight
+from dualwcfm.losses.base import FlowLoss, _expand_weight, _training_log_weight
 
 class ImplicitFlowLoss(FlowLoss):
     def execute(
@@ -24,19 +24,21 @@ class ImplicitFlowLoss(FlowLoss):
 
         with torch.no_grad():
             # Compute log-weight before the backward swap
-            log_w = strategy.log_weight(x0, x1, n_iter)
+            log_w = _training_log_weight(strategy, x0, x1, n_iter)
             weight = _expand_weight(torch.exp(log_w), x0)
 
         if backward and step % 2 != 0:
             x0, x1 = x1, x0
 
+        # x0 is the condition; the flow state starts at z (noise source if enabled).
+        z = flow_matching.source(x0)
         batch_size = x0.shape[0]
         s = flow_matching.random_time(batch_size, device)
-        xs = flow_matching.interpolate(x0, x1, s, sigma)
+        xs = flow_matching.interpolate(z, x1, s, sigma)
 
         with torch.no_grad():
             b_ta = previous_model(s, xs, x0)
-            u_t = flow_matching.vector_field(xs, s, x0, x1, noisy=True)
+            u_t = flow_matching.vector_field(xs, s, z, x1, noisy=True)
 
         # Single forward pass -- use detach() for the target instead of running model twice.
         # Fixed-point analysis with factor (w - 1):

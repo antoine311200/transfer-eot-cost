@@ -75,6 +75,11 @@ class FeedForwardConfig(ModelConfig):
     siren_omega_0: float = 30.0      # first-layer angular frequency
     siren_hidden_omega: float = 30.0 # hidden-layer angular frequency
 
+    # Entropic Martingale OT: add a third dual m_t(X): R^d → R^d encoding the
+    # constraint E_π[Y - X | X=x] = 0.  Extends the energy functional from J(a,b)
+    # to J^M(a,b,m) = E_π[|a(X)+b(Y)+m(X)·(Y-X)|²] - 2E_µ[∇a·u_t] - 2E_ν[∇b·v_t].
+    use_martingale: bool = False
+
     @property
     def is_image_model(self) -> bool:
         return self.image_shape is not None

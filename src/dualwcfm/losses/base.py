@@ -14,6 +14,19 @@ def _expand_weight(weight: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return weight
 
 
+def _training_log_weight(strategy: Strategy, x0: torch.Tensor, x1: torch.Tensor, n_iter: int) -> torch.Tensor:
+    """Log importance weight used to re-train the coupling flow.
+
+    Returns zeros when ``strategy.disable_tilt`` is set: the flow is then
+    re-trained on its own samples without tilting, which isolates the
+    contribution of the tilt in ablations.
+    """
+    log_w = strategy.log_weight(x0, x1, n_iter)
+    if getattr(strategy, "disable_tilt", False):
+        return torch.zeros_like(log_w)
+    return log_w
+
+
 class FlowLoss:
     def execute(
         self,

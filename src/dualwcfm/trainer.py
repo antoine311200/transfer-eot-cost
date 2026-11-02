@@ -78,6 +78,11 @@ class Trainer:
         self.strategy = strategy
         self.flow_matching = flow_matching
 
+        # Noise source of the coupling flow, in normalised coordinates.
+        self.flow_matching.source_std = getattr(method.config, "source_std", 0.0) / self.scale
+        # Ablation: re-train the coupling flow without importance weights.
+        self.strategy.disable_tilt = getattr(method.config, "disable_tilt", False)
+
         # Fixed-size coupling and marginal distributions
         self._init_distributions(self.initial_coupling)
 
