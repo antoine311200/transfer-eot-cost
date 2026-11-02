@@ -219,3 +219,30 @@ python -m dualwcfm.experiments.run \
     --ablation-name medium_full_ablation \
     --output paper_results
 ```
+
+---
+
+## Entropic Gaussian transfer (tilting diagnostics)
+
+```bash
+PYTHONPATH=src python -m dualwcfm.experiments.exp_gaussian_eot --variants all --scale 2.0
+```
+
+The reference coupling is a non-degenerate joint Gaussian, i.e. a genuine entropic OT plan
+(bilinear latent cost). For new isotropic Gaussian marginals the transferred plan is known in
+closed form, and every tilt preserves the cross block `q` of the precision matrix. Scaling the
+new marginals changes the target correlation (`rho*`), whereas pairs transported along the OT
+bridges keep the reference correlation, so this experiment separates tilting from particle
+transport. Per-iteration statistics are written to `results/gaussian_eot/<variant>.csv`:
+`q_ratio` (latent-cost content of the current coupling, 1 = exact), `rho_hat` (empirical
+correlation), `rho_own` (EOT correlation for the coupling's own marginals) and `rho_path`
+(exact plan on the marginal path).
+
+### New method options (all opt-in; defaults reproduce previous behaviour)
+
+| Option | Default | Effect |
+|---|---|---|
+| `source_std` | `0.0` | Std of the noise source of the coupling flow (original units). With `0.0` the conditional flow starts at the condition itself (Dirac source): generated couplings are graphs of maps and weighted re-training cannot tilt them. Use `> 0` for entropic couplings. |
+| `lip_reg_relative` | `False` | Multiply the dual gradient penalty by the batch variance of the coupling samples. An absolute penalty `lip_reg * E|grad a|^2` dominates the coupling term `E[(a+b)^2] ~ Var(x)|grad a|^2` by `lip_reg / Var(x)` (about `1e4` for the 2D configs with `lip_reg=1`, scale 50) and shrinks the importance weights accordingly. |
+| `disable_tilt` | `False` | Re-train the coupling flow without importance weights (ablation of the tilt). |
+| `use_bridge_marginals` | `False` | (existing) Sample marginals by integrating the OT bridges, consistently with the bridge velocities used in the dual energy. With `False`, marginal samples come from independent linear interpolation while the velocities come from OT-paired bridges. |

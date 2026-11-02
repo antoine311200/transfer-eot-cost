@@ -4,7 +4,7 @@ import torch.optim as optim
 
 from dualwcfm.strategy import Strategy
 from dualwcfm.flow_matching import ConditionalFlowMatching
-from dualwcfm.losses.base import FlowLoss, _expand_weight
+from dualwcfm.losses.base import FlowLoss, _expand_weight, _training_log_weight
 
 
 class ExplicitFlowLoss(FlowLoss):
@@ -30,21 +30,23 @@ class ExplicitFlowLoss(FlowLoss):
             # log_w < 0 (w < 1) get a negative factor that pushes the model
             # *away* from u_t and particles with log_w = 0 receive zero
             # correction (no learning at all).
-            log_w = strategy.log_weight(x0, x1, n_iter)
+            log_w = _training_log_weight(strategy, x0, x1, n_iter)
             h_r = _expand_weight(1.0 + log_w, x0)
 
         if backward and step % 2 != 0:
             x0, x1 = x1, x0
 
+        # x0 is the condition; the flow state starts at z (noise source if enabled).
+        z = flow_matching.source(x0)
         batch_size = x0.shape[0]
         s = flow_matching.random_time(batch_size, device)
-        xs = flow_matching.interpolate(x0, x1, s, sigma)
+        xs = flow_matching.interpolate(z, x1, s, sigma)
 
         with torch.no_grad():
             # b_ta: velocity field of the current model before update [cite: 361]
             b_ta = previous_model(s, xs, x0)
             # u_t: velocity of the interpolant (I_dot) [cite: 361, 1580]
-            u_t = flow_matching.vector_field(xs, s, x0, x1, noisy=True)
+            u_t = flow_matching.vector_field(xs, s, z, x1, noisy=True)
 
             # ETM Target calculation:
             # target = b_ta + (h * r) * (u_t - b_ta)
